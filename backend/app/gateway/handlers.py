@@ -1,0 +1,303 @@
+"""Что шлюз умеет делать по просьбе API и что он делает с полученным из Telegram.
+
+Здесь сходятся две стороны: команды сверху (`command_bus`) и события снизу
+(провайдер). Обе кончаются записью в PostgreSQL — Redis используется только
+как провод, ничего важного в нём не задерживается.
+
+Отдельное правило про секреты: строка сессии, полученная при входе, **не уходит
+обратно в API**. Шлюз шифрует её и кладёт в базу сам, а наверх отдаёт только имя
+и идентификатор аккаунта. Так полный доступ к чужому Telegram не путешествует
+по Redis и не оседает в логах.
+"""
+
+import asyncio
+import logging
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+from sqlalchemy import select
+
+from app.core import crypto
+from app.core.db import SessionLocal
+from app.models import AccountStatus, ActorKind, TelegramAccount
+from app.realtime.events import emit_to_account
+from app.services import inbound_service, settings_service
+from app.services.audit import log_event
+
+log = logging.getLogger("astra.gateway.commands")
+
+# Сколько диалогов подтягиваем за один заход синхронизации истории.
+HISTORY_BATCH_COMMIT = 200
+
+
+async def _account(db, account_id: int) -> TelegramAccount:
+    account = await db.get(TelegramAccount, account_id)
+    if account is None or account.deleted_at is not None:
+        raise ValueError("Аккаунт не найден")
+    return account
+
+
+# ------------------------------------------------------------------- приём
+
+
+async def write_inbound(account_id: int, event: inbound_service.InboundMessage) -> None:
+    """Сообщение из Telegram → база. Вызывается провайдером на каждое событие."""
+    async with SessionLocal() as db:
+        try:
+            account = await _account(db, account_id)
+            await inbound_service.ingest(db, account, event)
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            log.exception("Не записал входящее сообщение аккаунта %s", account_id)
+
+
+async def write_read_receipt(account_id: int, chat_id: int, max_id: int) -> None:
+    async with SessionLocal() as db:
+        try:
+            account = await _account(db, account_id)
+            changed = await inbound_service.mark_outgoing_read(db, account, chat_id, max_id)
+            if changed:
+                await db.commit()
+        except Exception:
+            await db.rollback()
+            log.exception("Не отметил прочтение в аккаунте %s", account_id)
+
+
+async def write_status(account_id: int, status: str, reason: str | None) -> None:
+    """Сессия отвалилась — состояние аккаунта должно измениться в интерфейсе сразу,
+    а не тогда, когда менеджер не сможет отправить сообщение."""
+    async with SessionLocal() as db:
+        try:
+            account = await _account(db, account_id)
+            account.status = AccountStatus(status)
+            account.status_reason = reason
+            await log_event(
+                db,
+                action="account.status_changed",
+                entity_type="account",
+                entity_id=account.id,
+                actor_kind=ActorKind.GATEWAY,
+                after={"status": status, "reason": reason},
+            )
+            await db.commit()
+            await emit_to_account(
+                db,
+                account.id,
+                "account.status",
+                {"account_id": account.id, "status": status, "reason": reason},
+            )
+        except Exception:
+            await db.rollback()
+            log.exception("Не сохранил состояние аккаунта %s", account_id)
+
+
+# ----------------------------------------------------------------- команды
+
+
+async def handle(account_id: int, command: str, args: dict[str, Any]) -> dict[str, Any]:
+    """Единая точка разбора команд. Ошибка возвращается наверх текстом и попадает
+    руководителю на экран — поэтому тексты человеческие."""
+    from app.gateway.provider import get_provider
+
+    provider = get_provider()
+    async with SessionLocal() as db:
+        account = await _account(db, account_id)
+
+        if command == "send_code":
+            result = await provider.send_code(account)
+            return {"phone_code_hash": result.phone_code_hash, "sent_to": result.sent_to}
+
+        if command == "confirm_code":
+            result = await provider.confirm_code(
+                account, args.get("code", ""), args.get("phone_code_hash", ""), args.get("password")
+            )
+            if result.needs_password:
+                return {"needs_password": True}
+            # Секрет дальше шлюза не идёт: шифруем и сохраняем здесь же.
+            if result.session_string:
+                account.session_enc = crypto.encrypt(result.session_string)
+            account.tg_user_id = result.tg_user_id
+            account.tg_username = result.tg_username
+            account.status = AccountStatus.CONNECTED
+            account.status_reason = None
+            account.last_activity_at = datetime.now(UTC)
+            await db.commit()
+            return {
+                "needs_password": False,
+                "tg_user_id": result.tg_user_id,
+                "tg_username": result.tg_username,
+            }
+
+        if command == "mark_read":
+            await provider.mark_read(account, int(args["chat_id"]), int(args["max_id"]))
+            return {"ok": True}
+
+        if command == "sync_history":
+            since = await _history_since(db, args.get("since"))
+            task = asyncio.create_task(_sync_history(account_id, since))
+            _tasks.add(task)
+            task.add_done_callback(_tasks.discard)
+            return {"started": True, "since": since.isoformat()}
+
+        if command == "disconnect":
+            await provider.stop(account)
+            return {"ok": True}
+
+        if command == "logout":
+            from app.gateway import mtproto_provider
+
+            if isinstance(provider, mtproto_provider.MTProtoProvider):
+                await mtproto_provider.logout(provider, account)
+            else:
+                await provider.stop(account)
+            account.session_enc = None
+            account.status = AccountStatus.PENDING
+            account.status_reason = "Сессия отозвана"
+            await db.commit()
+            return {"ok": True}
+
+        if command == "demo_incoming":
+            # Только демо-режим: вбрасывает событие так, будто оно пришло из
+            # Telegram. Нужно, чтобы весь путь входящего сообщения — команда,
+            # шлюз, приёмник, база, события в интерфейс — проверялся до того,
+            # как появится живой аккаунт. В боевом режиме команда недоступна.
+            from app.core.config import settings
+
+            if not settings.demo_mode:
+                raise ValueError("Команда доступна только в демо-режиме")
+            event = inbound_service.InboundMessage(
+                peer=inbound_service.PeerData(
+                    tg_user_id=int(args["tg_user_id"]),
+                    access_hash=args.get("access_hash"),
+                    username=args.get("username"),
+                    first_name=args.get("first_name"),
+                    last_name=args.get("last_name"),
+                ),
+                tg_message_id=int(args["tg_message_id"]),
+                date=(
+                    datetime.fromisoformat(args["date"])
+                    if args.get("date")
+                    else datetime.now(UTC)
+                ),
+                text=args.get("text"),
+                outgoing=bool(args.get("outgoing")),
+                random_id=args.get("random_id"),
+                live=bool(args.get("live", True)),
+            )
+            await write_inbound(account_id, event)
+            return {"delivered": True}
+
+        raise ValueError(f"Шлюз не знает команду «{command}»")
+
+
+_tasks: set[asyncio.Task[None]] = set()
+
+
+async def _history_since(db, raw: str | None) -> datetime:
+    """С какого момента тянуть переписку.
+
+    Настройка задаёт дату («с 1 января 2026»), а не срок в днях: срок уезжал бы
+    каждый день и через год начал бы терять историю (см. DEFAULT_SETTINGS).
+    """
+    if raw:
+        return datetime.fromisoformat(raw)
+    value = await settings_service.get_value(db, "history_sync_from")
+    if value:
+        return datetime.fromisoformat(f"{value}T00:00:00+00:00")
+    days = int(await settings_service.get_value(db, "history_sync_days") or 365)
+    return datetime.now(UTC) - timedelta(days=days)
+
+
+async def _sync_history(account_id: int, since: datetime) -> None:
+    """Подтяжка переписки. Идёт фоном и сообщает о ходе событиями: на большом
+    аккаунте это минуты, и держать на это время открытый запрос нельзя."""
+    from app.gateway.provider import get_provider
+
+    provider = get_provider()
+    written = 0
+    async with SessionLocal() as db:
+        account = await _account(db, account_id)
+        await emit_to_account(
+            db, account_id, "account.sync", {"account_id": account_id, "state": "started"}
+        )
+        try:
+            async for event in provider.iter_history(account, since):
+                event.live = False
+                if await inbound_service.ingest(db, account, event) is not None:
+                    written += 1
+                if written and written % HISTORY_BATCH_COMMIT == 0:
+                    await db.commit()
+                    await emit_to_account(
+                        db,
+                        account_id,
+                        "account.sync",
+                        {"account_id": account_id, "state": "running", "written": written},
+                    )
+            account.history_synced_until = datetime.now(UTC)
+            await log_event(
+                db,
+                action="account.history_synced",
+                entity_type="account",
+                entity_id=account_id,
+                actor_kind=ActorKind.GATEWAY,
+                after={"written": written, "since": since.isoformat()},
+            )
+            await db.commit()
+            await emit_to_account(
+                db,
+                account_id,
+                "account.sync",
+                {"account_id": account_id, "state": "done", "written": written},
+            )
+            log.info("История аккаунта %s подтянута: %s сообщений", account_id, written)
+        except Exception as exc:
+            await db.rollback()
+            log.exception("Подтяжка истории аккаунта %s прервалась", account_id)
+            await emit_to_account(
+                db,
+                account_id,
+                "account.sync",
+                {"account_id": account_id, "state": "failed", "error": str(exc)},
+            )
+
+
+# Верхняя граница подтяжки после перезапуска. Обычно перезапуск — это
+# секунды, и `account.last_activity_at` их с запасом покрывает. Ограничение
+# нужно на случай, если аккаунт простоял без дела долго: тогда шлюз не
+# перечитывает историю за месяцы, а только за последнюю неделю.
+CATCH_UP_MAX_LOOKBACK_DAYS = 7
+
+
+async def catch_up(account_id: int) -> None:
+    """Догнать пропущенное после перезапуска шлюза (например, при выкатке).
+
+    Пока процесс был выключен, живые события Telegram никуда не приходили —
+    сессия не хранит, докуда досмотрена лента (see docs/12-telegram-connect.md).
+    Подтягиваем недавнюю историю от последнего известного сообщения: то, что
+    уже есть в базе, схлопнется по `tg_message_id`, новое — допишется.
+    """
+    try:
+        async with SessionLocal() as db:
+            account = await _account(db, account_id)
+            last_seen = account.last_activity_at
+        if last_seen is None:
+            # Только что подключённый аккаунт: первую полную подтяжку уже
+            # запускает `confirm_code` — второй раз это делать не нужно.
+            return
+        since = max(last_seen, datetime.now(UTC) - timedelta(days=CATCH_UP_MAX_LOOKBACK_DAYS))
+        await _sync_history(account_id, since)
+    except Exception:
+        log.exception("Не удалось подтянуть пропущенное для аккаунта %s", account_id)
+
+
+async def held_account_ids(worker_id: str) -> set[int]:
+    async with SessionLocal() as db:
+        rows = await db.execute(
+            select(TelegramAccount.id).where(
+                TelegramAccount.worker_id == worker_id,
+                TelegramAccount.is_active.is_(True),
+                TelegramAccount.deleted_at.is_(None),
+            )
+        )
+        return {row[0] for row in rows.all()}

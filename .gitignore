@@ -1,0 +1,51 @@
+# secrets
+.env
+.env.local
+.env.production
+*.session
+*.session-journal
+secrets/
+# Заготовка без настоящих значений — она обязана остаться в репозитории.
+!.env.example
+
+# python
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+
+# node
+node_modules/
+**/node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+frontend/tsconfig.tsbuildinfo
+
+# os / editors
+.DS_Store
+.idea/
+.vscode/
+
+# local data
+data/
+minio-data/
+pgdata/
+.npm-cache/
+
+# продакшен-контур: сюда кладутся сертификаты и дампы, это данные, не исходники
+backups/
+deploy/certbot/
+
+# следы отладки интерфейса
+.playwright-mcp/
+.qa-shots/
+console-after-login.log
+desktop-chats.jpeg
+*.log

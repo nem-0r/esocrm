@@ -1,0 +1,23 @@
+# Что не должно попадать в образ.
+# Главное здесь — не размер, а секреты: файл сессии Telegram или .env,
+# случайно оказавшийся в каталоге, уехал бы вместе с образом в реестр.
+.env
+.env.*
+*.session
+*.session-journal
+secrets/
+
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+*.egg-info/
+
+.git/
+.DS_Store

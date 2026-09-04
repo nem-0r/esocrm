@@ -1,0 +1,109 @@
+"""Абстракция поставщика Telegram.
+
+Один и тот же контракт используют демо-провайдер (эта итерация) и боевой
+MTProto-провайдер (следующий этап). Цикл шлюза (`runner.py`) о разнице между
+ними не знает — он вызывает только эти методы.
+"""
+
+from dataclasses import dataclass
+from typing import Any, Literal, Protocol
+
+from app.core.config import settings
+from app.models import TelegramAccount
+
+
+@dataclass(slots=True)
+class CodeRequest:
+    """Ответ на запрос кода подтверждения входа."""
+
+    phone_code_hash: str
+    sent_to: Literal["app", "sms"]
+
+
+@dataclass(slots=True)
+class SessionResult:
+    """Ответ на подтверждение кода.
+
+    needs_password=True — нужен второй шаг (облачный пароль), поле session_string
+    и остальные при этом пустые: сессия ещё не создана.
+    """
+
+    session_string: str | None
+    tg_user_id: int | None
+    tg_username: str | None
+    needs_password: bool = False
+
+
+@dataclass(slots=True)
+class SentMessage:
+    """Ответ на отправку исходящего сообщения."""
+
+    tg_message_id: int
+
+
+class TelegramProvider(Protocol):
+    """Контракт поставщика: вход в аккаунт и отправка сообщений."""
+
+    async def send_code(self, account: TelegramAccount) -> CodeRequest: ...
+
+    async def confirm_code(
+        self,
+        account: TelegramAccount,
+        code: str,
+        phone_code_hash: str,
+        password: str | None = None,
+    ) -> SessionResult: ...
+
+    async def send_message(
+        self,
+        account: TelegramAccount,
+        chat_id: int,
+        text: str | None,
+        random_id: int,
+        attachments: list[dict[str, Any]],
+    ) -> SentMessage: ...
+
+    async def start(self, account: TelegramAccount) -> None:
+        """Поднять сессию: для MTProto — подключить клиента. Вызывается при получении аренды."""
+        ...
+
+    async def stop(self, account: TelegramAccount) -> None:
+        """Остановить сессию: вызывается при освобождении аренды и на остановке процесса."""
+        ...
+
+    def set_sinks(self, sink: Any, read_sink: Any = None, status_sink: Any = None) -> None:
+        """Куда отдавать полученное из Telegram: входящие, отметки о прочтении,
+        смену состояния сессии. Записью в базу занимается шлюз, не провайдер."""
+        ...
+
+    async def mark_read(self, account: TelegramAccount, chat_id: int, max_id: int) -> None:
+        """Погасить непрочитанное в самом Telegram, когда менеджер прочитал в CRM."""
+        ...
+
+    def iter_history(
+        self, account: TelegramAccount, since: Any, per_dialog_limit: int = 500
+    ) -> Any:
+        """Асинхронный обход переписки не старше `since` — для первой подтяжки."""
+        ...
+
+
+_provider: TelegramProvider | None = None
+
+
+def get_provider() -> TelegramProvider:
+    """В демо-режиме — рабочая имитация. Иначе — честный отказ, а не тихая заглушка:
+    подключение к настоящему Telegram появится на следующем этапе."""
+    global _provider
+    if _provider is not None:
+        return _provider
+
+    if settings.demo_mode:
+        from app.gateway.demo_provider import DemoProvider
+
+        _provider = DemoProvider()
+        return _provider
+
+    from app.gateway.mtproto_provider import MTProtoProvider
+
+    _provider = MTProtoProvider()
+    return _provider

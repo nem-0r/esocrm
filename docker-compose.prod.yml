@@ -1,0 +1,233 @@
+# Продакшен-контур Астра CRM.
+#
+# Запуск:  docker compose -f docker-compose.prod.yml up -d --build
+# Логи:    docker compose -f docker-compose.prod.yml logs -f api gateway scheduler
+#
+# Отличия от docker-compose.yml (контур разработки):
+#   * образы собираются со стадии `prod` — исходники внутри образа, без --reload
+#     и без монтирования каталогов с машины;
+#   * наружу открыты только 80 и 443 (nginx). База, Redis и MinIO доступны
+#     только внутри сети контейнеров;
+#   * миграции выполняет отдельный одноразовый сервис `migrate`, api стартует
+#     только после его успешного завершения;
+#   * у всех сервисов restart: unless-stopped и ограничения памяти/CPU
+#     под VPS с 8 ГБ ОЗУ.
+#
+# Имя проекта отличается от контура разработки намеренно: тома не пересекаются,
+# случайный `down -v` в одном контуре не сносит данные другого.
+name: astra-crm-prod
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+x-backend-build: &backend-build
+  context: ./backend
+  dockerfile: Dockerfile
+  target: prod
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    command: >
+      postgres -c shared_buffers=512MB -c work_mem=16MB
+               -c max_connections=100 -c random_page_cost=1.1
+               -c effective_cache_size=1536MB
+    # Порт наружу не публикуется: до базы дотягиваются только контейнеры.
+    # Доступ администратора — через `docker compose exec db psql` или ssh-туннель.
+    expose: ["5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    logging: *default-logging
+    deploy:
+      resources:
+        limits: {cpus: "2.0", memory: 2G}
+
+  cache:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # Живые события и онлайн-статус переживают перезапуск не обязаны,
+    # но лимит памяти нужен, иначе Redis съест всё и его убьёт ядро.
+    command: >
+      redis-server --appendonly no --save ""
+                   --maxmemory 384mb --maxmemory-policy allkeys-lru
+    expose: ["6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    logging: *default-logging
+    deploy:
+      resources:
+        limits: {cpus: "0.5", memory: 512M}
+
+  storage:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY}
+    # Консоль MinIO (9001) наружу не публикуется. Нужна — пробрасывать по ssh:
+    #   ssh -L 9001:localhost:9001 user@server  (после docker compose port storage 9001)
+    expose: ["9000", "9001"]
+    volumes: ["minio-data:/data"]
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    logging: *default-logging
+    deploy:
+      resources:
+        limits: {cpus: "1.0", memory: 1G}
+
+  # Одноразовый сервис. Отрабатывает и завершается; api ждёт кода возврата 0.
+  # Так схема базы обновляется ровно один раз, а не в каждом контейнере,
+  # который умеет запускать alembic.
+  migrate:
+    build: *backend-build
+    restart: "no"
+    env_file: [.env]
+    environment:
+      SERVICE_ROLE: migrate
+    depends_on:
+      db: {condition: service_healthy}
+    command: alembic upgrade head
+    logging: *default-logging
+    deploy:
+      resources:
+        limits: {cpus: "1.0", memory: 512M}
+
+  api:
+    build: *backend-build
+    restart: unless-stopped
+    env_file: [.env]
+    environment:
+      SERVICE_ROLE: api
+    expose: ["8000"]
+    # Реквизиты и прочие боевые файлы, которые нельзя класть в репозиторий
+    # (secrets/ в .gitignore) — только для команд вроде load_requisites.
+    volumes: ["./secrets:/secrets:ro"]
+    depends_on:
+      db: {condition: service_healthy}
+      cache: {condition: service_healthy}
+      storage: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
+    command: >
+      uvicorn app.main:app --host 0.0.0.0 --port 8000
+              --proxy-headers --forwarded-allow-ips='*' --workers 2
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    logging: *default-logging
+    deploy:
+      resources:
+        limits: {cpus: "2.0", memory: 1536M}
+
+  gateway:
+    build: *backend-build
+    restart: unless-stopped
+    env_file: [.env]
+    environment:
+      SERVICE_ROLE: gateway
+    depends_on:
+      api: {condition: service_healthy}
+    command: python -m app.gateway.worker
+    logging: *default-logging
+    deploy:
+      resources:
+        limits: {cpus: "1.0", memory: 1G}
+
+  scheduler:
+    build: *backend-build
+    restart: unless-stopped
+    env_file: [.env]
+    environment:
+      SERVICE_ROLE: scheduler
+    depends_on:
+      api: {condition: service_healthy}
+    command: python -m app.scheduler.runner
+    logging: *default-logging
+    deploy:
+      resources:
+        limits: {cpus: "0.5", memory: 512M}
+
+  # Собранная статика фронтенда. Сборка идёт ВНУТРИ образа (стадия build),
+  # готовый dist с машины разработчика в продакшен не попадает.
+  web:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: prod
+    restart: unless-stopped
+    expose: ["80"]
+    # Внутри образа фронтенда nginx держит запасной proxy_pass на api. Имя
+    # должно резолвиться к моменту старта, иначе контейнер падает с
+    # "host not found in upstream api" и уходит в цикл перезапусков.
+    depends_on:
+      api: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost/ || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging: *default-logging
+    deploy:
+      resources:
+        limits: {cpus: "0.5", memory: 192M}
+
+  # Единственная точка входа снаружи: TLS, редирект с 80 на 443,
+  # статика фронтенда и проксирование /api (включая вебсокет).
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      # Подставляется в шаблон конфигурации при старте контейнера.
+      DOMAIN: ${DOMAIN:?укажите DOMAIN в .env, например crm.example.ru}
+      # Ограничиваем подстановку одной переменной, иначе envsubst съест
+      # $host, $remote_addr и прочие переменные самого nginx.
+      NGINX_ENVSUBST_FILTER: "^DOMAIN$$"
+    volumes:
+      - ./deploy/nginx.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - ./deploy/certbot/conf:/etc/letsencrypt:ro
+      - ./deploy/certbot/www:/var/www/certbot:ro
+    depends_on:
+      api: {condition: service_healthy}
+      web: {condition: service_started}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging: *default-logging
+    deploy:
+      resources:
+        limits: {cpus: "0.5", memory: 256M}
+
+volumes:
+  pgdata:
+  minio-data:
