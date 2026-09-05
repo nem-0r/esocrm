@@ -22,6 +22,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import storage
 from app.core.command_bus import serve as serve_commands
 from app.core.config import settings
 from app.core.db import SessionLocal
@@ -29,6 +30,7 @@ from app.gateway import handlers, lease
 from app.gateway.provider import get_provider
 from app.models import (
     ActorKind,
+    Attachment,
     Conversation,
     Message,
     MessageStatus,
@@ -180,6 +182,28 @@ async def _simulate_read(message_id: int, conversation_id: int) -> None:
         log.exception("Не удалось имитировать прочтение сообщения %s", message_id)
 
 
+async def _load_attachments(db: AsyncSession, attachment_ids: list[int]) -> list[dict]:
+    """Тело вложений из хранилища — провайдеру нужны файлы, а не только их id."""
+    if not attachment_ids:
+        return []
+    rows = await db.execute(select(Attachment).where(Attachment.id.in_(attachment_ids)))
+    by_id = {a.id: a for a in rows.scalars().all()}
+    items: list[dict] = []
+    for aid in attachment_ids:
+        attachment = by_id.get(aid)
+        if attachment is None:
+            continue
+        body = await storage.get_object(attachment.storage_key)
+        items.append(
+            {
+                "file_name": attachment.file_name,
+                "mime_type": attachment.mime_type,
+                "body": body,
+            }
+        )
+    return items
+
+
 async def _process_outbox_row(worker_id: str, db: AsyncSession, outbox: Outbox) -> None:
     outbox.status = OutboxStatus.SENDING
     outbox.locked_by = worker_id
@@ -196,8 +220,8 @@ async def _process_outbox_row(worker_id: str, db: AsyncSession, outbox: Outbox) 
         return
 
     provider = get_provider()
-    attachments = [{"id": aid} for aid in outbox.payload.get("attachment_ids", [])]
     try:
+        attachments = await _load_attachments(db, outbox.payload.get("attachment_ids", []))
         result = await provider.send_message(
             account,
             conversation.tg_chat_id,

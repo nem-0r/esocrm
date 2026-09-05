@@ -227,6 +227,15 @@ class Settings(BaseSettings):
                 "по HTTPS."
             )
 
+        if self.robokassa_enabled and self.robokassa_is_test:
+            problems.append(
+                "Заполнены боевые данные Робокассы (ROBOKASSA_MERCHANT_LOGIN/"
+                "PASSWORD1/PASSWORD2), но ROBOKASSA_IS_TEST=true. Кнопка оплаты "
+                "будет работать, но каждая ссылка уйдёт в тестовый контур "
+                "Робокассы — деньги по-настоящему проходить не будут. Поставьте "
+                "ROBOKASSA_IS_TEST=false, когда магазин переведён в боевой режим."
+            )
+
         if not problems:
             return self
 

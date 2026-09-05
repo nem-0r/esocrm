@@ -28,6 +28,7 @@ export type NotificationKind =
   | 'account_unassigned'
   | 'account_error'
   | 'payment_mismatch'
+  | 'payment_orphaned'
 
 export interface UserRef {
   id: number

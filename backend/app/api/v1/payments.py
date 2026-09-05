@@ -11,14 +11,16 @@
 """
 
 import logging
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Request
 from fastapi.responses import PlainTextResponse
+from sqlalchemy import exists, select, update
 from sqlalchemy.exc import IntegrityError
 
 from app.core.config import settings
 from app.core.db import SessionLocal
-from app.models import PaymentEvent
+from app.models import Deal, PaymentEvent
 from app.services import deal_service, robokassa
 
 router = APIRouter()
@@ -64,9 +66,14 @@ async def robokassa_result(request: Request) -> PlainTextResponse:
     # есть повод для тревоги из разд. 7, а не то, что можно потерять молча.
     event_id = f"robokassa:{inv_id}:{signature.strip().lower()}"
     async with SessionLocal() as db:
+        # InvId привязан к сделке напрямую (это её id) — но верить ему нельзя,
+        # не проверив, что такая сделка вообще существует: иначе вставка упадёт
+        # на внешнем ключе, и запись о самом уведомлении (в том числе о подделке)
+        # будет потеряна.
+        deal_exists = await db.scalar(select(exists().where(Deal.id == inv_id)))
         db.add(
             PaymentEvent(
-                deal_id=None,
+                deal_id=inv_id if deal_exists else None,
                 provider="robokassa",
                 provider_event_id=event_id,
                 event_type="result",
@@ -94,6 +101,12 @@ async def robokassa_result(request: Request) -> PlainTextResponse:
         result = await deal_service.confirm_paid_by_provider(
             db, inv_id, expected_kopecks, provider_payment_id=str(inv_id)
         )
+        await db.execute(
+            update(PaymentEvent)
+            .where(PaymentEvent.provider_event_id == event_id)
+            .values(processed_at=datetime.now(UTC))
+        )
+        await db.commit()
 
     if result.outcome == "amount_mismatch":
         log.error("Робокасса: сумма не сошлась для InvId=%s (OutSum=%s)", inv_id, out_sum)

@@ -91,6 +91,9 @@ export interface CreateAccountInput {
   title: string
   phone: string
   funnel_stage: FunnelStage
+  /** Свой прокси на этот номер (socks5://user:pass@host:port) — без него
+   *  несколько живых аккаунтов выходят в сеть с одного адреса сервера. */
+  proxy_url?: string
 }
 
 export function useCreateAccount() {

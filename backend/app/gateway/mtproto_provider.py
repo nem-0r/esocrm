@@ -21,6 +21,7 @@
 """
 
 import asyncio
+import io
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime
@@ -290,12 +291,9 @@ class MTProtoProvider:
         client = await self._guarded(account)
         entity = await self._entity(client, account, chat_id)
         try:
-            if attachments:
-                sent = await client.send_file(
-                    entity,
-                    file=[item["path"] for item in attachments if item.get("path")],
-                    caption=text or "",
-                )
+            files = _as_files(attachments)
+            if files:
+                sent = await client.send_file(entity, file=files, caption=text or "")
                 sent = sent[-1] if isinstance(sent, list) else sent
             else:
                 sent = await client.send_message(entity, text or "")
@@ -394,10 +392,28 @@ class MTProtoProvider:
         return await client.get_input_entity(chat_id)
 
 
+def _as_files(attachments: list[dict]) -> list[io.BytesIO]:
+    """Тело вложения → файлоподобный объект для Telethon.
+
+    `.name` — не декорация: по нему Telethon определяет расширение и решает,
+    отправлять как фото/видео или как обычный документ.
+    """
+    files: list[io.BytesIO] = []
+    for item in attachments:
+        body = item.get("body")
+        if not body:
+            continue
+        buf = io.BytesIO(body)
+        buf.name = item.get("file_name") or "file"
+        files.append(buf)
+    return files
+
+
 def _proxy_for(account: TelegramAccount) -> tuple | None:
-    """Прокси на аккаунт. Пока задаётся одним значением на установку —
-    поаккаунтные адреса появятся вместе с закупкой мобильных прокси (D-21)."""
-    raw = settings.telegram_proxy
+    """Прокси на аккаунт (D-21): свой на номер, если задан при подключении,
+    иначе общий TELEGRAM_PROXY из окружения — так по-прежнему можно поднять
+    один аккаунт локально/в демо, не заводя прокси для каждого номера."""
+    raw = crypto.decrypt(account.proxy_url_enc) or settings.telegram_proxy
     if not raw:
         return None
     # Формат: socks5://user:pass@host:port

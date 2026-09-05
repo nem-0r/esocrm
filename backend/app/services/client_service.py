@@ -111,7 +111,12 @@ async def _ensure_visible(db: AsyncSession, user: User, client_id: int) -> Clien
 
 
 def _encode_list_cursor(sort: str, row: Any) -> str:
-    value = row.last_contact_at.isoformat() if sort == "last_contact" else str(row.paid_amount)
+    # paid_amount приходит из SQL SUM() как Decimal — у круглых сумм str(Decimal)
+    # может отдать научную нотацию ("3.16E+6"), которую _decode_list_cursor не
+    # распарсит обратно как int. Копейки всегда целые — приводим явно.
+    value = (
+        row.last_contact_at.isoformat() if sort == "last_contact" else str(int(row.paid_amount))
+    )
     raw = f"{value}|{row.id}"
     return base64.urlsafe_b64encode(raw.encode()).decode()
 

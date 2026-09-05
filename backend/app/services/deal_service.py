@@ -10,7 +10,7 @@
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 
-from sqlalchemy import Select, case, distinct, func, select
+from sqlalchemy import Select, case, distinct, exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -676,6 +676,60 @@ async def confirm_paid_by_provider(
     # запрещённым (ALLOWED_DEAL_TRANSITIONS этого не разрешает нарочно) —
     # здесь отдельная, более узкая дверь, только для источника «провайдер».
     if deal.status not in (DealStatus.AWAITING, DealStatus.EXPIRED):
+        # Деньги пришли, а сделка уже не в статусе, допускающем оплату —
+        # например, её отменили ровно в момент, когда клиент платил. Провайдер
+        # деньги принял, CRM их девать некуда — молчать логом мало, нужен
+        # живой человек, который сверится с личным кабинетом Робокассы.
+        #
+        # Робокасса повторяет доставку, пока не получит «OK» — а «wrong status»
+        # им не является, так что без этой проверки один и тот же случай
+        # заваливал бы админов уведомлением на каждый повтор (часами).
+        already_notified = await db.scalar(
+            select(
+                exists().where(
+                    Notification.kind == NotificationKind.PAYMENT_ORPHANED,
+                    Notification.entity_type == "deal",
+                    Notification.entity_id == deal.id,
+                )
+            )
+        )
+        if already_notified:
+            return ProviderResult("wrong_status")
+
+        from app.services.deal_export import STATUS_LABEL
+
+        status_label = STATUS_LABEL.get(deal.status, deal.status.value)
+        db.add(
+            DealEvent(
+                deal_id=deal.id, actor_id=None, kind=DealEventKind.EDITED,
+                comment=(
+                    f"Провайдер прислал оплату {format_rubles(amount_kopecks)}, "
+                    f"но сделка в статусе «{status_label}» — деньги нужно сверить вручную"
+                ),
+                data={
+                    "provider": "robokassa", "provider_payment_id": provider_payment_id,
+                    "amount_received": amount_kopecks, "deal_status": deal.status.value,
+                },
+            )
+        )
+        admins = await db.execute(
+            select(User.id).where(User.role == UserRole.ADMIN, User.is_active.is_(True))
+        )
+        recipients = sorted({*admins.scalars().all(), deal.sold_by_id})
+        notice = {
+            "deal_id": deal.id, "number": deal.number,
+            "amount_received": amount_kopecks, "deal_status_label": status_label,
+            "kind": NotificationKind.PAYMENT_ORPHANED.value,
+        }
+        for user_id in recipients:
+            db.add(
+                Notification(
+                    user_id=user_id, kind=NotificationKind.PAYMENT_ORPHANED,
+                    entity_type="deal", entity_id=deal.id, payload=notice,
+                )
+            )
+        await db.commit()
+        await emit("notification.new", {"notification": notice}, recipients)
         return ProviderResult("wrong_status")
 
     was_expired = deal.status == DealStatus.EXPIRED

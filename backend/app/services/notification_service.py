@@ -48,6 +48,16 @@ def render(notification: Notification) -> tuple[str, str]:
                 else "сумма не совпала со сделкой"
             )
             return "Оплата не сошлась по сумме — деньги у провайдера", f"{number} · {detail}"
+        case NotificationKind.PAYMENT_ORPHANED:
+            number = payload.get("number") or f"DEAL-{notification.entity_id}"
+            amount = payload.get("amount_received")
+            status_label = payload.get("deal_status_label") or "не ждёт оплаты"
+            detail = (
+                f"пришло {format_rubles(int(amount))}, сделка — {status_label}"
+                if amount is not None
+                else f"сделка — {status_label}"
+            )
+            return "Оплата пришла по сделке, которая её не ждёт", f"{number} · {detail}"
     return "Уведомление", ""
 
 
