@@ -242,6 +242,7 @@ export function useInviteStaff() {
 
 export interface UpdateStaffInput {
   full_name?: string
+  email?: string
   phone?: string | null
   role?: UserRole
   is_active?: boolean

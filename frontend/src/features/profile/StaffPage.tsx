@@ -314,6 +314,9 @@ function MemberSheet({ member, onClose }: { member: StaffMember | null; onClose:
   const update = useUpdateStaff()
   const resend = useResendInvite()
   const accounts = useAccounts()
+  const [fullName, setFullName] = useState('')
+  const [email, setEmail] = useState('')
+  const [phone, setPhone] = useState('')
   const [role, setRole] = useState<string | null>(null)
   const [accountIds, setAccountIds] = useState<number[]>([])
   const [active, setActive] = useState(true)
@@ -323,6 +326,9 @@ function MemberSheet({ member, onClose }: { member: StaffMember | null; onClose:
 
   useEffect(() => {
     if (member) {
+      setFullName(member.full_name)
+      setEmail(member.email)
+      setPhone(member.phone ?? '')
       setRole(member.role)
       setAccountIds(member.accounts.map((a) => a.id))
       setActive(member.is_active)
@@ -349,6 +355,9 @@ function MemberSheet({ member, onClose }: { member: StaffMember | null; onClose:
       await update.mutateAsync({
         userId: member.id,
         patch: {
+          full_name: fullName.trim(),
+          email: email.trim(),
+          phone: phone.trim() || null,
           role: (role ?? member.role) as never,
           is_active: active,
           account_ids: accountIds,
@@ -373,7 +382,12 @@ function MemberSheet({ member, onClose }: { member: StaffMember | null; onClose:
       title={member?.full_name ?? ''}
       description={member?.email}
       footer={
-        <Button fullWidth loading={update.isPending} onClick={() => void save()}>
+        <Button
+          fullWidth
+          loading={update.isPending}
+          disabled={!fullName.trim() || !email.trim()}
+          onClick={() => void save()}
+        >
           Сохранить
         </Button>
       }
@@ -411,6 +425,26 @@ function MemberSheet({ member, onClose }: { member: StaffMember | null; onClose:
               tone="success"
             />
           </div>
+
+          <Field label="Имя и фамилия" required>
+            <Input value={fullName} onChange={(event) => setFullName(event.target.value)} />
+          </Field>
+
+          <Field
+            label="Почта"
+            hint={isSelf ? 'Это логин для входа — после смены входить новой почтой' : 'Логин для входа сотрудника'}
+            required
+          >
+            <Input
+              type="email"
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+            />
+          </Field>
+
+          <Field label="Телефон" hint="Необязательно">
+            <Input value={phone} onChange={(event) => setPhone(event.target.value)} />
+          </Field>
 
           <Field label="Роль">
             <Select value={role} onChange={setRole} options={ROLE_OPTIONS} disabled={isSelf} />

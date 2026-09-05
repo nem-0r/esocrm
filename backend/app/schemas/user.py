@@ -166,6 +166,7 @@ class UserCreateOut(UserOut):
 
 class UserUpdateIn(ApiModel):
     full_name: str | None = None
+    email: str | None = None
     phone: str | None = None
     role: UserRole | None = None
     is_active: bool | None = None
@@ -178,6 +179,11 @@ class UserUpdateIn(ApiModel):
         if value is not None and not value.strip():
             raise ValueError("Укажите имя сотрудника")
         return value
+
+    @field_validator("email")
+    @classmethod
+    def _email(cls, value: str | None) -> str | None:
+        return validate_email_format(value) if value is not None else value
 
 
 class ResendInviteOut(ApiModel):

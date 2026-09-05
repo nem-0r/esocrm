@@ -274,6 +274,23 @@ async def update_user(db: AsyncSession, admin: User, user_id: int, data: UserUpd
         before["phone"], user.phone = user.phone, data.phone
         after["phone"] = user.phone
 
+    if data.email is not None:
+        normalized_email = normalize_email(data.email)
+        if normalized_email != user.email:
+            existing = await db.scalar(
+                select(User.id).where(
+                    User.email == normalized_email, User.deleted_at.is_(None), User.id != user.id
+                )
+            )
+            if existing is not None:
+                raise Conflict("Сотрудник с такой почтой уже заведён")
+            # Смена почты не трогает уже открытые сессии — они привязаны к
+            # user.id, а не к почте (см. get_current_user в core/deps.py).
+            # Логиниться дальше нужно уже новой почтой, но текущий вход
+            # продолжает работать как ни в чём не бывало.
+            before["email"], user.email = user.email, normalized_email
+            after["email"] = user.email
+
     if data.role is not None and data.role != user.role:
         before["role"] = user.role.value
         user.role = data.role
