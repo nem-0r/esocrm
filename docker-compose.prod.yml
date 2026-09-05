@@ -186,7 +186,10 @@ services:
     depends_on:
       api: {condition: service_healthy}
     healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://localhost/ || exit 1"]
+      # 127.0.0.1, не localhost: на части хостов /etc/hosts резолвит localhost
+      # в ::1 первым, а nginx слушает только IPv4 — проверка не проходит,
+      # хотя сервис отвечает нормально.
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1/ || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -218,7 +221,7 @@ services:
       api: {condition: service_healthy}
       web: {condition: service_started}
     healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://localhost/healthz || exit 1"]
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1/healthz || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3
