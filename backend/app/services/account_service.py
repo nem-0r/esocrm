@@ -7,6 +7,7 @@
 онлайн-статус — вместо запроса на каждую строку.
 """
 
+import asyncio
 import contextlib
 import re
 from datetime import UTC, datetime
@@ -240,6 +241,30 @@ async def create_account(db: AsyncSession, admin: User, data: AccountCreate) -> 
     return await _row(db, account.id)
 
 
+async def _wait_for_lease(
+    db: AsyncSession, account_id: int, timeout: float  # noqa: ASYNC109 — не отмена, а предел ожидания
+) -> None:
+    """Дождаться, пока шлюз реально возьмёт аккаунт в аренду.
+
+    Цикл аренды подхватывает свободные аккаунты по таймеру
+    (`gateway_heartbeat_seconds`), а не мгновенно при создании. Канал команд —
+    Redis pub/sub, не очередь: команда, отправленная до того, как аккаунт
+    достался кому-то в аренду, никем не принимается и не переспрашивается —
+    просто теряется, и `command_bus.call` честно откатывается по таймауту
+    только через свои полные 45 секунд. Без этого ожидания самая первая
+    попытка получить код на свежесозданном аккаунте почти гарантированно
+    ловит «шлюз не ответил», хотя шлюз в полном порядке — просто чуть не успел.
+    """
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        worker_id = await db.scalar(
+            select(TelegramAccount.worker_id).where(TelegramAccount.id == account_id)
+        )
+        if worker_id is not None:
+            return
+        await asyncio.sleep(0.3)
+
+
 async def send_code(db: AsyncSession, admin: User, account_id: int) -> SendCodeOut:
     account = await _get(db, account_id)
     if settings.demo_mode:
@@ -248,6 +273,7 @@ async def send_code(db: AsyncSession, admin: User, account_id: int) -> SendCodeO
     else:
         # Вход держит процесс шлюза: код подтверждения принадлежит соединению,
         # которое его запросило, и подтвердить его должен тот же процесс.
+        await _wait_for_lease(db, account.id, timeout=settings.gateway_heartbeat_seconds + 3)
         answer = await command_bus.call(account.id, "send_code")
         phone_code_hash, sent_to = answer["phone_code_hash"], answer["sent_to"]
 
