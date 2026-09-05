@@ -21,7 +21,15 @@ function StatusIcon({ status }: { status: Message['status'] }) {
   }
 }
 
-export function MessageBubble({ message }: { message: Message }) {
+export function MessageBubble({
+  message,
+  onRetry,
+  retrying,
+}: {
+  message: Message
+  onRetry?: () => void
+  retrying?: boolean
+}) {
   const outgoing = message.direction === 'out'
 
   // Служебная заметка: клиент её не видит, поэтому и выглядит она иначе.
@@ -96,9 +104,20 @@ export function MessageBubble({ message }: { message: Message }) {
         </span>
 
         {message.status === 'failed' && (
-          <span className="text-micro text-danger">
-            {message.error_text ?? 'Не удалось отправить'}
-          </span>
+          <div className="flex items-center justify-end gap-2">
+            <span className="text-micro text-danger">
+              {message.error_text ?? 'Не удалось отправить'}
+            </span>
+            {onRetry && (
+              <button
+                onClick={onRetry}
+                disabled={retrying}
+                className="text-micro text-accent-text underline-offset-4 transition-colors hover:underline disabled:opacity-50"
+              >
+                {retrying ? 'Повторяем…' : 'Повторить'}
+              </button>
+            )}
+          </div>
         )}
       </div>
     </div>

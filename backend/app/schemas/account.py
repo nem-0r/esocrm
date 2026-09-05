@@ -53,9 +53,6 @@ class AccountCreate(ApiModel):
     # На доске руководитель их не вводит — только название, телефон и этап.
     api_id: int | None = None
     api_hash: str | None = None
-    # Свой прокси на этот номер (D-21). Пусто — общий TELEGRAM_PROXY из
-    # окружения или прямое подключение, если и он не задан.
-    proxy_url: str | None = None
 
 
 class AccountUpdate(ApiModel):

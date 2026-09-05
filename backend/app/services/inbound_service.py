@@ -260,6 +260,10 @@ async def ingest(
 
     _apply_counters(conversation, event)
     account.last_activity_at = datetime.now(UTC)
+    # Написал — точно не заблокировал (или снял блокировку): держать баннер
+    # после этого не за что.
+    if not event.outgoing and conversation.is_blocked_by_client:
+        conversation.is_blocked_by_client = False
 
     if event.live:
         await _publish(db, conversation, message)

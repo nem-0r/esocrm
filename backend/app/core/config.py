@@ -227,6 +227,24 @@ class Settings(BaseSettings):
                 "по HTTPS."
             )
 
+        if any("localhost" in o or "127.0.0.1" in o for o in self.cors_origin_list):
+            problems.append(
+                "CORS_ORIGINS содержит localhost/127.0.0.1. После деплоя вход "
+                "из браузера будет отклонён — укажите настоящий домен сайта: "
+                "https://<домен>."
+            )
+
+        problems += _infra_problems(
+            "ROBOKASSA_PASSWORD1",
+            self.robokassa_password1,
+            "Задайте боевой пароль #1 из личного кабинета Робокассы.",
+        )
+        problems += _infra_problems(
+            "ROBOKASSA_PASSWORD2",
+            self.robokassa_password2,
+            "Задайте боевой пароль #2 из личного кабинета Робокассы.",
+        )
+
         if self.robokassa_enabled and self.robokassa_is_test:
             problems.append(
                 "Заполнены боевые данные Робокассы (ROBOKASSA_MERCHANT_LOGIN/"

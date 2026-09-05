@@ -1,4 +1,4 @@
-import { ArrowLeft, CreditCard, IdCard, Plus, UserCheck } from 'lucide-react'
+import { AlertTriangle, ArrowLeft, CreditCard, IdCard, Plus, UserCheck } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 
@@ -15,6 +15,7 @@ import {
   useConversation,
   useMarkRead,
   useMessages,
+  useRetryMessage,
 } from '@/features/chats/queries'
 
 export function ChatPage() {
@@ -41,6 +42,7 @@ function ChatPane({ conversationId }: { conversationId: number }) {
   const conversation = useConversation(conversationId)
   const messages = useMessages(conversationId)
   const markRead = useMarkRead()
+  const retryMessage = useRetryMessage(conversationId)
   const bottom = useRef<HTMLDivElement>(null)
   const [dealOpen, setDealOpen] = useState(false)
   const [transferOpen, setTransferOpen] = useState(false)
@@ -141,6 +143,15 @@ function ChatPane({ conversationId }: { conversationId: number }) {
           </div>
         </div>
 
+        {chat.is_blocked_by_client && (
+          <div className="mt-2 flex items-center gap-2 rounded-md bg-danger-soft px-3 py-2 text-sm text-danger">
+            <AlertTriangle className="size-4 shrink-0" aria-hidden />
+            <span className="flex-1">
+              Клиент заблокировал этот номер — сообщения не доходят
+            </span>
+          </div>
+        )}
+
         {chat.has_awaiting_deal && (
           <Link
             // ТЗ п. 4.6: из чата — только оплаты этого канала.
@@ -191,7 +202,11 @@ function ChatPane({ conversationId }: { conversationId: number }) {
                       </span>
                     </div>
                   )}
-                  <MessageBubble message={message} />
+                  <MessageBubble
+                    message={message}
+                    onRetry={() => retryMessage.mutate(message.id)}
+                    retrying={retryMessage.isPending && retryMessage.variables === message.id}
+                  />
                 </div>
               )
             })}

@@ -136,14 +136,18 @@ def verify_result_signature(
     return expected.lower() == provided_signature.strip().lower()
 
 
+def parse_out_sum_kopecks(out_sum: str) -> int | None:
+    """OutSum Робокассы → копейки, только через Decimal: float даёт
+    84.99999999999999 там, где должно быть ровно 85.00. Не разобралось — None,
+    не исключение: строка целиком приходит от внешнего запроса, доверять ей нельзя."""
+    try:
+        return int((Decimal(out_sum) * 100).to_integral_value(rounding=ROUND_HALF_UP))
+    except (ValueError, ArithmeticError, TypeError):
+        return None
+
+
 def out_sum_matches(out_sum_from_provider: str, expected_kopecks: int) -> bool:
     """Сумму сравниваем в копейках, не строками: «85.00» и «85.0» — одно и то же
-    число, но разные строки. Верить строке из запроса нельзя, поэтому парсим
-    защищённо: любое, что не разбирается как число, — несовпадение, не исключение."""
-    try:
-        provided = (Decimal(out_sum_from_provider) * 100).to_integral_value(
-            rounding=ROUND_HALF_UP
-        )
-    except (ValueError, ArithmeticError):
-        return False
-    return int(provided) == expected_kopecks
+    число, но разные строки."""
+    provided = parse_out_sum_kopecks(out_sum_from_provider)
+    return provided is not None and provided == expected_kopecks

@@ -92,9 +92,8 @@ async def robokassa_result(request: Request) -> PlainTextResponse:
         log.warning("Робокасса: неверная подпись для InvId=%s", inv_id)
         return PlainTextResponse("bad sign", status_code=403)
 
-    try:
-        expected_kopecks = int(round(float(out_sum) * 100))
-    except (ValueError, TypeError):
+    expected_kopecks = robokassa.parse_out_sum_kopecks(out_sum)
+    if expected_kopecks is None:
         return PlainTextResponse("bad request", status_code=400)
 
     async with SessionLocal() as db:

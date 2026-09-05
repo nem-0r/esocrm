@@ -178,28 +178,11 @@ async def summary(db: AsyncSession, user: User) -> AccountSummary:
     )
 
 
-_PROXY_SCHEMES = {"socks5", "socks4", "http"}
-
-
-def _validate_proxy(raw: str) -> None:
-    from urllib.parse import urlparse
-
-    parsed = urlparse(raw)
-    if parsed.scheme not in _PROXY_SCHEMES or not parsed.hostname or not parsed.port:
-        raise Invalid(
-            "Прокси указан неверно. Формат: socks5://user:pass@host:port "
-            "(поддерживаются socks5, socks4, http)"
-        )
-
-
 async def create_account(db: AsyncSession, admin: User, data: AccountCreate) -> AccountRow:
     title = data.title.strip()
     if not title:
         raise Invalid("Укажите название аккаунта")
     phone = _normalize_phone(data.phone)
-    proxy_url = (data.proxy_url or "").strip()
-    if proxy_url:
-        _validate_proxy(proxy_url)
 
     # Номер занят только живым аккаунтом: отключённый остаётся в базе ради
     # переписки и сделок, но подключить тот же номер заново должно быть можно.
@@ -230,7 +213,6 @@ async def create_account(db: AsyncSession, admin: User, data: AccountCreate) -> 
         funnel_stage=data.funnel_stage,
         api_id=api_id,
         api_hash_enc=crypto.encrypt(api_hash),
-        proxy_url_enc=crypto.encrypt(proxy_url) if proxy_url else None,
         status=AccountStatus.PENDING,
     )
     db.add(account)
@@ -549,6 +531,13 @@ async def update_account(
         before["is_active"] = account.is_active
         account.is_active = data.is_active
         after["is_active"] = data.is_active
+        if not data.is_active:
+            # Иначе "отключённый" в интерфейсе аккаунт продолжает молча жить
+            # в шлюзе — уже поднятая сессия не привязана к этому флагу и сама
+            # не остановится. Сессию не отзываем (в отличие от полного
+            # удаления) — включат обратно, и шлюз поднимет её заново сам.
+            with contextlib.suppress(command_bus.GatewayUnavailable, command_bus.GatewayError):
+                await command_bus.call(account.id, "disconnect", timeout=15)
 
     if before or after:
         await log_event(

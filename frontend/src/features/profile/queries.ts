@@ -15,6 +15,7 @@ import type {
   CursorPage,
   FunnelStage,
   Me,
+  Requisite,
   Settings,
   StaffMember,
   StatsOverview,
@@ -91,9 +92,6 @@ export interface CreateAccountInput {
   title: string
   phone: string
   funnel_stage: FunnelStage
-  /** Свой прокси на этот номер (socks5://user:pass@host:port) — без него
-   *  несколько живых аккаунтов выходят в сеть с одного адреса сервера. */
-  proxy_url?: string
 }
 
 export function useCreateAccount() {
@@ -318,5 +316,55 @@ export function useUpdateSettings() {
       queryClient.setQueryData(['settings'], settings)
       queryClient.invalidateQueries({ queryKey: ['counters'] })
     },
+  })
+}
+
+/* --------------------------------------------------------------- реквизиты */
+
+export interface RequisiteInput {
+  title: string
+  bank_name?: string | null
+  account_masked?: string | null
+  details_text: string
+  is_active?: boolean
+  sort_order?: number
+}
+
+/** Список для управления (включая отключённые) — отдельно от `useRequisites`
+ *  в разделе сделок, где нужны только активные. */
+export function useAdminRequisites() {
+  return useQuery({
+    queryKey: ['requisites', 'admin'],
+    queryFn: ({ signal }) =>
+      api.get<Requisite[]>('/requisites', { include_inactive: true }, signal),
+  })
+}
+
+function invalidateRequisites(queryClient: ReturnType<typeof useQueryClient>) {
+  queryClient.invalidateQueries({ queryKey: ['requisites'] })
+}
+
+export function useCreateRequisite() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (input: RequisiteInput) => api.post<Requisite>('/requisites', input),
+    onSuccess: () => invalidateRequisites(queryClient),
+  })
+}
+
+export function useUpdateRequisite(id: number) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (input: Partial<RequisiteInput>) =>
+      api.patch<Requisite>(`/requisites/${id}`, input),
+    onSuccess: () => invalidateRequisites(queryClient),
+  })
+}
+
+export function useDeleteRequisite() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (id: number) => api.del<void>(`/requisites/${id}`),
+    onSuccess: () => invalidateRequisites(queryClient),
   })
 }

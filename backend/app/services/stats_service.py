@@ -18,7 +18,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import visible_account_ids
-from app.core.errors import Invalid
+from app.core.errors import Invalid, NotFound
 from app.models import DealStatus, User, UserRole
 from app.services import settings_service, worktime
 
@@ -67,6 +67,14 @@ async def build_scope(db: AsyncSession, user: User, user_id: int | None) -> Scop
     if user.role == UserRole.ADMIN:
         if user_id is None:
             return Scope(None, None)
+        exists = await db.scalar(
+            text("select exists(select 1 from users where id = :uid and deleted_at is null)"),
+            {"uid": user_id},
+        )
+        if not exists:
+            # Без этой проверки несуществующий сотрудник давал бы честные нули —
+            # неотличимые от настоящего сотрудника без активности за период.
+            raise NotFound("Сотрудник не найден")
         accounts = await db.execute(
             text("select account_id from account_managers where user_id = :uid"), {"uid": user_id}
         )
@@ -76,11 +84,20 @@ async def build_scope(db: AsyncSession, user: User, user_id: int | None) -> Scop
     return Scope([user.id], await visible_account_ids(db, user) or [], user.id)
 
 
-def _bounds(date_from: date, date_to: date) -> tuple[datetime, datetime]:
-    """Верхняя граница — начало следующего дня: иначе последний день теряется."""
-    start = datetime.combine(date_from, datetime.min.time(), tzinfo=UTC)
-    end = datetime.combine(date_to + timedelta(days=1), datetime.min.time(), tzinfo=UTC)
-    return start, end
+async def _bounds(db: AsyncSession, date_from: date, date_to: date) -> tuple[datetime, datetime]:
+    """Границы периода — по часовому поясу организации, не по UTC.
+
+    Иначе продажа в 23:25 по Москве (20:25 UTC) могла бы попасть не в тот
+    день — а на границе месяца или квартала не в тот период вовсе. Верхняя
+    граница — начало следующего дня в том же поясе: иначе последний день теряется.
+    """
+    from app.services.worktime import _zone
+
+    tz_name = await settings_service.get_value(db, "timezone")
+    zone = _zone(tz_name)
+    start = datetime.combine(date_from, datetime.min.time(), tzinfo=zone)
+    end = datetime.combine(date_to + timedelta(days=1), datetime.min.time(), tzinfo=zone)
+    return start.astimezone(UTC), end.astimezone(UTC)
 
 
 def _seller_clause(scope: Scope, prefix: str = "d") -> str:
@@ -247,7 +264,7 @@ async def overview(
             "awaiting_count": 0,
         }
 
-    start, end = _bounds(date_from, date_to)
+    start, end = await _bounds(db, date_from, date_to)
     span = end - start
     prev_start, prev_end = start - span, start
 
@@ -291,18 +308,27 @@ async def series(
     if scope.empty:
         return {"points": [], "granularity": granularity}
 
-    start, end = _bounds(date_from, date_to)
+    start, end = await _bounds(db, date_from, date_to)
+    tz_name = await settings_service.get_value(db, "timezone")
+    # Корзины считаются в НАИВНОМ локальном времени (после одного AT TIME ZONE,
+    # без обратного перевода в timestamptz): месяц/неделя — календарная
+    # арифметика, а не сдвиг по UTC-смещению. Если шагать интервалом прямо по
+    # timestamptz, "+1 month" переносится в часовом поясе СЕССИИ Postgres, а не
+    # организации, и корзины уезжают на день, дальше — больше с каждым шагом.
     sql = text(
         f"""
         with buckets as (
             select generate_series(
-                date_trunc('{granularity}', cast(:start as timestamptz)),
-                date_trunc('{granularity}', cast(:end as timestamptz) - interval '1 day'),
+                date_trunc('{granularity}', cast(:start as timestamptz) at time zone :tz),
+                date_trunc(
+                    '{granularity}',
+                    (cast(:end as timestamptz) - interval '1 day') at time zone :tz
+                ),
                 interval '1 {granularity}'
             ) as bucket
         ),
         sold as (
-            select date_trunc('{granularity}', d.paid_at) as bucket,
+            select date_trunc('{granularity}', d.paid_at at time zone :tz) as bucket,
                    sum(d.total_amount) as amount, count(*) as cnt
             from deals d
             where d.status = :paid and d.paid_at >= :start and d.paid_at < :end
@@ -316,9 +342,11 @@ async def series(
                -- была бы враньём — столбик показывал бы меньше, чем неделя
                -- заработала. Отдаём честные границы, и подпись читается
                -- «15–19 июл»: ровно то, что посчитано.
-               greatest(b.bucket, cast(:start as timestamptz))::date as period_start,
+               greatest(b.bucket, (cast(:start as timestamptz) at time zone :tz))::date
+                   as period_start,
                (least(
-                   b.bucket + interval '1 {granularity}', cast(:end as timestamptz)
+                   b.bucket + interval '1 {granularity}',
+                   (cast(:end as timestamptz) at time zone :tz)
                ) - interval '1 day')::date as period_end,
                coalesce(s.amount, 0) as amount,
                coalesce(s.cnt, 0) as cnt
@@ -326,7 +354,7 @@ async def series(
         order by b.bucket
         """
     )
-    rows = (await db.execute(sql, _params(scope, start, end))).all()
+    rows = (await db.execute(sql, {**_params(scope, start, end), "tz": tz_name})).all()
     return {
         "points": [
             {
@@ -346,7 +374,7 @@ async def managers(
     db: AsyncSession, date_from: date, date_to: date
 ) -> list[dict[str, Any]]:
     """Разрез по менеджерам — только для руководителя."""
-    start, end = _bounds(date_from, date_to)
+    start, end = await _bounds(db, date_from, date_to)
     sql = text(
         """
         select u.id, u.full_name, u.avatar_color,

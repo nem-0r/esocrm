@@ -67,17 +67,3 @@ def normalize(raw: str) -> str:
     if len(cleaned) == BODY_LENGTH + 1:
         return f"{PREFIX}{cleaned}"
     return ""
-
-
-def is_valid(raw: str) -> bool:
-    """Похоже ли это на наш код и сходится ли проверочный символ.
-
-    Числовые коды старых сделок сюда не попадают: у них своя ветка поиска.
-    """
-    code = normalize(raw)
-    body = code[len(PREFIX) :]
-    if len(body) != BODY_LENGTH + 1:
-        return False
-    if any(char not in ALPHABET for char in body):
-        return False
-    return _checksum(body[:-1]) == body[-1]

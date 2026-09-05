@@ -416,7 +416,6 @@ function ConnectSheet({
   const [title, setTitle] = useState('')
   const [phone, setPhone] = useState('+7')
   const [stage, setStage] = useState<string | null>('sales')
-  const [proxyUrl, setProxyUrl] = useState('')
   const [code, setCode] = useState('')
   const [password, setPassword] = useState('')
   const [hint, setHint] = useState<string | null>(null)
@@ -429,7 +428,6 @@ function ConnectSheet({
       setAccountId(null)
       setTitle('')
       setPhone('+7')
-      setProxyUrl('')
       setCode('')
       setPassword('')
       setHint(null)
@@ -465,7 +463,6 @@ function ConnectSheet({
         title: title.trim(),
         phone: phone.trim(),
         funnel_stage: (stage ?? 'sales') as never,
-        proxy_url: proxyUrl.trim() || undefined,
       })
       setAccountId(account.id)
       const result = await sendCode.mutateAsync(account.id)
@@ -586,18 +583,6 @@ function ConnectSheet({
             <Field label="Этап воронки" hint="По нему видно, где сейчас клиент">
               <Select value={stage} onChange={setStage} options={FUNNEL_OPTIONS} />
             </Field>
-            {!reconnecting && (
-              <Field
-                label="Прокси для этого номера"
-                hint="socks5://user:pass@host:port — свой на каждый номер, иначе Telegram видит несколько аккаунтов с одного адреса и может заблокировать. Пусто — общий прокси из настроек сервера, если он задан."
-              >
-                <Input
-                  value={proxyUrl}
-                  onChange={(event) => setProxyUrl(event.target.value)}
-                  placeholder="socks5://user:pass@host:port"
-                />
-              </Field>
-            )}
             <p className="flex items-start gap-1.5 rounded-md bg-warning-soft px-3 py-2.5 text-xs text-warning">
               <AlertTriangle className="mt-0.5 size-3.5 shrink-0" aria-hidden />
               Телефон должен быть под рукой — на него придёт код. Он же понадобится при

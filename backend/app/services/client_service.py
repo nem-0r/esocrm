@@ -49,6 +49,7 @@ from app.schemas.client import (
 )
 from app.schemas.common import CursorPage, decode_cursor, encode_cursor
 from app.services.audit import log_event
+from app.services.export_format import csv_safe
 
 PHONE_RE = re.compile(r"^[0-9+\-\s]+$")
 MAX_LIMIT = 200
@@ -583,17 +584,6 @@ CSV_HEADER = [
     "Сделок оплачено",
     "Ждёт оплаты (руб)",
 ]
-_DANGEROUS_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
-
-
-def _csv_safe(value: str) -> str:
-    """Excel исполняет значения, начинающиеся с этих символов, как формулу —
-    экранируем апострофом. Не исправлено в прошлой версии продукта."""
-    if value and value[0] in _DANGEROUS_PREFIXES:
-        return "'" + value
-    return value
-
-
 def _rub(kopecks: int | None) -> str:
     """Копейки в рубли для выгрузки.
 
@@ -685,12 +675,12 @@ async def export_csv_rows(
         writer.writerow(
             [
                 client_id,
-                _csv_safe(_display_name(display_name, first, last, telegram_id)),
-                _csv_safe(phone or ""),
-                _csv_safe(f"@{tg_username}" if tg_username else ""),
+                csv_safe(_display_name(display_name, first, last, telegram_id)),
+                csv_safe(phone or ""),
+                csv_safe(f"@{tg_username}" if tg_username else ""),
                 birth_date.isoformat() if birth_date else "",
                 birth_time.strftime("%H:%M") if birth_time else "",
-                _csv_safe(birth_city or ""),
+                csv_safe(birth_city or ""),
                 zodiac_sign or "",
                 first_contact_at.strftime("%Y-%m-%d %H:%M"),
                 _rub(paid_amount),

@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.errors import Invalid
+from app.core.errors import Invalid, NotFound
 from app.models import (
     Attachment,
     AuthorKind,
@@ -312,6 +312,49 @@ async def post_message(
 
     await db.commit()
     return to_out(message, attached)
+
+
+async def retry_message(
+    db: AsyncSession, user: User, conversation_id: int, message_id: int
+) -> MessageOut:
+    """Повторить отправку сообщения, на котором шлюз исчерпал попытки.
+
+    Возвращает ту же строку `outbox` в очередь — не создаёт новую и не плодит
+    дублей, если менеджер нажмёт «повторить» несколько раз подряд.
+    """
+    conversation = await conversation_service.load_visible(db, user, conversation_id)
+    message = await db.scalar(
+        select(Message).where(
+            Message.id == message_id, Message.conversation_id == conversation.id
+        )
+    )
+    if message is None:
+        raise NotFound("Сообщение не найдено")
+    if message.status != MessageStatus.FAILED:
+        raise Invalid("Повторить можно только сообщение с ошибкой отправки")
+
+    outbox = await db.scalar(select(Outbox).where(Outbox.message_id == message.id))
+    if outbox is None:
+        raise Invalid("Сообщение не стоит в очереди отправки")
+
+    message.status = MessageStatus.QUEUED
+    message.error_text = None
+    outbox.status = OutboxStatus.PENDING
+    outbox.attempts = 0
+    outbox.error_text = None
+    outbox.next_attempt_at = datetime.now(UTC)
+    await log_event(
+        db, action="message.retry", entity_type="message", entity_id=message.id, actor=user,
+    )
+    await db.commit()
+
+    audience = await conversation_audience(db, conversation.id)
+    await emit(
+        "message.updated",
+        {"conversation_id": conversation.id, "message": to_out(message).model_dump(mode="json")},
+        audience,
+    )
+    return to_out(message)
 
 
 async def _refresh_outbox_payload(

@@ -32,3 +32,16 @@ async def create_message(
     db: Db, user: CurrentUser, conversation_id: ConversationId, payload: MessageCreate
 ) -> MessageOut:
     return await message_service.post_message(db, user, conversation_id, payload)
+
+
+@router.post(
+    "/{conversation_id}/messages/{message_id}/retry",
+    summary="Повторить отправку сообщения с ошибкой",
+)
+async def retry_message(
+    db: Db,
+    user: CurrentUser,
+    conversation_id: ConversationId,
+    message_id: Annotated[int, Path(gt=0, description="Идентификатор сообщения")],
+) -> MessageOut:
+    return await message_service.retry_message(db, user, conversation_id, message_id)

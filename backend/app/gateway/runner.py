@@ -230,7 +230,7 @@ async def _process_outbox_row(worker_id: str, db: AsyncSession, outbox: Outbox) 
             attachments,
         )
     except Exception as exc:
-        from app.gateway.mtproto_provider import RetryAfter
+        from app.gateway.mtproto_provider import ClientBlocked, RetryAfter
 
         if isinstance(exc, RetryAfter):
             # Telegram назвал срок. Повтор раньше срока продлевает запрет,
@@ -244,6 +244,18 @@ async def _process_outbox_row(worker_id: str, db: AsyncSession, outbox: Outbox) 
                 message.id,
                 exc.seconds,
             )
+            return
+        if isinstance(exc, ClientBlocked):
+            # Блокировка не снимется сама за секунды — гонять бэкофф бессмысленно,
+            # сразу финальный отказ. Флаг на диалоге предупредит менеджера в
+            # интерфейсе, прежде чем он попробует написать снова.
+            conversation.is_blocked_by_client = True
+            outbox.attempts = MAX_ATTEMPTS - 1
+            await _handle_failure(db, outbox, message, str(exc))
+            from app.services import conversation_service
+
+            detail = await conversation_service.build_detail(db, outbox.conversation_id)
+            await conversation_service.emit_updated(db, detail)
             return
         await _handle_failure(db, outbox, message, str(exc))
         return

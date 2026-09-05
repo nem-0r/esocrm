@@ -21,6 +21,7 @@ import math
 import sys
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 from sqlalchemy import text
@@ -63,11 +64,16 @@ def close_enough(name: str, expected: float | None, actual: float | None, tol: f
         print(f"  ✗ {name}: ожидалось ~{expected}, получено {actual}")
 
 
+DEFAULT_TZ = ZoneInfo("Europe/Moscow")
+
+
 def bounds(date_from: date, date_to: date) -> tuple[datetime, datetime]:
-    """Границы периода ровно как их считает сервис: верхняя — исключающая."""
+    """Границы периода — по часовому поясу организации (в демо-данных не
+    переопределён, значит действует умолчание "Europe/Moscow"), верхняя —
+    исключающая. Считается независимо от сервиса, через ZoneInfo напрямую."""
     return (
-        datetime.combine(date_from, time.min, tzinfo=UTC),
-        datetime.combine(date_to + timedelta(days=1), time.min, tzinfo=UTC),
+        datetime.combine(date_from, time.min, tzinfo=DEFAULT_TZ).astimezone(UTC),
+        datetime.combine(date_to + timedelta(days=1), time.min, tzinfo=DEFAULT_TZ).astimezone(UTC),
     )
 
 

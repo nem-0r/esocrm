@@ -1,14 +1,19 @@
 import { Pencil } from 'lucide-react'
 import type { ReactNode } from 'react'
+import { useState } from 'react'
 
 import type { ClientCard } from '@/entities/types'
 import { birthDate, dateFull, money, plural } from '@/shared/lib/format'
-import { Badge, Card, SectionTitle, StatTile } from '@/shared/ui'
+import { Badge, Card, ConfirmDialog, InlineError, SectionTitle, StatTile } from '@/shared/ui'
 import { birthTimeFull } from '@/features/clients/clientText'
-import { FUNNEL_LABEL } from '@/features/profile/lib'
+import { useUpdateClient } from '@/features/clients/queries'
+import { errorMessage, FUNNEL_LABEL } from '@/features/profile/lib'
 
 export function OverviewTab({ client, onEdit }: { client: ClientCard; onEdit: () => void }) {
   const hasSource = Boolean(client.source_code || client.source)
+  const update = useUpdateClient(client.id)
+  const [revoking, setRevoking] = useState(false)
+  const [revokeError, setRevokeError] = useState<string | null>(null)
 
   return (
     <div className="flex flex-col gap-3 p-4">
@@ -113,13 +118,43 @@ export function OverviewTab({ client, onEdit }: { client: ClientCard; onEdit: ()
           <Row
             label="Рассылки"
             value={
-              <Badge tone={client.marketing_consent ? 'success' : 'danger'}>
-                {client.marketing_consent ? 'разрешены' : 'клиент отказался'}
-              </Badge>
+              <div className="flex items-center gap-2">
+                <Badge tone={client.marketing_consent ? 'success' : 'danger'}>
+                  {client.marketing_consent ? 'разрешены' : 'клиент отказался'}
+                </Badge>
+                {client.marketing_consent && (
+                  <button
+                    onClick={() => setRevoking(true)}
+                    className="text-xs text-accent-text underline-offset-4 transition-colors hover:underline"
+                  >
+                    Отозвать
+                  </button>
+                )}
+              </div>
             }
           />
+          {revokeError && <InlineError message={revokeError} />}
         </div>
       </Card>
+
+      <ConfirmDialog
+        open={revoking}
+        onOpenChange={setRevoking}
+        title="Отозвать согласие на рассылку"
+        message="Используйте только по просьбе клиента — согласие фиксируется как отозванное, с датой. Выдать его заново клиент сможет только сам."
+        confirmLabel="Отозвать"
+        danger
+        loading={update.isPending}
+        onConfirm={async () => {
+          setRevokeError(null)
+          try {
+            await update.mutateAsync({ marketing_consent: false })
+            setRevoking(false)
+          } catch (cause) {
+            setRevokeError(errorMessage(cause))
+          }
+        }}
+      />
     </div>
   )
 }

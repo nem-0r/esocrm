@@ -26,6 +26,7 @@ import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime
 
+from cryptography.exceptions import InvalidTag
 from telethon import TelegramClient, events, functions
 from telethon.errors import (
     AuthKeyUnregisteredError,
@@ -35,6 +36,7 @@ from telethon.errors import (
     SessionPasswordNeededError,
     SessionRevokedError,
     UserDeactivatedBanError,
+    UserIsBlockedError,
 )
 from telethon.sessions import StringSession
 from telethon.tl.types import (
@@ -75,6 +77,10 @@ class SessionLost(RuntimeError):
     """Сессия больше не действует: разлогинили, забанили или отозвали."""
 
 
+class ClientBlocked(RuntimeError):
+    """Собеседник заблокировал этот номер — сообщение доставить нельзя."""
+
+
 class MTProtoProvider:
     """Держит по клиенту на арендованный аккаунт."""
 
@@ -108,8 +114,9 @@ class MTProtoProvider:
             device_model="Astra CRM",
             system_version="Linux",
             app_version="1.0",
-            # Прокси задаётся на аккаунт: у каждого номера свой выход в сеть,
-            # иначе Telegram видит десяток аккаунтов с одного адреса (решение D-21).
+            # Прокси один на все аккаунты (или прямое подключение с адреса
+            # сервера, если не задан) — решение D-21 сознательно не делается:
+            # отдельные прокси на номер не покупаются.
             proxy=_proxy_for(account),
             connection_retries=None,  # переподключаться бесконечно, а не падать
             request_retries=3,
@@ -123,7 +130,16 @@ class MTProtoProvider:
         if account.session_enc is None:
             raise SessionLost("Аккаунт не подключён: нет сохранённой сессии")
         async with self._lock:
-            client = self._build(account, crypto.decrypt(account.session_enc))
+            try:
+                client = self._build(account, crypto.decrypt(account.session_enc))
+            except InvalidTag as exc:
+                # Без этого сбой тихо пробрасывается наверх как есть: `start()`
+                # ловит только SessionLost, а сырую cryptography-ошибку никто
+                # не превращает в понятную причину на экране аккаунта.
+                raise SessionLost(
+                    "Не удалось расшифровать данные аккаунта — на сервере сменился "
+                    "ключ шифрования. Подключите аккаунт заново."
+                ) from exc
             await client.connect()
             if not await client.is_user_authorized():
                 await client.disconnect()
@@ -301,6 +317,8 @@ class MTProtoProvider:
             raise RetryAfter(int(exc.seconds)) from exc
         except (AuthKeyUnregisteredError, SessionRevokedError, UserDeactivatedBanError) as exc:
             raise SessionLost(str(exc)) from exc
+        except UserIsBlockedError as exc:
+            raise ClientBlocked("Клиент заблокировал этот номер") from exc
         return SentMessage(tg_message_id=int(sent.id))
 
     async def mark_read(self, account: TelegramAccount, chat_id: int, max_id: int) -> None:
@@ -410,10 +428,9 @@ def _as_files(attachments: list[dict]) -> list[io.BytesIO]:
 
 
 def _proxy_for(account: TelegramAccount) -> tuple | None:
-    """Прокси на аккаунт (D-21): свой на номер, если задан при подключении,
-    иначе общий TELEGRAM_PROXY из окружения — так по-прежнему можно поднять
-    один аккаунт локально/в демо, не заводя прокси для каждого номера."""
-    raw = crypto.decrypt(account.proxy_url_enc) or settings.telegram_proxy
+    """Прокси на аккаунт. Пока задаётся одним значением на установку —
+    поаккаунтные адреса появятся вместе с закупкой мобильных прокси (D-21)."""
+    raw = settings.telegram_proxy
     if not raw:
         return None
     # Формат: socks5://user:pass@host:port

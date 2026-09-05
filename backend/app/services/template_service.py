@@ -93,6 +93,10 @@ async def update_template(
         actor=user, before=before, after={"title": template.title, "is_active": template.is_active},
     )
     await db.commit()
+    # updated_at пересчитан на стороне БД (onupdate=func.now()) — в отличие от
+    # INSERT, обновление не возвращает его в объект само, и доступ к полю после
+    # commit() требует явного запроса, которого здесь ждать нельзя (MissingGreenlet).
+    await db.refresh(template)
     return payload(template)
 
 

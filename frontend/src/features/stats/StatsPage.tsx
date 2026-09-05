@@ -250,6 +250,9 @@ export function StatsPage() {
           {isAdmin && (
             <Card>
               <SectionTitle>По менеджерам</SectionTitle>
+              <p className="-mt-1 text-micro text-ink-faint">
+                Без диалогов без ответственного — их не видно ни в одной строке.
+              </p>
               {managers.isLoading ? (
                 <ListSkeleton rows={3} />
               ) : managers.error ? (
@@ -313,7 +316,9 @@ export function StatsPage() {
                 </li>
                 <li>
                   <b className="text-ink">Чатов в работе</b> — диалоги, где было хотя бы одно
-                  сообщение за период.
+                  сообщение за период. Здесь считаются и диалоги без ответственного —
+                  в разрезе «По менеджерам» их нет ни у кого, поэтому сумма по строкам
+                  бывает меньше этой цифры.
                 </li>
                 <li>
                   <b className="text-ink">Новых клиентов</b> — те, у кого первое обращение попало

@@ -68,7 +68,9 @@ def create_app() -> FastAPI:
 
     @app.get("/health", tags=["служебное"])
     async def health() -> dict[str, object]:
-        return {"status": "ok", "demo_mode": settings.demo_mode}
+        # Публичный, без авторизации — проба живости, а не диагностика.
+        # Режим сервера сюда не отдаём: неавторизованному вызову знать не нужно.
+        return {"status": "ok"}
 
     return app
 

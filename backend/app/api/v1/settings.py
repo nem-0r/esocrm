@@ -39,7 +39,7 @@ class SettingsPatch(BaseModel):
 
 def _check_minutes(name: str, value: int, label: str) -> None:
     if not 1 <= value <= 1440:
-        raise Invalid(f"{label}: допустимо от 1 до 1440 минут", details={"field": name})
+        raise Invalid(f"{label}: допустимо от 1 до 1440 минут", field=name)
 
 
 def _check_time(name: str, value: str, label: str) -> None:
@@ -47,7 +47,7 @@ def _check_time(name: str, value: str, label: str) -> None:
         hours, minutes = value.split(":")
         time(int(hours), int(minutes))
     except (ValueError, TypeError) as exc:
-        raise Invalid(f"{label}: укажите время в формате ЧЧ:ММ", details={"field": name}) from exc
+        raise Invalid(f"{label}: укажите время в формате ЧЧ:ММ", field=name) from exc
 
 
 def validate(payload: dict[str, Any]) -> dict[str, Any]:
@@ -58,7 +58,7 @@ def validate(payload: dict[str, Any]) -> dict[str, Any]:
     if (value := payload.get("deal_link_ttl_days")) is not None and not 1 <= value <= 90:
         raise Invalid(
             "Срок действия оплаты: допустимо от 1 до 90 дней",
-            details={"field": "deal_link_ttl_days"},
+            field="deal_link_ttl_days",
         )
     if (value := payload.get("working_hours_start")) is not None:
         _check_time("working_hours_start", value, "Начало рабочего дня")
@@ -70,14 +70,14 @@ def validate(payload: dict[str, Any]) -> dict[str, Any]:
     ):
         raise Invalid(
             "Рабочие дни: выберите хотя бы один день недели",
-            details={"field": "working_days"},
+            field="working_days",
         )
     if (value := payload.get("timezone")) is not None:
         try:
             ZoneInfo(value)
         except (ZoneInfoNotFoundError, ValueError) as exc:
             raise Invalid(
-                "Часовой пояс не распознан", details={"field": "timezone"}
+                "Часовой пояс не распознан", field="timezone"
             ) from exc
     if (value := payload.get("history_sync_from")) is not None:
         try:
@@ -85,22 +85,22 @@ def validate(payload: dict[str, Any]) -> dict[str, Any]:
         except (ValueError, TypeError) as exc:
             raise Invalid(
                 "Начало истории: укажите дату в формате ГГГГ-ММ-ДД",
-                details={"field": "history_sync_from"},
+                field="history_sync_from",
             ) from exc
     if (value := payload.get("history_sync_days")) is not None and not 1 <= value <= 3650:
         raise Invalid(
             "Глубина импорта: допустимо от 1 до 3650 дней",
-            details={"field": "history_sync_days"},
+            field="history_sync_days",
         )
     if (value := payload.get("robokassa_sno")) is not None and value not in ROBOKASSA_SNO_VALUES:
         raise Invalid(
             "Система налогообложения: недопустимое значение",
-            details={"field": "robokassa_sno"},
+            field="robokassa_sno",
         )
     if (value := payload.get("robokassa_tax")) is not None and value not in ROBOKASSA_TAX_VALUES:
         raise Invalid(
             "Ставка НДС: недопустимое значение",
-            details={"field": "robokassa_tax"},
+            field="robokassa_tax",
         )
     return payload
 

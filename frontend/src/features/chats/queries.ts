@@ -100,6 +100,17 @@ export function useSendMessage(conversationId: number) {
   })
 }
 
+export function useRetryMessage(conversationId: number) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (messageId: number) =>
+      api.post<Message>(`/conversations/${conversationId}/messages/${messageId}/retry`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['messages', conversationId] })
+    },
+  })
+}
+
 export function useMarkRead() {
   const queryClient = useQueryClient()
   return useMutation({

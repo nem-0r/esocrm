@@ -41,11 +41,6 @@ class TelegramAccount(Base, PKMixin, TimestampMixin):
     api_id: Mapped[int] = mapped_column(Integer, nullable=False)
     api_hash_enc: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     session_enc: Mapped[bytes | None] = mapped_column(LargeBinary)
-    # Свой прокси на номер (решение D-21) — без него несколько живых аккаунтов
-    # выходят в сеть с одного адреса сервера, а это ровно то, что резко
-    # повышает риск блокировки. Пусто — используется общий TELEGRAM_PROXY
-    # из окружения (или прямое подключение, если и он не задан).
-    proxy_url_enc: Mapped[bytes | None] = mapped_column(LargeBinary)
 
     tg_user_id: Mapped[int | None] = mapped_column(BigInteger)
     tg_username: Mapped[str | None] = mapped_column(String(120))

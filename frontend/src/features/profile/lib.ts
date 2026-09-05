@@ -96,7 +96,6 @@ export const ROBOKASSA_SNO_OPTIONS: { value: string; label: string }[] = [
   { value: 'osn', label: 'ОСН — общая' },
   { value: 'usn_income', label: 'УСН — доходы' },
   { value: 'usn_income_outcome', label: 'УСН — доходы минус расходы' },
-  { value: 'envd', label: 'ЕНВД' },
   { value: 'esn', label: 'ЕСН' },
   { value: 'patent', label: 'Патент' },
 ]

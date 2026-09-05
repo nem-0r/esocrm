@@ -1,4 +1,4 @@
-import { AlertTriangle, Bell, ChevronDown, ChevronRight, ChevronUp, KeyRound, LogOut, Settings as SettingsIcon, Smartphone, Users } from 'lucide-react'
+import { AlertTriangle, Bell, ChevronDown, ChevronRight, ChevronUp, KeyRound, Landmark, LogOut, Settings as SettingsIcon, Smartphone, Users } from 'lucide-react'
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
 
@@ -214,6 +214,12 @@ function DirectorBlocks() {
           icon={<Users className="size-5" aria-hidden />}
           title="Сотрудники"
           hint="Приглашения, роли, доступ"
+        />
+        <NavRow
+          to="/profile/requisites"
+          icon={<Landmark className="size-5" aria-hidden />}
+          title="Реквизиты"
+          hint="Счета для оплаты по реквизитам"
         />
         <NavRow
           to="/settings"

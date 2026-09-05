@@ -554,11 +554,11 @@ async def pay_deal(
     if not receipt:
         raise Invalid(
             "Укажите номер чека — без него оплату подтвердить нельзя",
-            details={"field": "receipt_number"},
+            field="receipt_number",
         )
     if len(receipt) > 64:
         raise Invalid(
-            "Номер чека — не длиннее 64 символов", details={"field": "receipt_number"}
+            "Номер чека — не длиннее 64 символов", field="receipt_number"
         )
     deal.status = DealStatus.PAID
     deal.paid_at = datetime.now(UTC)

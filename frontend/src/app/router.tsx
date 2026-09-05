@@ -30,6 +30,9 @@ const StaffPage = lazy(() =>
 const SettingsPage = lazy(() =>
   import('@/features/profile/SettingsPage').then((m) => ({ default: m.SettingsPage })),
 )
+const RequisitesPage = lazy(() =>
+  import('@/features/profile/RequisitesPage').then((m) => ({ default: m.RequisitesPage })),
+)
 
 import { useAuth } from '@/shared/hooks/useAuth'
 import { LoadingState, ErrorState, EmptyState } from '@/shared/ui'
@@ -104,6 +107,14 @@ export function AppRoutes() {
           element={
             <AdminOnly>
               <StaffPage />
+            </AdminOnly>
+          }
+        />
+        <Route
+          path="/profile/requisites"
+          element={
+            <AdminOnly>
+              <RequisitesPage />
             </AdminOnly>
           }
         />
