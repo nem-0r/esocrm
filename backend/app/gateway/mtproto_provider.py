@@ -29,10 +29,15 @@ from datetime import UTC, datetime
 from cryptography.exceptions import InvalidTag
 from telethon import TelegramClient, events, functions
 from telethon.errors import (
+    ApiIdInvalidError,
     AuthKeyUnregisteredError,
     FloodWaitError,
     PhoneCodeExpiredError,
     PhoneCodeInvalidError,
+    PhoneNumberBannedError,
+    PhoneNumberFloodError,
+    PhoneNumberInvalidError,
+    SendCodeUnavailableError,
     SessionPasswordNeededError,
     SessionRevokedError,
     UserDeactivatedBanError,
@@ -80,6 +85,14 @@ class SessionLost(RuntimeError):
 
 class ClientBlocked(RuntimeError):
     """Собеседник заблокировал этот номер — сообщение доставить нельзя."""
+
+
+class LoginRefused(RuntimeError):
+    """Telegram отказал во входе по причине, которую нельзя обойти повтором.
+
+    Текст такой ошибки уходит прямо руководителю в интерфейс, поэтому здесь
+    живёт человеческая формулировка, а не англоязычная строка из Telethon.
+    """
 
 
 class MTProtoProvider:
@@ -248,8 +261,56 @@ class MTProtoProvider:
             await client.disconnect()
             self._logins.pop(account.id, None)
             raise RetryAfter(int(exc.seconds)) from exc
+        except SendCodeUnavailableError as exc:
+            # Повтор уже нечем доставить: Telegram исчерпал каналы для номера.
+            # Соединение не рвём — прежний код мог остаться действующим.
+            raise LoginRefused(
+                "Telegram больше не может отправить код на этот номер: все способы "
+                "доставки уже использованы. Код из предыдущего запроса, скорее всего, "
+                "ещё действует — найдите его в приложении Telegram на телефоне с этим "
+                "номером, в служебном чате «Telegram». Новый код тот же номер сможет "
+                "получить через несколько часов."
+            ) from exc
+        except PhoneNumberBannedError as exc:
+            await client.disconnect()
+            self._logins.pop(account.id, None)
+            raise LoginRefused(
+                "Telegram заблокировал этот номер — подключить его нельзя. "
+                "Нужен другой номер."
+            ) from exc
+        except PhoneNumberFloodError as exc:
+            await client.disconnect()
+            self._logins.pop(account.id, None)
+            raise LoginRefused(
+                "С этого номера сегодня запрашивали код слишком много раз. "
+                "Telegram временно закрыл вход — попробуйте через сутки."
+            ) from exc
+        except PhoneNumberInvalidError as exc:
+            await client.disconnect()
+            self._logins.pop(account.id, None)
+            raise LoginRefused(
+                f"Telegram не знает номер {account.phone}. Проверьте, тот ли это номер "
+                "и зарегистрирован ли на нём Telegram."
+            ) from exc
+        except ApiIdInvalidError as exc:
+            await client.disconnect()
+            self._logins.pop(account.id, None)
+            raise LoginRefused(
+                "Telegram отклонил ключи приложения (TELEGRAM_API_ID/TELEGRAM_API_HASH) — "
+                "подключение невозможно, пока их не исправят в настройках сервера."
+            ) from exc
         # Клиент остаётся жить до подтверждения: код принадлежит этому соединению.
         self._logins[account.id] = client
+        # Куда Telegram отправил код и чем готов повторить. Без этого в логе
+        # разбор «код не пришёл» упирается в догадки: next_type=None означает,
+        # что запасного канала (SMS, звонок) для номера не предложено вовсе.
+        log.info(
+            "Аккаунт %s: код отправлен через %s, запасной канал %s, таймаут %s",
+            account.id,
+            type(sent.type).__name__,
+            type(sent.next_type).__name__ if sent.next_type else "нет",
+            sent.timeout,
+        )
         # `sent.type` — один из нескольких классов Telethon (SentCodeTypeApp,
         # SentCodeTypeSms, SentCodeTypeCall, ...); у всех есть CONSTRUCTOR_ID,
         # так что проверять его наличие бессмысленно — нужен именно класс типа.
