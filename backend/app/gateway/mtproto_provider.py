@@ -112,9 +112,13 @@ class MTProtoProvider:
             StringSession(session or None),
             account.api_id,
             api_hash,
-            device_model="Astra CRM",
-            system_version="Linux",
-            app_version="1.0",
+            # Нейтральный, а не самопальный фингерпринт устройства: явное имя
+            # вроде "Astra CRM" на входе с серверного IP — лишний повод для
+            # антиспам-фильтра Telegram счесть вход автоматическим (docs/12,
+            # раздел «Про прокси — не перестраховка»).
+            device_model="Desktop",
+            system_version="Windows 10",
+            app_version="5.5.4",
             # Прокси один на все аккаунты (или прямое подключение с адреса
             # сервера, если не задан) — решение D-21 сознательно не делается:
             # отдельные прокси на номер не покупаются.
@@ -225,19 +229,24 @@ class MTProtoProvider:
     # ------------------------------------------------------------------- вход
 
     async def send_code(self, account: TelegramAccount) -> CodeRequest:
-        # Повторный запрос кода («Отправить код заново») до того, как предыдущий
-        # был подтверждён: старое соединение иначе повисает без ссылок и без
-        # явного disconnect — соединение с Telegram остаётся открытым молча.
-        stale_login = self._logins.pop(account.id, None)
+        # «Отправить код заново» на уже открытом логин-соединении — это
+        # настоящий повтор: Telethon помнит phone_code_hash на самом клиенте
+        # и посылает auth.ResendCodeRequest, а не новый auth.SendCodeRequest.
+        # Если вместо этого каждый раз собирать клиента заново (новый ключ
+        # авторизации), Telegram видит не повтор, а ещё один "новый прибор",
+        # заходящий на тот же номер, — с сервера это выглядит как перебор.
+        stale_login = self._logins.get(account.id)
         if stale_login is not None and stale_login.is_connected():
-            await stale_login.disconnect()
-
-        client = self._build(account, None)
-        await client.connect()
+            client = stale_login
+        else:
+            self._logins.pop(account.id, None)
+            client = self._build(account, None)
+            await client.connect()
         try:
             sent = await client.send_code_request(account.phone)
         except FloodWaitError as exc:
             await client.disconnect()
+            self._logins.pop(account.id, None)
             raise RetryAfter(int(exc.seconds)) from exc
         # Клиент остаётся жить до подтверждения: код принадлежит этому соединению.
         self._logins[account.id] = client
