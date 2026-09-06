@@ -43,8 +43,8 @@ from telethon.tl.types import (
     DocumentAttributeAudio,
     DocumentAttributeFilename,
     DocumentAttributeVideo,
-    SentCodeTypeApp,
 )
+from telethon.tl.types.auth import SentCodeTypeApp
 from telethon.tl.types import (
     User as TgUser,
 )
