@@ -43,6 +43,7 @@ from telethon.tl.types import (
     DocumentAttributeAudio,
     DocumentAttributeFilename,
     DocumentAttributeVideo,
+    SentCodeTypeApp,
 )
 from telethon.tl.types import (
     User as TgUser,
@@ -240,9 +241,12 @@ class MTProtoProvider:
             raise RetryAfter(int(exc.seconds)) from exc
         # Клиент остаётся жить до подтверждения: код принадлежит этому соединению.
         self._logins[account.id] = client
+        # `sent.type` — один из нескольких классов Telethon (SentCodeTypeApp,
+        # SentCodeTypeSms, SentCodeTypeCall, ...); у всех есть CONSTRUCTOR_ID,
+        # так что проверять его наличие бессмысленно — нужен именно класс типа.
         return CodeRequest(
             phone_code_hash=sent.phone_code_hash,
-            sent_to="app" if getattr(sent.type, "CONSTRUCTOR_ID", None) else "sms",
+            sent_to="app" if isinstance(sent.type, SentCodeTypeApp) else "sms",
         )
 
     async def confirm_code(
