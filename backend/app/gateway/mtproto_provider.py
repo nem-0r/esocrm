@@ -441,6 +441,13 @@ class MTProtoProvider:
             log.exception("Вход по QR для аккаунта %s не удался", account_id)
             session.status = "error"
             session.message = str(exc)
+        finally:
+            # Брошенная попытка не должна держать соединение с Telegram: при
+            # успехе оно уже стало рабочим клиентом аккаунта, при ожидании
+            # пароля ещё понадобится, а в остальных случаях лишнее.
+            if session.status == "error" and session.client.is_connected():
+                with contextlib.suppress(Exception):
+                    await session.client.disconnect()
 
     async def _qr_finish(self, account_id: int, session: _QrSession) -> SessionResult:
         """Вход состоялся: соединение становится рабочим клиентом аккаунта."""
