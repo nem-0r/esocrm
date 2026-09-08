@@ -127,11 +127,27 @@ async def serve(
                 await asyncio.wait_for(stop.wait(), timeout=RECONNECT_DELAY)
 
 
+async def _run_command(
+    handler: Handler, redis: Any, request: dict[str, Any], account_id: int
+) -> None:
+    reply_channel = f"{REPLY_PREFIX}{request['id']}"
+    try:
+        result = await handler(account_id, request["command"], request.get("args") or {})
+        answer = {"ok": True, "result": result}
+    except Exception as exc:  # noqa: BLE001 — текст ошибки уходит руководителю
+        log.exception("Команда %s для аккаунта %s не выполнена", request, account_id)
+        answer = {"ok": False, "error": str(exc)}
+    await redis.publish(reply_channel, json.dumps(answer, default=str))
+
+
 async def _serve_once(handler: Handler, holds: Callable[[int], bool], stop: asyncio.Event) -> None:
     redis = get_redis()
     pubsub = redis.pubsub()
     await pubsub.subscribe(COMMAND_CHANNEL)
     log.info("Шлюз слушает команды в %s", COMMAND_CHANNEL)
+    # Без этого набора asyncio может собрать задачу мусором до её завершения —
+    # ссылка на Task больше нигде не хранится.
+    tasks: set[asyncio.Task[None]] = set()
     try:
         while not stop.is_set():
             raw = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
@@ -144,14 +160,13 @@ async def _serve_once(handler: Handler, holds: Callable[[int], bool], stop: asyn
             account_id = int(request.get("account_id", 0))
             if not holds(account_id):
                 continue
-            reply_channel = f"{REPLY_PREFIX}{request['id']}"
-            try:
-                result = await handler(account_id, request["command"], request.get("args") or {})
-                answer = {"ok": True, "result": result}
-            except Exception as exc:  # noqa: BLE001 — текст ошибки уходит руководителю
-                log.exception("Команда %s для аккаунта %s не выполнена", request, account_id)
-                answer = {"ok": False, "error": str(exc)}
-            await redis.publish(reply_channel, json.dumps(answer, default=str))
+            # Каждая команда — своя задача, а не await в этом же цикле: иначе
+            # долгая команда одного аккаунта (например, подключение при
+            # нестабильной сети) держит в очереди команды всех остальных
+            # аккаунтов этого шлюза, хотя они друг от друга не зависят.
+            task = asyncio.create_task(_run_command(handler, redis, request, account_id))
+            tasks.add(task)
+            task.add_done_callback(tasks.discard)
     finally:
         with contextlib.suppress(Exception):
             await pubsub.unsubscribe(COMMAND_CHANNEL)

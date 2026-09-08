@@ -51,6 +51,8 @@ from telethon.tl.types import (
     DocumentAttributeAudio,
     DocumentAttributeFilename,
     DocumentAttributeVideo,
+    MessageMediaDocument,
+    MessageMediaPhoto,
 )
 from telethon.tl.types import (
     User as TgUser,
@@ -150,7 +152,11 @@ class MTProtoProvider:
         self._read_sink: ReadSink | None = None
         self._status_sink: StatusSink | None = None
         self._session_sink: SessionSink | None = None
-        self._lock = asyncio.Lock()
+        # Лок на аккаунт, не один на весь процесс: иначе подключение одного
+        # (медленная сеть, Telegram не спешит отвечать) держит взаперти
+        # send_message/mark_read/подтяжку истории для ВСЕХ остальных
+        # аккаунтов этого шлюза, хотя их сессии друг от друга не зависят.
+        self._connect_locks: dict[int, asyncio.Lock] = {}
 
     # ------------------------------------------------------------------ приём
 
@@ -198,7 +204,14 @@ class MTProtoProvider:
             return client
         if account.session_enc is None:
             raise SessionLost("Аккаунт не подключён: нет сохранённой сессии")
-        async with self._lock:
+        lock = self._connect_locks.setdefault(account.id, asyncio.Lock())
+        async with lock:
+            # Пока ждали лок, аккаунт мог подключить другой одновременный
+            # вызов — тогда просто отдаём готовый клиент, а не подключаемся
+            # заново поверх него.
+            client = self._clients.get(account.id)
+            if client is not None and client.is_connected():
+                return client
             try:
                 client = self._build(account, crypto.decrypt(account.session_enc))
             except InvalidTag as exc:
@@ -587,25 +600,54 @@ class MTProtoProvider:
         async for dialog in client.iter_dialogs():
             if not dialog.is_user or dialog.entity.bot:
                 continue
-            async for message in client.iter_messages(dialog.entity, limit=per_dialog_limit):
-                if message.date.astimezone(UTC) < since:
-                    break
-                try:
-                    inbound = await self._to_inbound(client, message, live=False)
-                except Exception:
-                    # Один непонятый тип сообщения не должен стоить всей
-                    # оставшейся истории: без этой защиты подтяжка обрывалась
-                    # целиком, и все диалоги, что шли в очереди дальше, вообще
-                    # не открывались — ровно то, что уже произошло на живом
-                    # аккаунте (`AttributeError` в `_read_media`).
-                    log.exception(
-                        "Не разобрал сообщение %s аккаунта %s при подтяжке истории",
-                        getattr(message, "id", "?"),
-                        account.id,
-                    )
-                    continue
-                if inbound is not None:
-                    yield inbound
+            try:
+                async for message in client.iter_messages(dialog.entity, limit=per_dialog_limit):
+                    if message.date.astimezone(UTC) < since:
+                        break
+                    try:
+                        inbound = await self._to_inbound(client, message, live=False)
+                    except (AuthKeyUnregisteredError, SessionRevokedError, UserDeactivatedBanError):
+                        # Сессия отвалилась совсем — дальше нечем ходить ни по
+                        # этому, ни по остальным диалогам. Пробрасываем вместо
+                        # того, чтобы широкий except ниже принял разрыв связи
+                        # за «не разобрал одно сообщение» и молча пошёл дальше.
+                        raise
+                    except Exception:
+                        # Один непонятый тип сообщения не должен стоить всей
+                        # оставшейся истории: без этой защиты подтяжка обрывалась
+                        # целиком, и все диалоги, что шли в очереди дальше, вообще
+                        # не открывались — ровно то, что уже произошло на живом
+                        # аккаунте (`AttributeError` в `_read_media`).
+                        log.exception(
+                            "Не разобрал сообщение %s аккаунта %s при подтяжке истории",
+                            getattr(message, "id", "?"),
+                            account.id,
+                        )
+                        continue
+                    if inbound is not None:
+                        yield inbound
+            except (AuthKeyUnregisteredError, SessionRevokedError, UserDeactivatedBanError):
+                raise
+            except FloodWaitError as exc:
+                # Тот же принцип, что и для одного сообщения, но уровнем выше:
+                # один диалог, за который Telegram попросил подождать дольше,
+                # чем Telethon готов терпеть молча (`flood_sleep_threshold`),
+                # не должен останавливать подтяжку по всем диалогам, что идут
+                # в очереди дальше — просто дойдём до него следующим прогоном.
+                log.warning(
+                    "Диалог %s аккаунта %s пропущен: Telegram просит подождать %s с",
+                    getattr(dialog, "id", "?"),
+                    account.id,
+                    exc.seconds,
+                )
+                continue
+            except Exception:
+                log.exception(
+                    "Диалог %s аккаунта %s пропущен при подтяжке истории",
+                    getattr(dialog, "id", "?"),
+                    account.id,
+                )
+                continue
             # Пауза между диалогами: ровный темп дешевле, чем запрет на час.
             await asyncio.sleep(0.4)
 
@@ -705,7 +747,13 @@ def _proxy_for(account: TelegramAccount) -> tuple | None:
 
 async def _read_media(client: TelegramClient, message) -> tuple[str | None, list[dict]]:  # noqa: ANN001
     """Скачать вложение сразу: ссылка Telegram недолговечна, а переписку открывают и через год."""
-    if not message.media:
+    # message.media truthy — не то же самое, что «собеседник прислал файл».
+    # У обычного текста со ссылкой Telegram сам прикладывает превью
+    # (MessageMediaWebPage) — media есть, а реального вложения нет. message.photo
+    # и message.video прозрачно берут картинку/видео ИЗ ЭТОГО превью, так что
+    # без явной проверки типа обычное сообщение со ссылкой попадало бы в CRM
+    # как «фото»/«документ» без содержимого вместо простого текста.
+    if not isinstance(message.media, (MessageMediaPhoto, MessageMediaDocument)):
         return None, []
 
     kind = "document"

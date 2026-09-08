@@ -97,6 +97,25 @@ async def _start_accounts(account_ids: list[int]) -> None:
             task.add_done_callback(_background_tasks.discard)
 
 
+async def _stop_accounts(account_ids: set[int]) -> None:
+    """Отпустить сессии аккаунтов, чью аренду забрал другой воркер.
+
+    Без этого прежний процесс продолжает держать открытое MTProto-соединение
+    (а если шёл вход по QR — ещё и фоновую задачу ожидания сканирования) на
+    аккаунт, за который формально больше не отвечает, пока новый воркер
+    поднимает своё соединение параллельно. Два живых сеанса с одного
+    Telegram-аккаунта — ровно то, что резко повышает риск блокировки.
+    """
+    provider = get_provider()
+    async with SessionLocal() as db:
+        rows = await db.execute(select(TelegramAccount).where(TelegramAccount.id.in_(account_ids)))
+        for account in rows.scalars().all():
+            try:
+                await provider.stop(account)
+            except Exception:
+                log.exception("Не удалось освободить сессию аккаунта %s", account.id)
+
+
 async def _lease_loop(worker_id: str, hostname: str, stop: asyncio.Event) -> None:
     async with SessionLocal() as db:
         await lease.register_worker(db, worker_id, hostname, settings.gateway_capacity)
@@ -109,11 +128,25 @@ async def _lease_loop(worker_id: str, hostname: str, stop: asyncio.Event) -> Non
                 claimed = await lease.claim_accounts(db, worker_id, settings.gateway_capacity)
             # Набор пересобираем из базы, а не копим: аккаунт могли отобрать,
             # отключить или удалить, и тогда команды по нему не наши.
+            new_held = await handlers.held_account_ids(worker_id)
+            lost = _held - new_held
             _held.clear()
-            _held.update(await handlers.held_account_ids(worker_id))
+            _held.update(new_held)
+            # Не await здесь: подключение (или отключение) одного аккаунта
+            # может тянуться, если сеть до Telegram нестабильна, и держать на
+            # этом весь цикл — значит задержать heartbeat остальным уже
+            # арендованным аккаунтам, рискуя не продлить их аренду вовремя
+            # и отдать другому воркеру без всякой причины со стороны Telegram.
+            if lost:
+                log.info("Шлюз %s потерял аккаунты: %s", worker_id, lost)
+                task = asyncio.create_task(_stop_accounts(lost))
+                _background_tasks.add(task)
+                task.add_done_callback(_background_tasks.discard)
             if claimed:
                 log.info("Шлюз %s принял аккаунты: %s", worker_id, claimed)
-                await _start_accounts(claimed)
+                task = asyncio.create_task(_start_accounts(claimed))
+                _background_tasks.add(task)
+                task.add_done_callback(_background_tasks.discard)
         except Exception:
             log.exception("Ошибка в цикле аренды")
         with contextlib.suppress(TimeoutError):
@@ -282,6 +315,23 @@ async def _process_outbox_row(worker_id: str, db: AsyncSession, outbox: Outbox) 
         task.add_done_callback(_background_tasks.discard)
 
 
+async def _drain_account_outbox(worker_id: str, account_id: int, stop: asyncio.Event) -> bool:
+    """Разобрать очередь исходящих одного аккаунта до конца. True — было что слать."""
+    processed_any = False
+    while not stop.is_set():
+        async with SessionLocal() as db:
+            outbox = await _claim_one_outbox(db, [account_id])
+            if outbox is None:
+                break
+            processed_any = True
+            try:
+                await _process_outbox_row(worker_id, db, outbox)
+            except Exception:
+                log.exception("Ошибка отправки outbox %s", outbox.id)
+                await db.rollback()
+    return processed_any
+
+
 async def _outbox_loop(worker_id: str, stop: asyncio.Event) -> None:
     while not stop.is_set():
         async with SessionLocal() as db:
@@ -289,17 +339,13 @@ async def _outbox_loop(worker_id: str, stop: asyncio.Event) -> None:
 
         processed_any = False
         if account_ids:
-            while not stop.is_set():
-                async with SessionLocal() as db:
-                    outbox = await _claim_one_outbox(db, account_ids)
-                    if outbox is None:
-                        break
-                    processed_any = True
-                    try:
-                        await _process_outbox_row(worker_id, db, outbox)
-                    except Exception:
-                        log.exception("Ошибка отправки outbox %s", outbox.id)
-                        await db.rollback()
+            # Очередь на аккаунт своя и разбирается параллельно с остальными:
+            # крупное вложение у одного не должно держать в ожидании уже
+            # готовые к отправке сообщения совершенно другого аккаунта.
+            results = await asyncio.gather(
+                *(_drain_account_outbox(worker_id, account_id, stop) for account_id in account_ids)
+            )
+            processed_any = any(results)
 
         if not processed_any:
             with contextlib.suppress(TimeoutError):

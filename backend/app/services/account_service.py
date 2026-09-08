@@ -265,6 +265,11 @@ async def _wait_for_lease(
         )
         if worker_id is not None:
             return
+        # Без коммита это одно и то же чтение держит транзакцию открытой (и
+        # соединение из пула занятым) на весь цикл ожидания — до 13 секунд на
+        # каждый одновременный send_code/qr_start. Запрос на чтение, коммит
+        # и rollback здесь равнозначны — коммит просто явно закрывает шаг.
+        await db.commit()
         await asyncio.sleep(0.3)
 
 
@@ -333,8 +338,11 @@ async def qr_state(db: AsyncSession, admin: User, account_id: int) -> QrStateOut
     if status == "done":
         # Сессию записал шлюз, в отдельном соединении с базой. Наши прочитанные
         # ранее объекты про это не знают — сбрасываем, иначе вернём старый статус.
+        # account_id, не account.id: после expire_all() сам объект account
+        # разгружен, и синхронное чтение его атрибута на AsyncSession падает
+        # с MissingGreenlet — id нужен раньше, чем ORM успеет его перечитать.
         db.expire_all()
-        row = await _row(db, account.id)
+        row = await _row(db, account_id)
     return QrStateOut(
         status=status,
         image=answer.get("image"),
@@ -362,7 +370,7 @@ async def qr_password(
     )
     await db.commit()
     db.expire_all()
-    return ConfirmCodeOut(needs_password=False, account=await _row(db, account.id))
+    return ConfirmCodeOut(needs_password=False, account=await _row(db, account_id))
 
 
 async def confirm_code(
