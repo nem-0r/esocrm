@@ -138,6 +138,14 @@ export function durationLabel(seconds: number | null | undefined): string {
   return waitingLabel(minutes)
 }
 
+/** Позиция плеера: «1:07», «12:03». Часы не нужны — голосовые короче. */
+export function playerTime(seconds: number): string {
+  const total = Math.max(0, Math.round(seconds))
+  const m = Math.floor(total / 60)
+  const s = total % 60
+  return `${m}:${String(s).padStart(2, '0')}`
+}
+
 export function fileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} Б`
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} КБ`

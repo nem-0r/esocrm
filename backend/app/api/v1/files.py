@@ -53,5 +53,12 @@ async def download_file(db: Db, user: CurrentUser, attachment_id: int) -> Stream
     return StreamingResponse(
         _chunks(body),
         media_type=attachment.mime_type or "application/octet-stream",
-        headers={"Content-Disposition": _content_disposition(attachment.file_name)},
+        headers={
+            "Content-Disposition": _content_disposition(attachment.file_name),
+            # Содержимое вложения неизменяемо: id указывает на конкретный файл
+            # раз и навсегда. Год кэша в браузере — это ровно то, что нужно
+            # плееру голосовых: одно скачивание, дальше повтор без сети.
+            "Cache-Control": "private, max-age=31536000, immutable",
+            "ETag": f'"{attachment_id}"',
+        },
     )

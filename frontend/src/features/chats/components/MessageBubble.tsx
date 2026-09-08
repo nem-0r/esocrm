@@ -1,6 +1,7 @@
 import { AlertCircle, Check, CheckCheck, Clock, Download, FileText, Lock } from 'lucide-react'
 
 import type { Message } from '@/entities/types'
+import { VoicePlayer } from '@/features/chats/components/VoicePlayer'
 import { cn } from '@/shared/lib/cn'
 import { fileSize, time } from '@/shared/lib/format'
 
@@ -69,22 +70,28 @@ export function MessageBubble({
           </span>
         )}
 
-        {message.attachments.map((file) => (
-          <a
-            key={file.id}
-            href={file.url}
-            target="_blank"
-            rel="noreferrer"
-            className="flex items-center gap-2 rounded bg-black/25 px-2.5 py-2 transition-colors hover:bg-black/40"
-          >
-            <FileText className="size-4 shrink-0 text-accent-text" aria-hidden />
-            <span className="min-w-0 flex-1">
-              <span className="block truncate text-xs font-medium text-ink">{file.file_name}</span>
-              <span className="block text-micro text-ink-faint">{fileSize(file.size_bytes)}</span>
-            </span>
-            <Download className="size-4 shrink-0 text-ink-faint" aria-hidden />
-          </a>
-        ))}
+        {message.attachments.map((file) =>
+          file.mime_type?.startsWith('audio/') ? (
+            <VoicePlayer key={file.id} src={file.url} durationSec={file.duration_sec ?? null} />
+          ) : (
+            <a
+              key={file.id}
+              href={file.url}
+              target="_blank"
+              rel="noreferrer"
+              className="flex items-center gap-2 rounded bg-black/25 px-2.5 py-2 transition-colors hover:bg-black/40"
+            >
+              <FileText className="size-4 shrink-0 text-accent-text" aria-hidden />
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-xs font-medium text-ink">
+                  {file.file_name}
+                </span>
+                <span className="block text-micro text-ink-faint">{fileSize(file.size_bytes)}</span>
+              </span>
+              <Download className="size-4 shrink-0 text-ink-faint" aria-hidden />
+            </a>
+          ),
+        )}
 
         {message.text && (
           <span
