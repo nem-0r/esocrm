@@ -94,9 +94,10 @@ class DemoProvider:
 
     # --------------------------------------------------- приём и история
 
-    def set_sinks(self, sink, read_sink=None, status_sink=None) -> None:  # noqa: ANN001
+    def set_sinks(self, sink, read_sink=None, status_sink=None, session_sink=None) -> None:  # noqa: ANN001
         """Те же приёмники, что и у боевого провайдера: путь входящего сообщения
-        в базу проверяется целиком ещё до подключения настоящего Telegram."""
+        в базу проверяется целиком ещё до подключения настоящего Telegram.
+        session_sink (вход по QR) демо не изображает — принимается и не используется."""
         self._sink = sink
         self._read_sink = read_sink
         self._status_sink = status_sink
