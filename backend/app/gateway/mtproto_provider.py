@@ -590,7 +590,20 @@ class MTProtoProvider:
             async for message in client.iter_messages(dialog.entity, limit=per_dialog_limit):
                 if message.date.astimezone(UTC) < since:
                     break
-                inbound = await self._to_inbound(client, message, live=False)
+                try:
+                    inbound = await self._to_inbound(client, message, live=False)
+                except Exception:
+                    # Один непонятый тип сообщения не должен стоить всей
+                    # оставшейся истории: без этой защиты подтяжка обрывалась
+                    # целиком, и все диалоги, что шли в очереди дальше, вообще
+                    # не открывались — ровно то, что уже произошло на живом
+                    # аккаунте (`AttributeError` в `_read_media`).
+                    log.exception(
+                        "Не разобрал сообщение %s аккаунта %s при подтяжке истории",
+                        getattr(message, "id", "?"),
+                        account.id,
+                    )
+                    continue
                 if inbound is not None:
                     yield inbound
             # Пауза между диалогами: ровный темп дешевле, чем запрет на час.
@@ -716,7 +729,13 @@ async def _read_media(client: TelegramClient, message) -> tuple[str | None, list
     if not body:
         return kind, []
 
-    name = getattr(message.file, "name", None) or f"{kind}-{message.id}{message.file.ext or ''}"
+    # У части вложений (превью ссылки, опрос, геометка, контакт) media есть,
+    # а file — нет: тело мы уже скачали выше, но по имени и расширению взять
+    # нечего. Отсюда и падала синхронизация, оставляя не пройденными все
+    # диалоги, что шли в очереди после места сбоя.
+    file = getattr(message, "file", None)
+    ext = getattr(file, "ext", None) or ""
+    name = getattr(file, "name", None) or f"{kind}-{message.id}{ext}"
     item: dict = {
         "file_name": name,
         "mime_type": getattr(message.file, "mime_type", None),
