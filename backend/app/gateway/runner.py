@@ -322,7 +322,10 @@ async def run() -> None:
     provider = get_provider()
     if hasattr(provider, "set_sinks"):
         provider.set_sinks(
-            handlers.write_inbound, handlers.write_read_receipt, handlers.write_status
+            handlers.write_inbound,
+            handlers.write_read_receipt,
+            handlers.write_status,
+            handlers.write_qr_session,
         )
 
     try:

@@ -22,6 +22,9 @@ dependencies = [
   "openpyxl>=3.1",
   "python-dateutil>=2.9",
   "orjson>=3.10",
+  # Картинка QR для входа в Telegram. Рисуем на сервере, чтобы её нельзя было
+  # испортить темой оформления или размером экрана; PIL не нужен — только SVG.
+  "qrcode>=8.0",
 ]
 
 [project.optional-dependencies]

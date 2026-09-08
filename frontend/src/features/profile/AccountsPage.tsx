@@ -7,6 +7,7 @@ import {
   Trash2,
   UserPlus,
 } from 'lucide-react'
+import { useQueryClient } from '@tanstack/react-query'
 import { useEffect, useState } from 'react'
 
 import type { Account } from '@/entities/types'
@@ -43,6 +44,9 @@ import {
   useAccounts,
   useConfirmCode,
   useCreateAccount,
+  useQrPassword,
+  useQrStart,
+  useQrState,
   useSendCode,
   useSetAccountManagers,
   useStaff,
@@ -410,8 +414,11 @@ function ConnectSheet({
   const create = useCreateAccount()
   const sendCode = useSendCode()
   const confirmCode = useConfirmCode()
+  const qrStart = useQrStart()
+  const qrPassword = useQrPassword()
+  const queryClient = useQueryClient()
 
-  const [step, setStep] = useState<'form' | 'code' | 'password'>('form')
+  const [step, setStep] = useState<'form' | 'qr' | 'code' | 'password'>('form')
   const [accountId, setAccountId] = useState<number | null>(null)
   const [title, setTitle] = useState('')
   const [phone, setPhone] = useState('+7')
@@ -421,6 +428,13 @@ function ConnectSheet({
   const [hint, setHint] = useState<string | null>(null)
   const [codeHash, setCodeHash] = useState('')
   const [error, setError] = useState<string | null>(null)
+  /** Каким путём идёт вход: от этого зависит, куда отправлять облачный пароль. */
+  const [via, setVia] = useState<'qr' | 'code'>('qr')
+  const [qrImage, setQrImage] = useState<string | null>(null)
+
+  // Опрашиваем шлюз, только пока код на экране: пока идёт ожидание, шлюз
+  // держит открытое соединение с Telegram.
+  const qrState = useQrState(accountId, open && step === 'qr')
 
   useEffect(() => {
     if (!open) {
@@ -433,10 +447,12 @@ function ConnectSheet({
       setHint(null)
       setCodeHash('')
       setError(null)
+      setVia('qr')
+      setQrImage(null)
       return
     }
-    // Переподключение: аккаунт уже есть, заводить второй нельзя — сразу
-    // запрашиваем код на его номер.
+    // Переподключение: аккаунт уже есть, заводить второй нельзя — входим
+    // заново в него же.
     if (reconnecting) {
       setTitle(reconnecting.title)
       setPhone(reconnecting.phone)
@@ -445,30 +461,71 @@ function ConnectSheet({
     }
   }, [open, reconnecting])
 
+  // Шлюз сам обновляет протухший токен, поэтому картинку берём из опроса, а не
+  // из ответа на запуск: иначе на экране осталась бы уже недействительная.
+  const polled = qrState.data
+  useEffect(() => {
+    if (step !== 'qr' || !polled) return
+    if (polled.image) setQrImage(polled.image)
+    if (polled.status === 'password') {
+      setVia('qr')
+      setStep('password')
+      return
+    }
+    if (polled.status === 'done') {
+      // Список аккаунтов сам о входе не узнает: сессию записал шлюз, а не
+      // мутация из этого окна.
+      void queryClient.invalidateQueries({ queryKey: ['accounts'] })
+      onOpenChange(false)
+      return
+    }
+    if (polled.status === 'error') {
+      setError(polled.message ?? 'Вход по QR не удался')
+    }
+  }, [polled, step, onOpenChange, queryClient])
+
   async function requestCodeFor(id: number) {
     const result = await sendCode.mutateAsync(id)
     setHint(result.hint ?? null)
     setCodeHash(result.phone_code_hash ?? '')
+    setVia('code')
     setStep('code')
   }
 
-  async function submitForm() {
+  async function showQrFor(id: number) {
+    const result = await qrStart.mutateAsync(id)
+    setQrImage(result.image)
+    setVia('qr')
+    setStep('qr')
+  }
+
+  /** Завести аккаунт (если он ещё не заведён) и начать выбранный способ входа. */
+  async function submitForm(mode: 'qr' | 'code') {
     setError(null)
     try {
-      if (reconnecting) {
-        await requestCodeFor(reconnecting.id)
-        return
-      }
-      const account = await create.mutateAsync({
-        title: title.trim(),
-        phone: phone.trim(),
-        funnel_stage: (stage ?? 'sales') as never,
-      })
-      setAccountId(account.id)
-      const result = await sendCode.mutateAsync(account.id)
-      setHint(result.hint ?? null)
-      setCodeHash(result.phone_code_hash ?? '')
-      setStep('code')
+      const id =
+        reconnecting?.id ??
+        accountId ??
+        (
+          await create.mutateAsync({
+            title: title.trim(),
+            phone: phone.trim(),
+            funnel_stage: (stage ?? 'sales') as never,
+          })
+        ).id
+      setAccountId(id)
+      await (mode === 'qr' ? showQrFor(id) : requestCodeFor(id))
+    } catch (cause) {
+      setError(errorMessage(cause))
+    }
+  }
+
+  /** Показать новый код, когда прежний истёк или вход сорвался. */
+  async function restartQr() {
+    if (accountId === null) return
+    setError(null)
+    try {
+      await showQrFor(accountId)
     } catch (cause) {
       setError(errorMessage(cause))
     }
@@ -512,12 +569,16 @@ function ConnectSheet({
     if (accountId === null) return
     setError(null)
     try {
-      await confirmCode.mutateAsync({
-        accountId,
-        code: code.trim(),
-        phoneCodeHash: codeHash,
-        password,
-      })
+      if (via === 'qr') {
+        await qrPassword.mutateAsync({ accountId, password })
+      } else {
+        await confirmCode.mutateAsync({
+          accountId,
+          code: code.trim(),
+          phoneCodeHash: codeHash,
+          password,
+        })
+      }
       onOpenChange(false)
     } catch (cause) {
       setError(errorMessage(cause))
@@ -532,19 +593,39 @@ function ConnectSheet({
       description={
         step === 'form'
           ? 'Клиенты будут писать на этот номер, а менеджер отвечать из CRM'
-          : step === 'code'
-            ? 'Код придёт в приложение Telegram, а не по СМС'
-            : 'На аккаунте включён облачный пароль'
+          : step === 'qr'
+            ? 'Отсканируйте код тем телефоном, на котором работает этот номер'
+            : step === 'code'
+              ? 'Код придёт в приложение Telegram, а не по СМС'
+              : 'На аккаунте включён облачный пароль'
       }
       footer={
         step === 'form' ? (
-          <Button
-            fullWidth
-            loading={create.isPending || sendCode.isPending}
-            disabled={!title.trim() || phone.trim().length < 11}
-            onClick={() => void submitForm()}
-          >
-            {reconnecting ? 'Войти заново' : 'Получить код'}
+          <div className="flex flex-col gap-2">
+            <Button
+              fullWidth
+              loading={create.isPending || qrStart.isPending}
+              disabled={!title.trim() || phone.trim().length < 11}
+              onClick={() => void submitForm('qr')}
+            >
+              {reconnecting ? 'Войти заново по QR' : 'Показать QR-код'}
+            </Button>
+            <button
+              onClick={() => void submitForm('code')}
+              disabled={
+                create.isPending ||
+                sendCode.isPending ||
+                !title.trim() ||
+                phone.trim().length < 11
+              }
+              className="self-center text-xs text-muted underline-offset-4 transition-colors hover:text-text hover:underline disabled:opacity-45"
+            >
+              {sendCode.isPending ? 'Запрашиваем код…' : 'Войти по коду из Telegram'}
+            </button>
+          </div>
+        ) : step === 'qr' ? (
+          <Button fullWidth variant="secondary" onClick={() => void restartQr()} loading={qrStart.isPending}>
+            Показать новый код
           </Button>
         ) : step === 'code' ? (
           <Button
@@ -558,7 +639,7 @@ function ConnectSheet({
         ) : (
           <Button
             fullWidth
-            loading={confirmCode.isPending}
+            loading={confirmCode.isPending || qrPassword.isPending}
             disabled={!password}
             onClick={() => void submitPassword()}
           >
@@ -585,9 +666,43 @@ function ConnectSheet({
             </Field>
             <p className="flex items-start gap-1.5 rounded-md bg-warning-soft px-3 py-2.5 text-xs text-warning">
               <AlertTriangle className="mt-0.5 size-3.5 shrink-0" aria-hidden />
-              Телефон должен быть под рукой — на него придёт код. Он же понадобится при
-              восстановлении сессии.
+              Телефон с этим номером должен быть под рукой: с него сканируют QR-код. Он же
+              понадобится при восстановлении сессии.
             </p>
+          </>
+        )}
+
+        {step === 'qr' && (
+          <>
+            {/* Белая подложка обязательна: на тёмном фоне код не считывается,
+                камера ищет тёмные модули на светлом. */}
+            <div className="flex justify-center rounded-xl bg-white p-4">
+              {qrImage ? (
+                <img
+                  src={qrImage}
+                  alt="QR-код для входа в Telegram"
+                  className="size-56 max-w-full"
+                />
+              ) : (
+                <div className="size-56 animate-pulse rounded-lg bg-black/10" />
+              )}
+            </div>
+            <ol className="flex flex-col gap-1.5 text-xs text-muted">
+              <li>1. Откройте Telegram на телефоне с этим номером</li>
+              <li>2. Настройки → Устройства → Подключить устройство</li>
+              <li>3. Наведите камеру на этот код</li>
+            </ol>
+            <p className="rounded-md bg-accent-soft px-3 py-2.5 text-xs text-accent-text">
+              Код обновляется сам каждые полминуты — это нормально, сканируйте тот,
+              что виден сейчас.
+            </p>
+            <button
+              onClick={() => void submitForm('code')}
+              disabled={sendCode.isPending}
+              className="self-start text-xs text-muted underline-offset-4 transition-colors hover:text-text hover:underline disabled:opacity-45"
+            >
+              {sendCode.isPending ? 'Запрашиваем код…' : 'Войти по коду вместо QR'}
+            </button>
           </>
         )}
 

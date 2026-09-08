@@ -21,10 +21,13 @@
 """
 
 import asyncio
+import contextlib
 import io
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any
 
 from cryptography.exceptions import InvalidTag
 from telethon import TelegramClient, events, functions
@@ -49,14 +52,15 @@ from telethon.tl.types import (
     DocumentAttributeFilename,
     DocumentAttributeVideo,
 )
-from telethon.tl.types.auth import SentCodeTypeApp
 from telethon.tl.types import (
     User as TgUser,
 )
+from telethon.tl.types.auth import SentCodeTypeApp
 
 from app.core import crypto
+from app.core import qr as qr_image
 from app.core.config import settings
-from app.gateway.provider import CodeRequest, SentMessage, SessionResult
+from app.gateway.provider import CodeRequest, QrCode, QrState, SentMessage, SessionResult
 from app.models import TelegramAccount
 from app.services.inbound_service import InboundMessage, PeerData
 
@@ -69,6 +73,12 @@ MAX_INCOMING_BYTES = 25 * 1024 * 1024
 Sink = Callable[[int, InboundMessage], Awaitable[None]]
 ReadSink = Callable[[int, int, int], Awaitable[None]]
 StatusSink = Callable[[int, str, str | None], Awaitable[None]]
+SessionSink = Callable[[int, "SessionResult"], Awaitable[None]]
+
+# Сколько всего ждём сканирования, прежде чем закрыть попытку. Сам токен живёт
+# около полуминуты и обновляется на месте — это предел на весь вход целиком,
+# чтобы забытое открытым окно не держало соединение с Telegram вечно.
+QR_TOTAL_SECONDS = 300.0
 
 
 class RetryAfter(RuntimeError):
@@ -95,27 +105,68 @@ class LoginRefused(RuntimeError):
     """
 
 
+def _qr_window(qr: Any) -> float:
+    """Сколько ждать текущий токен, прежде чем выпустить новый.
+
+    Берём срок жизни, который назвал сам Telegram, но не доверяем ему вслепую:
+    ноль или отрицательное значение (рассинхрон часов) превратили бы ожидание
+    в busy-loop, а слишком долгое — заставило бы показывать мёртвую картинку.
+    """
+    left = (qr.expires - datetime.now(UTC)).total_seconds()
+    return max(5.0, min(left, 60.0))
+
+
+@dataclass
+class _QrSession:
+    """Незавершённый вход по QR: соединение, токен и то, что уже про него известно.
+
+    Живёт в памяти шлюза от «показали код» до «вошли». Соединение здесь не
+    случайно: `QRLogin.wait()` обязан выполняться именно в тот момент, когда
+    пользователь наводит камеру, — иначе вход не завершится.
+    """
+
+    client: TelegramClient
+    qr: Any
+    status: str = "waiting"
+    image: str | None = None
+    expires_at: datetime | None = None
+    message: str | None = None
+    task: asyncio.Task | None = None
+
+    def refresh(self) -> None:
+        """Перечитать токен после создания или обновления."""
+        self.image = qr_image.login_qr_data_uri(self.qr.url)
+        self.expires_at = self.qr.expires
+
+
 class MTProtoProvider:
     """Держит по клиенту на арендованный аккаунт."""
 
     def __init__(self) -> None:
         self._clients: dict[int, TelegramClient] = {}
         self._logins: dict[int, TelegramClient] = {}
+        self._qr: dict[int, _QrSession] = {}
         self._sink: Sink | None = None
         self._read_sink: ReadSink | None = None
         self._status_sink: StatusSink | None = None
+        self._session_sink: SessionSink | None = None
         self._lock = asyncio.Lock()
 
     # ------------------------------------------------------------------ приём
 
     def set_sinks(
-        self, sink: Sink, read_sink: ReadSink | None = None, status_sink: StatusSink | None = None
+        self,
+        sink: Sink,
+        read_sink: ReadSink | None = None,
+        status_sink: StatusSink | None = None,
+        session_sink: SessionSink | None = None,
     ) -> None:
         """Куда отдавать полученное. Записью в базу занимается шлюз, а не провайдер:
         здесь только Telegram, чтобы эту часть можно было проверять отдельно."""
         self._sink = sink
         self._read_sink = read_sink
         self._status_sink = status_sink
+        self._session_sink = session_sink
 
     # --------------------------------------------------------------- клиенты
 
@@ -319,6 +370,115 @@ class MTProtoProvider:
             sent_to="app" if isinstance(sent.type, SentCodeTypeApp) else "sms",
         )
 
+    # -------------------------------------------------------------- вход по QR
+
+    async def qr_start(self, account: TelegramAccount) -> QrCode:
+        """Начать вход по QR: создать токен и сесть ждать сканирования.
+
+        Ожидание уходит в фоновую задачу не для скорости, а по требованию
+        протокола: Telegram сообщает об успешном сканировании входящим
+        обновлением, и поймать его может только соединение, которое в этот
+        момент слушает. Дождаться в рамках одного запроса нельзя — человеку
+        нужны минуты, чтобы взять телефон.
+        """
+        await self._qr_drop(account.id)
+        client = self._build(account, None)
+        await client.connect()
+        try:
+            qr = await client.qr_login()
+        except Exception:
+            await client.disconnect()
+            raise
+        session = _QrSession(client=client, qr=qr)
+        session.refresh()
+        self._qr[account.id] = session
+        session.task = asyncio.create_task(self._qr_wait(account.id, session))
+        return QrCode(image=session.image or "", expires_at=qr.expires)
+
+    def qr_state(self, account: TelegramAccount) -> QrState:
+        """Что сейчас со входом. Интерфейс спрашивает это раз в пару секунд."""
+        session = self._qr.get(account.id)
+        if session is None:
+            return QrState(status="error", message="Вход по QR не начат — откройте его заново")
+        return QrState(
+            status=session.status,  # type: ignore[arg-type]
+            image=session.image,
+            expires_at=session.expires_at,
+            message=session.message,
+        )
+
+    async def qr_password(self, account: TelegramAccount, password: str) -> SessionResult:
+        """Второй шаг, когда на аккаунте включён облачный пароль."""
+        session = self._qr.get(account.id)
+        if session is None or not session.client.is_connected():
+            raise SessionLost("Вход по QR устарел — покажите код заново")
+        await session.client.sign_in(password=password)
+        return await self._qr_finish(account.id, session)
+
+    async def _qr_wait(self, account_id: int, session: _QrSession) -> None:
+        """Ждать сканирования, обновляя протухший токен на месте."""
+        deadline = asyncio.get_running_loop().time() + QR_TOTAL_SECONDS
+        try:
+            while asyncio.get_running_loop().time() < deadline:
+                try:
+                    await session.qr.wait(timeout=_qr_window(session.qr))
+                except TimeoutError:
+                    # Токен истёк, а человек ещё не отсканировал: берём новый и
+                    # продолжаем ждать. Для интерфейса это просто новая картинка.
+                    await session.qr.recreate()
+                    session.refresh()
+                    continue
+                except SessionPasswordNeededError:
+                    session.status = "password"
+                    return
+                await self._qr_finish(account_id, session)
+                return
+            session.status = "error"
+            session.message = "Время на сканирование вышло — покажите код заново"
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — причина уходит руководителю на экран
+            log.exception("Вход по QR для аккаунта %s не удался", account_id)
+            session.status = "error"
+            session.message = str(exc)
+
+    async def _qr_finish(self, account_id: int, session: _QrSession) -> SessionResult:
+        """Вход состоялся: соединение становится рабочим клиентом аккаунта."""
+        client = session.client
+        me = await client.get_me()
+        result = SessionResult(
+            session_string=client.session.save(),
+            tg_user_id=int(me.id),
+            tg_username=me.username,
+            needs_password=False,
+        )
+        self._register_handlers(account_id, client)
+        old_client = self._clients.get(account_id)
+        if old_client is not None and old_client is not client and old_client.is_connected():
+            await old_client.disconnect()
+        self._clients[account_id] = client
+        session.status = "done"
+        session.message = None
+        # Сохранение не ждёт, пока интерфейс переспросит состояние: человек
+        # может закрыть окно сразу после сканирования, а сессия уже выдана —
+        # потерять её значит оставить в Telegram висящий чужой сеанс.
+        if self._session_sink is not None:
+            await self._session_sink(account_id, result)
+        return result
+
+    async def _qr_drop(self, account_id: int) -> None:
+        """Убрать прошлую незавершённую попытку входа по QR."""
+        session = self._qr.pop(account_id, None)
+        if session is None:
+            return
+        if session.task is not None and not session.task.done():
+            session.task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await session.task
+        # Успешный вход уже отдал соединение в рабочие клиенты — рвать нельзя.
+        if session.status != "done" and session.client.is_connected():
+            await session.client.disconnect()
+
     async def confirm_code(
         self,
         account: TelegramAccount,
@@ -446,6 +606,9 @@ class MTProtoProvider:
         return self._clients.get(account_id)
 
     async def stop(self, account: TelegramAccount) -> None:
+        # Незавершённый вход по QR снимаем первым: он держит и фоновую задачу,
+        # и отдельное соединение с Telegram, о которых `_clients` ничего не знает.
+        await self._qr_drop(account.id)
         client = self._clients.pop(account.id, None)
         if client is not None and client.is_connected():
             await client.disconnect()

@@ -41,6 +41,9 @@ from app.schemas.account import (
     ConfirmCodeIn,
     ConfirmCodeOut,
     ManagersIn,
+    QrPasswordIn,
+    QrStartOut,
+    QrStateOut,
     SendCodeOut,
 )
 from app.services.audit import log_event
@@ -293,6 +296,73 @@ async def send_code(db: AsyncSession, admin: User, account_id: int) -> SendCodeO
         demo=settings.demo_mode,
         hint=DEMO_HINT if settings.demo_mode else None,
     )
+
+
+async def qr_start(db: AsyncSession, admin: User, account_id: int) -> QrStartOut:
+    """Показать QR для входа.
+
+    Это основной путь входа, а не запасной: Telegram с февраля 2023 доставляет
+    сторонним приложениям код только внутрь самого Telegram и может молча его
+    не доставить — тогда вход по номеру не даёт ни кода, ни внятной ошибки.
+    Сканирование QR такой доставки не требует вовсе.
+    """
+    account = await _get(db, account_id)
+    if settings.demo_mode:
+        raise Invalid("Демо-режим: Telegram не подключён, вход по QR недоступен")
+    await _wait_for_lease(db, account.id, timeout=settings.gateway_heartbeat_seconds + 3)
+    answer = await command_bus.call(account.id, "qr_start", timeout=60)
+    await log_event(
+        db,
+        action="account.qr_start",
+        entity_type="account",
+        entity_id=account.id,
+        actor=admin,
+    )
+    await db.commit()
+    return QrStartOut(image=answer["image"], expires_at=answer["expires_at"])
+
+
+async def qr_state(db: AsyncSession, admin: User, account_id: int) -> QrStateOut:
+    """Состояние входа по QR. Запрашивается часто, поэтому в журнал не пишет."""
+    account = await _get(db, account_id)
+    if settings.demo_mode:
+        raise Invalid("Демо-режим: Telegram не подключён, вход по QR недоступен")
+    answer = await command_bus.call(account.id, "qr_state", timeout=20)
+    status = answer["status"]
+    row = None
+    if status == "done":
+        # Сессию записал шлюз, в отдельном соединении с базой. Наши прочитанные
+        # ранее объекты про это не знают — сбрасываем, иначе вернём старый статус.
+        db.expire_all()
+        row = await _row(db, account.id)
+    return QrStateOut(
+        status=status,
+        image=answer.get("image"),
+        expires_at=answer.get("expires_at"),
+        message=answer.get("message"),
+        account=row,
+    )
+
+
+async def qr_password(
+    db: AsyncSession, admin: User, account_id: int, data: QrPasswordIn
+) -> ConfirmCodeOut:
+    """Второй шаг входа по QR, если на аккаунте включён облачный пароль."""
+    account = await _get(db, account_id)
+    if settings.demo_mode:
+        raise Invalid("Демо-режим: Telegram не подключён, вход по QR недоступен")
+    await command_bus.call(account.id, "qr_password", {"password": data.password}, timeout=60)
+    await log_event(
+        db,
+        action="account.connected",
+        entity_type="account",
+        entity_id=account.id,
+        actor=admin,
+        after={"via": "qr"},
+    )
+    await db.commit()
+    db.expire_all()
+    return ConfirmCodeOut(needs_password=False, account=await _row(db, account.id))
 
 
 async def confirm_code(

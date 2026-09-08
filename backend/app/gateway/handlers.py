@@ -92,7 +92,72 @@ async def write_status(account_id: int, status: str, reason: str | None) -> None
             log.exception("Не сохранил состояние аккаунта %s", account_id)
 
 
+async def write_qr_session(account_id: int, result: Any) -> None:
+    """Вход по QR состоялся — сохранить сессию ровно так же, как после кода.
+
+    Вызывается провайдером сразу по факту сканирования, а не по запросу
+    интерфейса: человек может закрыть окно, не дождавшись ответа, а сеанс в
+    Telegram уже выдан — не сохранить его значит оставить висящий чужой вход.
+    """
+    async with SessionLocal() as db:
+        try:
+            account = await _account(db, account_id)
+            before = {"status": account.status.value}
+            # Секрет дальше шлюза не идёт: шифруем и сохраняем здесь же.
+            if result.session_string:
+                account.session_enc = crypto.encrypt(result.session_string)
+            account.tg_user_id = result.tg_user_id
+            account.tg_username = result.tg_username
+            account.status = AccountStatus.CONNECTED
+            account.status_reason = None
+            account.last_activity_at = datetime.now(UTC)
+            await log_event(
+                db,
+                action="account.connected",
+                entity_type="account",
+                entity_id=account.id,
+                actor_kind=ActorKind.GATEWAY,
+                before=before,
+                after={
+                    "status": AccountStatus.CONNECTED.value,
+                    "tg_username": result.tg_username,
+                    "via": "qr",
+                },
+            )
+            await db.commit()
+            await emit_to_account(
+                db,
+                account.id,
+                "account.status",
+                {
+                    "account_id": account.id,
+                    "status": AccountStatus.CONNECTED.value,
+                    "reason": None,
+                },
+            )
+            # Пустой список чатов у только что подключённого аккаунта выглядит
+            # как поломка, а не как «ещё не загрузилось».
+            since = await _history_since(db, None)
+        except Exception:
+            await db.rollback()
+            log.exception("Не сохранил сессию входа по QR для аккаунта %s", account_id)
+            return
+
+    task = asyncio.create_task(_sync_history(account_id, since))
+    _tasks.add(task)
+    task.add_done_callback(_tasks.discard)
+
+
 # ----------------------------------------------------------------- команды
+
+
+def _mtproto(provider: Any) -> Any:
+    """Команды входа по QR умеет только боевой провайдер — демо его не изображает."""
+    from app.gateway import mtproto_provider
+
+    if not isinstance(provider, mtproto_provider.MTProtoProvider):
+        raise ValueError("Вход по QR доступен только при подключённом Telegram")
+    return provider
 
 
 async def handle(account_id: int, command: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -128,6 +193,25 @@ async def handle(account_id: int, command: str, args: dict[str, Any]) -> dict[st
                 "tg_user_id": result.tg_user_id,
                 "tg_username": result.tg_username,
             }
+
+        if command == "qr_start":
+            code = await _mtproto(provider).qr_start(account)
+            return {"image": code.image, "expires_at": code.expires_at.isoformat()}
+
+        if command == "qr_state":
+            state = _mtproto(provider).qr_state(account)
+            return {
+                "status": state.status,
+                "image": state.image,
+                "expires_at": state.expires_at.isoformat() if state.expires_at else None,
+                "message": state.message,
+            }
+
+        if command == "qr_password":
+            # Сессию сохранит тот же приёмник, что и при обычном сканировании,
+            # — здесь достаточно дождаться, что пароль принят.
+            await _mtproto(provider).qr_password(account, args.get("password", ""))
+            return {"ok": True}
 
         if command == "mark_read":
             await provider.mark_read(account, int(args["chat_id"]), int(args["max_id"]))

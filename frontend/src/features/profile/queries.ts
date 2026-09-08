@@ -142,6 +142,60 @@ export function useConfirmCode() {
   })
 }
 
+/* ------------------------------------------------------------- вход по QR */
+
+export interface QrStart {
+  /** Готовая `data:`-ссылка: подставляется прямо в `<img src>`. */
+  image: string
+  expires_at: string
+}
+
+export type QrStatus = 'waiting' | 'password' | 'done' | 'error'
+
+export interface QrState {
+  status: QrStatus
+  image: string | null
+  expires_at: string | null
+  message: string | null
+  account: Account | null
+}
+
+export function useQrStart() {
+  return useMutation({
+    mutationFn: (accountId: number) => api.post<QrStart>(`/accounts/${accountId}/qr/start`),
+  })
+}
+
+/**
+ * Опрос состояния входа. Включается только когда QR показан на экране:
+ * шлюз держит соединение с Telegram, пока идёт ожидание, и лишний опрос
+ * закрытого окна продлевал бы это ожидание впустую.
+ */
+export function useQrState(accountId: number | null, enabled: boolean) {
+  return useQuery({
+    queryKey: ['accounts', 'qr', accountId],
+    queryFn: ({ signal }) => api.get<QrState>(`/accounts/${accountId}/qr/state`, {}, signal),
+    enabled: enabled && accountId !== null,
+    refetchInterval: 2000,
+    // Состояние живёт ровно столько, сколько открыт экран входа: показывать
+    // вчерашний «ждём сканирования» из кэша нельзя.
+    gcTime: 0,
+    staleTime: 0,
+    retry: false,
+  })
+}
+
+export function useQrPassword() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (input: { accountId: number; password: string }) =>
+      api.post<ConfirmCodeResult>(`/accounts/${input.accountId}/qr/password`, {
+        password: input.password,
+      }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['accounts'] }),
+  })
+}
+
 export function useSetAccountManagers() {
   const queryClient = useQueryClient()
   return useMutation({

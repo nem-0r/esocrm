@@ -17,6 +17,9 @@ from app.schemas.account import (
     ConfirmCodeIn,
     ConfirmCodeOut,
     ManagersIn,
+    QrPasswordIn,
+    QrStartOut,
+    QrStateOut,
     SendCodeOut,
 )
 from app.schemas.common import Ok
@@ -56,6 +59,25 @@ async def send_code(db: Db, admin: AdminUser, account_id: int) -> Any:
 )
 async def confirm_code(db: Db, admin: AdminUser, account_id: int, data: ConfirmCodeIn) -> Any:
     return await account_service.confirm_code(db, admin, account_id, data)
+
+
+@router.post("/{account_id}/qr/start", response_model=QrStartOut, summary="Показать QR для входа")
+async def qr_start(db: Db, admin: AdminUser, account_id: int) -> Any:
+    return await account_service.qr_start(db, admin, account_id)
+
+
+@router.get("/{account_id}/qr/state", response_model=QrStateOut, summary="Состояние входа по QR")
+async def qr_state(db: Db, admin: AdminUser, account_id: int) -> Any:
+    return await account_service.qr_state(db, admin, account_id)
+
+
+@router.post(
+    "/{account_id}/qr/password",
+    response_model=ConfirmCodeOut,
+    summary="Облачный пароль при входе по QR",
+)
+async def qr_password(db: Db, admin: AdminUser, account_id: int, data: QrPasswordIn) -> Any:
+    return await account_service.qr_password(db, admin, account_id, data)
 
 
 @router.post(

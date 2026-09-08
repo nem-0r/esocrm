@@ -7,6 +7,8 @@
 from datetime import datetime
 from typing import Literal
 
+from pydantic import Field
+
 from app.models.enums import AccountStatus, FunnelStage
 from app.schemas.common import ApiModel
 
@@ -84,6 +86,33 @@ class ConfirmCodeOut(ApiModel):
 
     needs_password: bool = False
     account: AccountRow | None = None
+
+
+class QrStartOut(ApiModel):
+    """Картинка QR, готовая к показу, и срок её жизни."""
+
+    image: str = Field(description="Готовая `data:`-ссылка для тега <img>")
+    expires_at: datetime
+
+
+class QrStateOut(ApiModel):
+    """Состояние входа по QR. Интерфейс переспрашивает его раз в пару секунд.
+
+    `waiting`  — ждём сканирования, показываем `image`;
+    `password` — отсканировали, нужен облачный пароль;
+    `done`     — вошли, `account` заполнен;
+    `error`    — не вышло, причина в `message`.
+    """
+
+    status: Literal["waiting", "password", "done", "error"]
+    image: str | None = None
+    expires_at: datetime | None = None
+    message: str | None = None
+    account: AccountRow | None = None
+
+
+class QrPasswordIn(ApiModel):
+    password: str
 
 
 class ManagersIn(ApiModel):

@@ -6,6 +6,7 @@ MTProto-провайдер (следующий этап). Цикл шлюза (`
 """
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Literal, Protocol
 
 from app.core.config import settings
@@ -18,6 +19,34 @@ class CodeRequest:
 
     phone_code_hash: str
     sent_to: Literal["app", "sms"]
+
+
+@dataclass(slots=True)
+class QrCode:
+    """Картинка QR и момент, после которого она перестаёт действовать.
+
+    Токен входа живёт около полуминуты, поэтому шлюз обновляет его сам, а
+    интерфейс переспрашивает состояние и перерисовывает картинку.
+    """
+
+    image: str
+    expires_at: datetime
+
+
+@dataclass(slots=True)
+class QrState:
+    """Что сейчас происходит со входом по QR.
+
+    `waiting`  — ждём сканирования, картинку можно показывать;
+    `password` — код отсканировали, но на аккаунте стоит облачный пароль;
+    `done`     — вошли, сессия уже зашифрована и сохранена шлюзом;
+    `error`    — вход не состоялся, причина в `message`.
+    """
+
+    status: Literal["waiting", "password", "done", "error"]
+    image: str | None = None
+    expires_at: datetime | None = None
+    message: str | None = None
 
 
 @dataclass(slots=True)
@@ -71,9 +100,16 @@ class TelegramProvider(Protocol):
         """Остановить сессию: вызывается при освобождении аренды и на остановке процесса."""
         ...
 
-    def set_sinks(self, sink: Any, read_sink: Any = None, status_sink: Any = None) -> None:
+    def set_sinks(
+        self,
+        sink: Any,
+        read_sink: Any = None,
+        status_sink: Any = None,
+        session_sink: Any = None,
+    ) -> None:
         """Куда отдавать полученное из Telegram: входящие, отметки о прочтении,
-        смену состояния сессии. Записью в базу занимается шлюз, не провайдер."""
+        смену состояния сессии, а также готовую сессию после входа по QR.
+        Записью в базу занимается шлюз, не провайдер."""
         ...
 
     async def mark_read(self, account: TelegramAccount, chat_id: int, max_id: int) -> None:
