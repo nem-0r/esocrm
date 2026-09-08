@@ -1,6 +1,7 @@
 import { AlertCircle, Check, CheckCheck, Clock, Download, FileText, Lock } from 'lucide-react'
 
 import type { Message } from '@/entities/types'
+import { ImagePreview, VideoPreview } from '@/features/chats/components/MediaAttachment'
 import { VoicePlayer } from '@/features/chats/components/VoicePlayer'
 import { cn } from '@/shared/lib/cn'
 import { fileSize, time } from '@/shared/lib/format'
@@ -70,10 +71,29 @@ export function MessageBubble({
           </span>
         )}
 
-        {message.attachments.map((file) =>
-          file.mime_type?.startsWith('audio/') ? (
-            <VoicePlayer key={file.id} src={file.url} durationSec={file.duration_sec ?? null} />
-          ) : (
+        {message.attachments.map((file) => {
+          if (file.mime_type?.startsWith('audio/')) {
+            return (
+              <VoicePlayer key={file.id} src={file.url} durationSec={file.duration_sec ?? null} />
+            )
+          }
+          if (file.mime_type?.startsWith('image/')) {
+            return (
+              <ImagePreview
+                key={file.id}
+                src={file.url}
+                width={file.width}
+                height={file.height}
+                alt={file.file_name}
+              />
+            )
+          }
+          if (file.mime_type?.startsWith('video/')) {
+            return (
+              <VideoPreview key={file.id} src={file.url} width={file.width} height={file.height} />
+            )
+          }
+          return (
             <a
               key={file.id}
               href={file.url}
@@ -90,8 +110,8 @@ export function MessageBubble({
               </span>
               <Download className="size-4 shrink-0 text-ink-faint" aria-hidden />
             </a>
-          ),
-        )}
+          )
+        })}
 
         {message.text && (
           <span
