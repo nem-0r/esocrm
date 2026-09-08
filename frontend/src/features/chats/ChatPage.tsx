@@ -1,10 +1,10 @@
-import { AlertTriangle, ArrowLeft, CreditCard, IdCard, Plus, UserCheck } from 'lucide-react'
+import { AlertTriangle, CreditCard, IdCard, Plus, UserCheck } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
+import { Link, useParams } from 'react-router-dom'
 
 import { realtime } from '@/shared/api/ws'
 import { dateFull, dayDivider, dayKey, money, plural, waitingLabel } from '@/shared/lib/format'
-import { Badge, Button, EmptyState, ErrorState, ListSkeleton } from '@/shared/ui'
+import { BackButton, Badge, Button, EmptyState, ErrorState, ListSkeleton } from '@/shared/ui'
 import { ChatsLayout } from '@/features/chats/ChatsLayout'
 import { Composer } from '@/features/chats/components/Composer'
 import { MessageBubble } from '@/features/chats/components/MessageBubble'
@@ -38,7 +38,6 @@ export function ChatPage() {
 }
 
 function ChatPane({ conversationId }: { conversationId: number }) {
-  const navigate = useNavigate()
   const conversation = useConversation(conversationId)
   const messages = useMessages(conversationId)
   const markRead = useMarkRead()
@@ -77,13 +76,7 @@ function ChatPane({ conversationId }: { conversationId: number }) {
     <>
       <header className="shrink-0 border-b border-line bg-surface px-3 py-2.5">
         <div className="flex items-center gap-2">
-          <button
-            aria-label="Назад к чатам"
-            onClick={() => navigate('/chats')}
-            className="flex size-9 items-center justify-center rounded text-ink-muted transition-colors hover:bg-surface-raised hover:text-ink desk:hidden"
-          >
-            <ArrowLeft className="size-5" aria-hidden />
-          </button>
+          <BackButton fallback="/chats" label="Назад к чатам" className="desk:hidden" />
 
           {/* Имя занимает всю строку: бейдж ожидания рядом с ним ломал верстку
               на телефоне и обрезал имя до пары букв. */}

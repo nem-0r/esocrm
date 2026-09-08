@@ -1,11 +1,20 @@
-import { ArrowLeft, CreditCard, FileText, MessageSquare, Search, User, X } from 'lucide-react'
+import { CreditCard, FileText, MessageSquare, Search, User, X } from 'lucide-react'
 import { useEffect, useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link } from 'react-router-dom'
 
 import { dateShort, money } from '@/shared/lib/format'
 import { cn } from '@/shared/lib/cn'
 import { useMe } from '@/shared/hooks/useAuth'
-import { Avatar, Badge, EmptyState, ErrorState, Input, ListSkeleton, SectionTitle } from '@/shared/ui'
+import {
+  Avatar,
+  BackButton,
+  Badge,
+  EmptyState,
+  ErrorState,
+  Input,
+  ListSkeleton,
+  SectionTitle,
+} from '@/shared/ui'
 import { useConversations } from '@/features/chats/queries'
 import { DEAL_STATUS_LABEL, DEAL_STATUS_TONE } from '@/features/deals/lib'
 import {
@@ -25,7 +34,6 @@ const FILTERS: { value: SearchType; label: string }[] = [
 ]
 
 export function SearchPage() {
-  const navigate = useNavigate()
   const me = useMe()
   const [query, setQuery] = useState('')
   const [debounced, setDebounced] = useState('')
@@ -61,13 +69,7 @@ export function SearchPage() {
     <div className="flex min-h-0 flex-1 flex-col">
       <header className="shrink-0 border-b border-line px-4 py-3">
         <div className="mx-auto flex w-full max-w-2xl items-center gap-2">
-          <button
-            aria-label="Назад"
-            onClick={() => navigate(-1)}
-            className="flex size-9 shrink-0 items-center justify-center rounded text-ink-muted transition-colors hover:bg-surface-raised hover:text-ink"
-          >
-            <ArrowLeft className="size-5" aria-hidden />
-          </button>
+          <BackButton fallback="/chats" />
           <Input
             className="flex-1"
             value={query}

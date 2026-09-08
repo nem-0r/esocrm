@@ -1,10 +1,11 @@
-import { ArrowLeft, Ban, Check, Copy, Info, Pencil, Plus, Send, Trash2 } from 'lucide-react'
+import { Ban, Check, Copy, Info, Pencil, Plus, Send, Trash2 } from 'lucide-react'
 import { useState } from 'react'
-import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
+import { Link, useParams } from 'react-router-dom'
 
 import { dateTimeFull, money } from '@/shared/lib/format'
 import {
   Avatar,
+  BackButton,
   Badge,
   Button,
   Card,
@@ -65,8 +66,6 @@ export function DealCardPage() {
 }
 
 function DealPane({ dealId }: { dealId: number }) {
-  const navigate = useNavigate()
-  const [searchParams] = useSearchParams()
   const card = useDeal(dealId)
   const conversationId = card.data?.conversation_id ?? null
 
@@ -96,10 +95,6 @@ function DealPane({ dealId }: { dealId: number }) {
   if (!card.data) return <EmptyState title="Оплата не найдена" />
 
   const deal = card.data
-  const backTo =
-    searchParams.get('from') === 'chat' && deal.conversation_id
-      ? `/chats/${deal.conversation_id}`
-      : '/payments'
 
   const editNeedsRequisite = deal.payment_method === 'requisites'
   const editActiveRequisites = (requisites.data ?? []).filter((r) => r.is_active)
@@ -152,13 +147,7 @@ function DealPane({ dealId }: { dealId: number }) {
     <div className="flex min-h-0 flex-1 flex-col">
       <header className="shrink-0 border-b border-line px-4 py-3">
         <div className="flex items-center gap-2">
-          <button
-            aria-label="Назад"
-            onClick={() => navigate(backTo)}
-            className="flex size-9 items-center justify-center rounded text-ink-muted transition-colors hover:bg-surface-raised hover:text-ink desk:hidden"
-          >
-            <ArrowLeft className="size-5" aria-hidden />
-          </button>
+          <BackButton fallback="/payments" className="desk:hidden" />
           <div className="flex min-w-0 flex-1 flex-col gap-1">
             <div className="flex items-center gap-2">
               <Badge tone={DEAL_STATUS_TONE[deal.status]}>{DEAL_STATUS_LABEL[deal.status]}</Badge>

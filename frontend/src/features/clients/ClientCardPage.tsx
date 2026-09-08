@@ -1,12 +1,13 @@
-import { ArrowLeft, Download, FileText, MessageSquare, Plus, Trash2 } from 'lucide-react'
+import { Download, FileText, MessageSquare, Plus, Trash2 } from 'lucide-react'
 import { useState } from 'react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
+import { Link, useParams } from 'react-router-dom'
 
 import type { BirthTimeApprox, ClientCard } from '@/entities/types'
 import { dateFull, dateShort, fileSize, money, plural } from '@/shared/lib/format'
 import { useMe } from '@/shared/hooks/useAuth'
 import {
   Avatar,
+  BackButton,
   Badge,
   Button,
   Card,
@@ -64,7 +65,6 @@ export function ClientCardPage() {
 
 function ClientPane({ clientId }: { clientId: number }) {
   const card = useClient(clientId)
-  const navigate = useNavigate()
   const [tab, setTab] = useState<Tab>('overview')
   const [editing, setEditing] = useState(false)
 
@@ -80,13 +80,7 @@ function ClientPane({ clientId }: { clientId: number }) {
         <div className="flex items-start gap-3">
           {/* ТЗ п. 1.2: из карточки клиента нужен явный выход назад. На десктопе
               слева есть список, поэтому стрелка только в мобильной раскладке. */}
-          <button
-            onClick={() => navigate(-1)}
-            aria-label="Назад"
-            className="-ml-1 mt-0.5 flex size-9 shrink-0 items-center justify-center rounded text-ink-muted transition-colors hover:bg-surface-raised hover:text-ink desk:hidden"
-          >
-            <ArrowLeft className="size-5" aria-hidden />
-          </button>
+          <BackButton fallback="/clients" className="-ml-1 mt-0.5 desk:hidden" />
           <Avatar name={client.name} size="lg" />
           <div className="flex min-w-0 flex-1 flex-col gap-0.5">
             <h1 className="truncate text-lg font-semibold text-ink">{client.name}</h1>

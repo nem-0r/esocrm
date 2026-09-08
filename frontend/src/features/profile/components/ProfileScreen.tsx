@@ -3,9 +3,11 @@
  * назад, на десктопе — центральная колонка шириной max-w-3xl.
  */
 
-import { ArrowLeft, ChevronRight } from 'lucide-react'
+import { ChevronRight } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { Link } from 'react-router-dom'
+
+import { BackButton } from '@/shared/ui'
 
 export function ProfileScreen({
   title,
@@ -24,16 +26,7 @@ export function ProfileScreen({
     <div className="flex min-h-0 flex-1 flex-col">
       <header className="shrink-0 border-b border-line px-4 py-3 desk:px-6">
         <div className="mx-auto flex w-full max-w-3xl items-center gap-3">
-          {backTo && (
-            <Link
-              to={backTo}
-              aria-label="Назад"
-              title="Назад"
-              className="-ml-2 flex size-9 shrink-0 items-center justify-center rounded text-ink-muted transition-colors hover:bg-surface-raised hover:text-ink"
-            >
-              <ArrowLeft className="size-5" aria-hidden />
-            </Link>
-          )}
+          {backTo && <BackButton fallback={backTo} className="-ml-2" />}
           <div className="flex min-w-0 flex-1 flex-col">
             <h1 className="truncate text-lg font-semibold text-ink">{title}</h1>
             {subtitle && <p className="truncate text-xs text-ink-muted">{subtitle}</p>}
