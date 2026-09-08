@@ -49,6 +49,7 @@ from app.models import (
     MessageKind,
     TelegramAccount,
     User,
+    UserRole,
 )
 from app.realtime.events import conversation_audience, emit
 from app.schemas.common import CursorPage
@@ -445,10 +446,12 @@ async def mark_read(db: AsyncSession, user: User, conversation_id: int) -> Conve
     )
     await db.commit()
 
-    # Прочитано в CRM — гасим непрочитанное и в самом Telegram, иначе владелец
-    # аккаунта видит на телефоне счётчик, который никто не убирает. Недоступный
-    # шлюз здесь не ошибка: сообщения прочитаны, состояние в CRM уже сохранено.
-    if before and not settings.demo_mode:
+    # Настоящую отметку «прочитано» в Telegram отправляет только менеджер —
+    # тот, кто реально ведёт диалог и должен ответить. Если чат просто открыл
+    # руководитель, клиент не должен видеть две галочки без ответа: это
+    # читалось бы как «увидели и проигнорировали». Внутри CRM непрочитанное
+    # гасится в любом случае — не сбрасывается только сигнал наружу.
+    if before and not settings.demo_mode and user.role == UserRole.MANAGER:
         last_tg_id = await db.scalar(
             select(func.max(Message.tg_message_id)).where(
                 Message.conversation_id == conv.id, Message.direction == Direction.IN
