@@ -41,6 +41,7 @@ CSV_HEADER = [
     "Услуги",
     "Сумма (руб)",
     "Способ оплаты",
+    "Реквизиты",
     "Чек",
     "Отправлено",
     "Оплачено",
@@ -113,6 +114,7 @@ async def export_csv_rows(db: AsyncSession, user: User, **filters: Any) -> Async
             items.c.names,
             Deal.total_amount,
             Deal.payment_method,
+            Deal.requisites_snapshot,
             Deal.receipt_file_name,
             Deal.sent_at,
             Deal.paid_at,
@@ -154,6 +156,9 @@ async def export_csv_rows(db: AsyncSession, user: User, **filters: Any) -> Async
                 csv_safe(row.names or ""),
                 rub(row.total_amount),
                 METHOD_LABEL.get(str(row.payment_method), str(row.payment_method)),
+                # У ссылки своих реквизитов нет — деньги идут на счёт магазина
+                # в Робокассе, не на конкретный счёт из справочника или «Другое».
+                csv_safe(row.requisites_snapshot or ""),
                 csv_safe(row.receipt_file_name or ""),
                 dt(row.sent_at),
                 dt(row.paid_at),
