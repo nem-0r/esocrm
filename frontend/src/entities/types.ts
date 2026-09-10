@@ -248,7 +248,6 @@ export interface DealRow {
   total_amount: number
   status: DealStatus
   payment_method: PaymentMethod
-  payment_code: string | null
   created_at: string
   /** Дата, по которой сделка попадает в период: оплата или создание. */
   event_at: string
@@ -272,8 +271,12 @@ export interface DealCard extends DealRow {
   paid_to_requisite_id: number | null
   paid_to_requisite_title: string | null
   intro_text: string | null
-  receipt_number: string | null
-  receipt_at: string | null
+  /** Чек оплаты — файл, приложенный менеджером при подтверждении (PNG/PDF/…). */
+  receipt_file_name: string | null
+  receipt_mime_type: string | null
+  receipt_size_bytes: number | null
+  /** Ссылка на скачивание — есть только когда чек приложен. */
+  receipt_url: string | null
   cancel_reason: string | null
   edit_count: number
   conversation_id: number

@@ -7,12 +7,12 @@
 """
 
 import secrets
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.errors import Invalid, NotFound
+from app.core.errors import Conflict, Invalid, NotFound
 from app.models import (
     Attachment,
     AuthorKind,
@@ -40,6 +40,8 @@ from app.services.audit import log_event
 
 DEFAULT_LIMIT = 40
 MAX_LIMIT = 100
+# Столько же разрешает сам Telegram — дальше правка отклонится и там.
+EDIT_WINDOW = timedelta(hours=48)
 
 # По типу файла выбирается вид сообщения: в списке чатов вместо пустоты
 # будет «Фото» или «Файл», а шлюз знает, чем отправлять.
@@ -347,6 +349,95 @@ async def retry_message(
         db, action="message.retry", entity_type="message", entity_id=message.id, actor=user,
     )
     await db.commit()
+
+    audience = await conversation_audience(db, conversation.id)
+    await emit(
+        "message.updated",
+        {"conversation_id": conversation.id, "message": to_out(message).model_dump(mode="json")},
+        audience,
+    )
+    return to_out(message)
+
+
+async def edit_message(
+    db: AsyncSession, user: User, conversation_id: int, message_id: int, text: str
+) -> MessageOut:
+    """Менеджер правит текст своего же отправленного сообщения.
+
+    Правка уходит и в сам Telegram (кроме служебных заметок — их там никогда
+    не было), поэтому текст в базе меняется только после того, как шлюз
+    подтвердил успех: иначе переписка в CRM разойдётся с тем, что видит клиент.
+    """
+    text = text.strip()
+    if not text:
+        raise Invalid("Пустое сообщение")
+    if len(text) > MAX_TEXT_LENGTH:
+        raise Invalid("Сообщение длиннее 4096 символов")
+
+    conversation = await conversation_service.load_visible(db, user, conversation_id)
+    message = await db.scalar(
+        select(Message).where(
+            Message.id == message_id,
+            Message.conversation_id == conversation.id,
+            Message.deleted_at.is_(None),
+        )
+    )
+    if message is None:
+        raise NotFound("Сообщение не найдено")
+    # Чужое или пришедшее не из CRM (воронка, ответ с телефона) редактировать
+    # нельзя — в Telegram это может сделать только тот, кто действительно
+    # написал, а CRM не должна выдавать это за возможность для всех.
+    if message.direction != Direction.OUT or message.author_id != user.id:
+        raise Invalid("Редактировать можно только своё отправленное сообщение")
+    if message.kind != MessageKind.TEXT:
+        raise Invalid("Редактировать можно только текстовые сообщения")
+    # И «отправлено», и «прочитано» — успешно доставленное сообщение,
+    # прочитанное клиентом ничем не хуже для правки, чем только что отправленное.
+    if message.status not in (MessageStatus.SENT, MessageStatus.READ):
+        raise Invalid("Сообщение ещё не отправлено или отправка сорвалась — редактировать нечего")
+    # Снимок на момент чтения — правка в Telegram идёт по сети и может занять
+    # заметное время, а за это время то же сообщение может отредактировать
+    # тот же менеджер во второй открытой вкладке.
+    original_edited_at = message.edited_at
+
+    if not message.is_internal:
+        if message.tg_message_id is None:
+            raise Invalid("У сообщения нет номера в Telegram — редактировать нечем")
+        if datetime.now(UTC) - (message.sent_at or message.created_at) > EDIT_WINDOW:
+            raise Invalid("Telegram запрещает редактировать сообщения старше 48 часов")
+        from app.core import command_bus
+
+        await command_bus.call(
+            conversation.account_id,
+            "edit_message",
+            {
+                "chat_id": conversation.tg_chat_id,
+                "tg_message_id": message.tg_message_id,
+                "text": text,
+            },
+        )
+
+    # Условное обновление вместо простого присваивания: если между чтением и
+    # этой строкой сообщение уже поменяли (та же гонка двух вкладок), запись
+    # не пройдёт молча — переписка в CRM и в Telegram не разойдутся тихо.
+    edited_at_match = (
+        Message.edited_at.is_(None)
+        if original_edited_at is None
+        else Message.edited_at == original_edited_at
+    )
+    result = await db.execute(
+        update(Message)
+        .where(Message.id == message.id, edited_at_match)
+        .values(text=text, edited_at=datetime.now(UTC))
+    )
+    if result.rowcount == 0:
+        await db.rollback()
+        raise Conflict("Сообщение уже отредактировано в другой вкладке — обновите страницу")
+    await log_event(
+        db, action="message.edited", entity_type="message", entity_id=message.id, actor=user,
+    )
+    await db.commit()
+    await db.refresh(message)
 
     audience = await conversation_audience(db, conversation.id)
     await emit(

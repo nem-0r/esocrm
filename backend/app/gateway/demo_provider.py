@@ -111,6 +111,13 @@ class DemoProvider:
     async def mark_read(self, account: TelegramAccount, chat_id: int, max_id: int) -> None:
         await asyncio.sleep(0)
 
+    async def edit_message(
+        self, account: TelegramAccount, chat_id: int, tg_message_id: int, text: str
+    ) -> None:
+        # Демо не хранит настоящих сообщений на стороне Telegram — редактировать
+        # там нечего, но и мешать проверке самого механизма это не должно.
+        await asyncio.sleep(0)
+
     async def iter_history(
         self, account: TelegramAccount, since, per_dialog_limit: int = 500
     ):  # noqa: ANN001, ANN201
@@ -119,3 +126,9 @@ class DemoProvider:
         и шлюз не расходился между режимами."""
         return
         yield  # pragma: no cover — превращает функцию в генератор
+
+    async def fetch_birthday(
+        self, account: TelegramAccount, tg_user_id: int
+    ) -> tuple[int, int, int | None] | None:
+        """Демо не притворяется настоящим профилем Telegram — данных нет."""
+        return None

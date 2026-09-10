@@ -13,6 +13,7 @@ import { DealSheet } from '@/features/deals/DealSheet'
 import { FUNNEL_LABEL } from '@/features/profile/lib'
 import {
   useConversation,
+  useEditMessage,
   useMarkRead,
   useMessages,
   useRetryMessage,
@@ -42,6 +43,7 @@ function ChatPane({ conversationId }: { conversationId: number }) {
   const messages = useMessages(conversationId)
   const markRead = useMarkRead()
   const retryMessage = useRetryMessage(conversationId)
+  const editMessage = useEditMessage(conversationId)
   const bottom = useRef<HTMLDivElement>(null)
   const [dealOpen, setDealOpen] = useState(false)
   const [transferOpen, setTransferOpen] = useState(false)
@@ -199,6 +201,10 @@ function ChatPane({ conversationId }: { conversationId: number }) {
                     message={message}
                     onRetry={() => retryMessage.mutate(message.id)}
                     retrying={retryMessage.isPending && retryMessage.variables === message.id}
+                    onEdit={(text) => editMessage.mutateAsync({ messageId: message.id, text })}
+                    savingEdit={
+                      editMessage.isPending && editMessage.variables?.messageId === message.id
+                    }
                   />
                 </div>
               )

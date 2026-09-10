@@ -6,7 +6,7 @@ from fastapi import APIRouter, Path, Query
 
 from app.core.deps import CurrentUser, Db
 from app.schemas.common import CursorPage
-from app.schemas.message import MessageCreate, MessageOut
+from app.schemas.message import MessageCreate, MessageEdit, MessageOut
 from app.services import message_service
 
 router = APIRouter()
@@ -45,3 +45,17 @@ async def retry_message(
     message_id: Annotated[int, Path(gt=0, description="Идентификатор сообщения")],
 ) -> MessageOut:
     return await message_service.retry_message(db, user, conversation_id, message_id)
+
+
+@router.patch(
+    "/{conversation_id}/messages/{message_id}",
+    summary="Редактировать текст своего отправленного сообщения",
+)
+async def edit_message(
+    db: Db,
+    user: CurrentUser,
+    conversation_id: ConversationId,
+    message_id: Annotated[int, Path(gt=0, description="Идентификатор сообщения")],
+    payload: MessageEdit,
+) -> MessageOut:
+    return await message_service.edit_message(db, user, conversation_id, message_id, payload.text)

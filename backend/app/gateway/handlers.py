@@ -12,14 +12,16 @@
 
 import asyncio
 import logging
-from datetime import UTC, datetime, timedelta
+from collections.abc import Callable
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
 
 from app.core import crypto
 from app.core.db import SessionLocal
-from app.models import AccountStatus, ActorKind, TelegramAccount
+from app.models import AccountStatus, ActorKind, Client, TelegramAccount
+from app.models.client import zodiac_for
 from app.realtime.events import emit_to_account
 from app.services import inbound_service, settings_service
 from app.services.audit import log_event
@@ -45,11 +47,51 @@ async def write_inbound(account_id: int, event: inbound_service.InboundMessage) 
     async with SessionLocal() as db:
         try:
             account = await _account(db, account_id)
-            await inbound_service.ingest(db, account, event)
+            on_new = _birthday_backfill_callback(account_id, event.peer.tg_user_id)
+            await inbound_service.ingest(db, account, event, on_new_client=on_new)
             await db.commit()
         except Exception:
             await db.rollback()
             log.exception("Не записал входящее сообщение аккаунта %s", account_id)
+
+
+def _birthday_backfill_callback(account_id: int, tg_user_id: int) -> Callable[[Client], None]:
+    """Клиент завёлся впервые — в отдельной задаче, не задерживая приём
+    сообщения, спрашиваем у Telegram дату рождения. Тихая осечка (приватность,
+    провайдер не умеет, любая ошибка) никак не отражается на переписке."""
+
+    def schedule(client: Client) -> None:
+        asyncio.create_task(_backfill_birthday(account_id, tg_user_id, client.id))
+
+    return schedule
+
+
+async def _backfill_birthday(account_id: int, tg_user_id: int, client_id: int) -> None:
+    from app.gateway.provider import get_provider
+
+    try:
+        async with SessionLocal() as db:
+            account = await _account(db, account_id)
+        # Запрос к Telegram может занять секунды (сеть, флуд-контроль) — базу
+        # на это время не держим открытой, иначе под нагрузкой быстро съедим
+        # пул соединений. Заодно к моменту записи транзакция, создавшая
+        # клиента, уже точно закоммичена — сеть всегда медленнее одного commit.
+        birthday = await get_provider().fetch_birthday(account, tg_user_id)
+        if birthday is None:
+            return
+        day, month, year = birthday
+        # Без года дата рождения была бы выдуманной — лучше пусто, чем
+        # неверно. Не трогаем, если менеджер уже успел вписать её вручную.
+        if year is None:
+            return
+        async with SessionLocal() as db:
+            client = await db.get(Client, client_id)
+            if client is not None and client.birth_date is None:
+                client.birth_date = date(year, month, day)
+                client.zodiac_sign = zodiac_for(client.birth_date)
+                await db.commit()
+    except Exception:
+        log.exception("Не подтянул дату рождения из Telegram для клиента %s", client_id)
 
 
 async def write_read_receipt(account_id: int, chat_id: int, max_id: int) -> None:
@@ -215,6 +257,12 @@ async def handle(account_id: int, command: str, args: dict[str, Any]) -> dict[st
 
         if command == "mark_read":
             await provider.mark_read(account, int(args["chat_id"]), int(args["max_id"]))
+            return {"ok": True}
+
+        if command == "edit_message":
+            await provider.edit_message(
+                account, int(args["chat_id"]), int(args["tg_message_id"]), str(args["text"])
+            )
             return {"ok": True}
 
         if command == "sync_history":

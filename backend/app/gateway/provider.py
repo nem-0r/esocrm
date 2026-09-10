@@ -116,10 +116,26 @@ class TelegramProvider(Protocol):
         """Погасить непрочитанное в самом Telegram, когда менеджер прочитал в CRM."""
         ...
 
+    async def edit_message(
+        self, account: TelegramAccount, chat_id: int, tg_message_id: int, text: str
+    ) -> None:
+        """Изменить текст уже отправленного сообщения в самом Telegram."""
+        ...
+
     def iter_history(
         self, account: TelegramAccount, since: Any, per_dialog_limit: int = 500
     ) -> Any:
         """Асинхронный обход переписки не старше `since` — для первой подтяжки."""
+        ...
+
+    async def fetch_birthday(
+        self, account: TelegramAccount, tg_user_id: int
+    ) -> tuple[int, int, int | None] | None:
+        """День, месяц и (если открыт) год рождения из полного профиля собеседника.
+
+        Лучшее из возможного: `None`, если скрыто приватностью, аккаунт не
+        подключён или запрос не удался — вызывающий не должен из-за этого
+        останавливать приём сообщений."""
         ...
 
 

@@ -111,6 +111,17 @@ export function useRetryMessage(conversationId: number) {
   })
 }
 
+export function useEditMessage(conversationId: number) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({ messageId, text }: { messageId: number; text: string }) =>
+      api.patch<Message>(`/conversations/${conversationId}/messages/${messageId}`, { text }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['messages', conversationId] })
+    },
+  })
+}
+
 export function useMarkRead() {
   const queryClient = useQueryClient()
   return useMutation({

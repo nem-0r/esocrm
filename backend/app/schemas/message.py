@@ -79,3 +79,9 @@ class MessageCreate(BaseModel):
     uploads: list[UploadRef] | None = None
     # Для случаев, когда вложение уже существует в базе (пересылка, повтор отправки).
     attachment_ids: list[int] | None = None
+
+
+class MessageEdit(BaseModel):
+    """Правка текста уже отправленного сообщения."""
+
+    text: str = Field(min_length=1, max_length=MAX_TEXT_LENGTH)

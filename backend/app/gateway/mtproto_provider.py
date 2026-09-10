@@ -35,6 +35,9 @@ from telethon.errors import (
     ApiIdInvalidError,
     AuthKeyUnregisteredError,
     FloodWaitError,
+    MessageEditTimeExpiredError,
+    MessageIdInvalidError,
+    MessageNotModifiedError,
     PhoneCodeExpiredError,
     PhoneCodeInvalidError,
     PhoneNumberBannedError,
@@ -584,6 +587,51 @@ class MTProtoProvider:
             await client.send_read_acknowledge(entity, max_id=max_id)
         except FloodWaitError as exc:
             raise RetryAfter(int(exc.seconds)) from exc
+
+    async def edit_message(
+        self, account: TelegramAccount, chat_id: int, tg_message_id: int, text: str
+    ) -> None:
+        """Изменить текст уже отправленного сообщения в самом Telegram."""
+        client = await self._guarded(account)
+        entity = await self._entity(client, account, chat_id)
+        try:
+            await client.edit_message(entity, tg_message_id, text)
+        except MessageNotModifiedError:
+            # Текст не поменялся с точки зрения Telegram — не ошибка.
+            return
+        except MessageEditTimeExpiredError as exc:
+            raise ValueError(
+                "Telegram больше не разрешает редактировать это сообщение — прошло больше 48 часов"
+            ) from exc
+        except MessageIdInvalidError as exc:
+            raise ValueError("Сообщение не найдено в Telegram — возможно, его удалили") from exc
+        except FloodWaitError as exc:
+            raise RetryAfter(int(exc.seconds)) from exc
+        except (AuthKeyUnregisteredError, SessionRevokedError, UserDeactivatedBanError) as exc:
+            raise SessionLost(str(exc)) from exc
+
+    async def fetch_birthday(
+        self, account: TelegramAccount, tg_user_id: int
+    ) -> tuple[int, int, int | None] | None:
+        """Один запрос полного профиля — день рождения есть только там, не в
+        лёгком User из потока сообщений. Лучшее из возможного: любая осечка
+        (приватность закрыта, аккаунт сейчас не поднят, флуд-контроль) —
+        просто «не узнали», а не повод останавливать приём сообщений."""
+        client = self.client_for(account.id)
+        if client is None:
+            return None
+        try:
+            entity = await self._entity(client, account, tg_user_id)
+            full = await client(functions.users.GetFullUserRequest(entity))
+        except Exception:
+            log.info(
+                "Дата рождения аккаунта %s недоступна для клиента %s", account.id, tg_user_id
+            )
+            return None
+        birthday = getattr(full.full_user, "birthday", None)
+        if birthday is None:
+            return None
+        return birthday.day, birthday.month, birthday.year
 
     # --------------------------------------------------------------- история
 
