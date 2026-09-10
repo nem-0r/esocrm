@@ -86,7 +86,11 @@ STORAGE_CID="$(dc ps -q storage)"
 [[ -n "$STORAGE_CID" ]] || fail "контейнер storage не запущен"
 
 TMP_IN_CONTAINER="/tmp/astra-backup-$STAMP"
-STAGING="$(mktemp -d "${TMPDIR:-/tmp}/astra-backup.XXXXXX")"
+# Не системный /tmp: на проде это tmpfs с жёстким потолком в разы меньше диска
+# (например, 3.9 ГБ), и бакет вложений рано или поздно в него не влезет — тогда
+# бэкап падает по нехватке места, хотя на самом диске места полно. Стейджинг —
+# рядом с $BACKUP_DIR, он уже точно на настоящем диске.
+STAGING="$(mktemp -d "${TMPDIR:-$BACKUP_DIR}/astra-backup.XXXXXX")"
 cleanup() {
     rm -rf "$STAGING"
     docker exec "$STORAGE_CID" rm -rf "$TMP_IN_CONTAINER" >/dev/null 2>&1 || true
