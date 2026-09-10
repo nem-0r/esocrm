@@ -13,7 +13,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import conversation_scope_sql, visible_account_ids
 from app.models import SearchHistory, User, UserRole
-from app.services import payment_code
 
 MIN_QUERY = 2
 HISTORY_LIMIT = 10
@@ -52,16 +51,12 @@ async def search(
     account_ids = await visible_account_ids(db, user)
     scope_sql, scope_params = _scope_params(user, account_ids)
     exact = _numeric(query)
-    # Код платежа из комментария к переводу или из банковской выписки: по нему
-    # руководитель находит сделку, когда деньги пришли, а кто заплатил — неясно.
-    code = payment_code.normalize(query)
     params: dict[str, Any] = {
         "q": query,
         "like": f"%{query}%",
         # tg_username хранится без «@» — если ввели «@ivan», ищем «ivan».
         "username_like": f"%{query.lstrip('@')}%",
         "exact": exact,
-        "code": code or None,
         "limit": limit,
         **scope_params,
     }
@@ -113,7 +108,7 @@ async def search(
     if "deals" in wanted:
         sql = text(
             """
-            select d.id, d.total_amount, d.status, d.payment_code, cl.display_name as client_name,
+            select d.id, d.total_amount, d.status, cl.display_name as client_name,
                    (select name from deal_items i where i.deal_id = d.id
                     order by i.amount desc limit 1) as top_item,
                    (select count(*) from deal_items i where i.deal_id = d.id) as items_count
@@ -121,8 +116,6 @@ async def search(
             join clients cl on cl.id = d.client_id
             join conversations c on c.id = d.conversation_id
             where ((cast(:exact as bigint) is not null and d.id = cast(:exact as bigint))
-                   or d.payment_code = cast(:code as text)
-                   or d.payment_code = cast(:q as text)
                    or cl.display_name ilike :like
                    or exists (select 1 from deal_items i
                               where i.deal_id = d.id and i.name ilike :like))
@@ -135,7 +128,6 @@ async def search(
             {
                 "id": r.id,
                 "number": f"DEAL-{r.id}",
-                "payment_code": r.payment_code,
                 "title": (
                     f"{r.top_item} и др."
                     if (r.items_count or 0) > 1

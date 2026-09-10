@@ -84,9 +84,14 @@ class DealCancel(ApiModel):
 
 class DealPay(ApiModel):
     comment: str | None = None
-    # ТЗ п. 6.3: без номера чека оплату подтвердить нельзя. Проверяется в сервисе,
-    # чтобы сообщение об ошибке было на русском и с именем поля.
-    receipt_number: str | None = None
+    # Без прикреплённого чека оплату подтвердить нельзя. Файл уже загружен
+    # через POST /files/upload (тот же путь, что и вложения в чате) — сюда
+    # приходит только ссылка на него, без второй загрузки. Проверяется в
+    # сервисе, чтобы сообщение об ошибке было на русском и с именем поля.
+    receipt_upload_key: str | None = None
+    receipt_file_name: str | None = None
+    receipt_mime_type: str | None = None
+    receipt_size_bytes: int = 0
     # На какой реквизит деньги пришли фактически. Пусто — значит на тот,
     # что был в счёте.
     paid_to_requisite_id: int | None = None
@@ -101,7 +106,6 @@ class DealRow(ApiModel):
     total_amount: int
     status: DealStatus
     payment_method: PaymentMethod
-    payment_code: str | None = None
     created_at: datetime
     sent_at: datetime | None = None
     expires_at: datetime | None = None
@@ -129,8 +133,12 @@ class DealDetail(DealRow):
     paid_to_requisite_title: str | None = None
     intro_text: str | None = None
     cancel_reason: str | None = None
-    receipt_number: str | None = None
-    receipt_at: datetime | None = None
+    # Чек, приложенный при подтверждении оплаты. url пуст, пока чека нет —
+    # фронтенду не нужно отдельно проверять receipt_file_name на пустоту.
+    receipt_file_name: str | None = None
+    receipt_mime_type: str | None = None
+    receipt_size_bytes: int | None = None
+    receipt_url: str | None = None
     edit_count: int
     events: list[DealEventOut]
 
@@ -155,6 +163,11 @@ def days_without_answer(deal: Any) -> int | None:
     return (datetime.now(UTC) - deal.sent_at).days
 
 
+def receipt_url(deal_id: int) -> str:
+    """Чек отдаётся через API, а не прямой ссылкой на хранилище: там права."""
+    return f"/api/v1/deals/{deal_id}/receipt"
+
+
 def row_payload(deal: Any, sold_by: Any) -> dict[str, Any]:
     """Строка списка. Собирается словарём: тот же payload уходит и в websocket."""
     return {
@@ -171,7 +184,6 @@ def row_payload(deal: Any, sold_by: Any) -> dict[str, Any]:
         "total_amount": deal.total_amount,
         "status": deal.status,
         "payment_method": deal.payment_method,
-        "payment_code": deal.payment_code,
         "created_at": deal.created_at,
         # Дата, по которой сделка попадает в период: оплата или создание.
         "event_at": deal.paid_at or deal.created_at,
@@ -205,8 +217,10 @@ def detail_payload(deal: Any, sold_by: Any, events: list[tuple[Any, Any]]) -> di
         ),
         intro_text=deal.intro_text,
         cancel_reason=deal.cancel_reason,
-        receipt_number=deal.receipt_number,
-        receipt_at=deal.receipt_at,
+        receipt_file_name=deal.receipt_file_name,
+        receipt_mime_type=deal.receipt_mime_type,
+        receipt_size_bytes=deal.receipt_size_bytes,
+        receipt_url=receipt_url(deal.id) if deal.receipt_storage_key else None,
         edit_count=deal.edit_count,
         events=[
             {

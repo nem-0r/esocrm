@@ -83,8 +83,6 @@ def build_details(row: dict[str, str]) -> str:
         lines.append(f"IBAN: {row['iban']}")
     if row["bic"]:
         lines.append(f"BIC: {row['bic']}")
-    if row["country"] != "Крипта":
-        lines.append("В комментарии к переводу укажите код платежа")
     return "\n".join(lines)
 
 

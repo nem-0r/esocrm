@@ -14,7 +14,6 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy import text as sa_text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -59,9 +58,10 @@ class PaymentRequisite(Base, PKMixin, TimestampMixin):
 
 
 class Deal(Base, PKMixin, TimestampMixin):
-    """Сделка (оплата). `id` — это и номер DEAL-1042, и код платежа.
+    """Сделка (оплата). `id` — это номер DEAL-1042.
 
-    Клиент указывает код в комментарии к переводу, по нему сверяется поступление.
+    Оплата по реквизитам сверяется по чеку, который менеджер прикладывает файлом
+    при подтверждении (`receipt_storage_key` и связанные поля ниже).
     """
 
     __tablename__ = "deals"
@@ -92,7 +92,6 @@ class Deal(Base, PKMixin, TimestampMixin):
     # Текст, которым менеджер сопровождает счёт. Уходит клиенту перед реквизитами
     # или ссылкой — одинаково для обоих способов оплаты (ТЗ п. 4.4 и 4.5).
     intro_text: Mapped[str | None] = mapped_column(Text)
-    payment_code: Mapped[str | None] = mapped_column(String(32))
     # На какой реквизит деньги пришли фактически. Может отличаться от того, что
     # был в счёте: платят и с чужой карты, и другим способом, а сверять выписку
     # надо с тем счётом, куда деньги дошли.
@@ -128,9 +127,16 @@ class Deal(Base, PKMixin, TimestampMixin):
         Enum(PaidSource, name="paid_source", native_enum=True, values_callable=enum_values)
     )
 
-    # Чек по 54-ФЗ. Без него оплату подтвердить нельзя (ТЗ п. 6.3).
-    receipt_number: Mapped[str | None] = mapped_column(String(64))
-    receipt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Файл чека, приложенный менеджером при подтверждении. Без него оплату
+    # подтвердить нельзя (заменил номер чека вручную — так проще проверить
+    # реальный документ, а не поверить сотруднику на слово). Своей таблицы
+    # вложений не заводим: у сделки ровно один чек, а не произвольный список,
+    # так что четыре колонки здесь дешевле лишней связи (см. docs/11, разд. 6.1
+    # про то же рассуждение для будущей payment_receipts).
+    receipt_storage_key: Mapped[str | None] = mapped_column(String(500))
+    receipt_file_name: Mapped[str | None] = mapped_column(String(255))
+    receipt_mime_type: Mapped[str | None] = mapped_column(String(120))
+    receipt_size_bytes: Mapped[int | None] = mapped_column(BigInteger)
 
     cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     cancel_reason: Mapped[str | None] = mapped_column(Text)
@@ -156,12 +162,6 @@ class Deal(Base, PKMixin, TimestampMixin):
         Index("ix_deals_sold_by_paid", "sold_by_id", "paid_at"),
         Index("ix_deals_status_expires", "status", "expires_at"),
         Index("ix_deals_conversation_status", "conversation_id", "status"),
-        Index(
-            "uq_deals_payment_code",
-            "payment_code",
-            unique=True,
-            postgresql_where=sa_text("payment_code IS NOT NULL"),
-        ),
     )
 
     @property

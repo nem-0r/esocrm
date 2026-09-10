@@ -32,7 +32,7 @@ _READ_CHUNK = 1024 * 1024
 # и другое, иначе поддельное расширение с чужим содержимым прошло бы проверку.
 ALLOWED_EXTENSIONS = {
     "pdf", "doc", "docx", "xls", "xlsx",
-    "jpg", "jpeg", "png", "webp", "gif",
+    "jpg", "jpeg", "png", "webp", "gif", "heic", "heif", "bmp", "tiff", "tif",
     "mp4", "mov", "ogg", "oga", "mp3", "m4a",
     "txt",
 }
@@ -47,6 +47,12 @@ ALLOWED_MIME_TYPES = {
     "image/png",
     "image/webp",
     "image/gif",
+    # Скриншоты и фото с айфона по умолчанию — HEIC/HEIF; чек оплаты чаще
+    # всего именно скриншот или фото с телефона, не только PNG.
+    "image/heic",
+    "image/heif",
+    "image/bmp",
+    "image/tiff",
     "video/mp4",
     "video/quicktime",
     "audio/ogg",
@@ -133,7 +139,10 @@ async def download(db: AsyncSession, user: User, attachment_id: int) -> tuple[At
         if not visible:
             raise NotFound("Файл не найден")
 
-    body = await storage.get_object(attachment.storage_key)
+    try:
+        body = await storage.get_object(attachment.storage_key)
+    except storage.ObjectNotFound as exc:
+        raise NotFound("Файл не найден") from exc
     return attachment, body
 
 

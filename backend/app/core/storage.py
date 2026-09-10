@@ -49,9 +49,16 @@ async def put_object(key: str, body: bytes, filename: str | None = None) -> None
     await asyncio.to_thread(_put)
 
 
+class ObjectNotFound(RuntimeError):
+    """Ключ есть в базе, а файла под ним в хранилище уже нет."""
+
+
 async def get_object(key: str) -> bytes:
     def _get() -> bytes:
-        return get_client().get_object(Bucket=settings.s3_bucket, Key=key)["Body"].read()
+        try:
+            return get_client().get_object(Bucket=settings.s3_bucket, Key=key)["Body"].read()
+        except ClientError as exc:
+            raise ObjectNotFound(key) from exc
 
     return await asyncio.to_thread(_get)
 

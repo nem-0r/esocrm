@@ -7,12 +7,13 @@
 на которые он назначен. Чужая сделка для менеджера — 404, а не 403.
 """
 
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import Select, case, distinct, exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import storage
 from app.core.config import settings
 from app.core.deps import conversation_scope_orm, visible_account_ids
 from app.core.errors import Conflict, Invalid, NotFound
@@ -36,12 +37,13 @@ from app.models.enums import ALLOWED_DEAL_TRANSITIONS
 from app.realtime.events import emit, emit_to_conversation
 from app.schemas.common import decode_cursor, encode_cursor
 from app.schemas.deal import DealCreate, DealItemIn, DealUpdate, detail_payload, row_payload
-from app.services import payment_code, robokassa
+from app.services import robokassa
 from app.services.audit import log_event
 from app.services.message_service import send_outgoing
 from app.services.money import MoneyError, format_rubles, validate_amount
 from app.services.settings_service import get_all as settings_get_all
 from app.services.settings_service import get_value
+from app.services.worktime import day_bounds, local_zone
 
 # Провайдера ещё нет, а кнопок-обманок мы не отдаём.
 # При реализации Робокассы: сообщение клиенту обязано начинаться с deal.intro_text,
@@ -141,14 +143,16 @@ async def _conditions(
     попадала бы в августовскую статистику, но не в августовский список оплат,
     и плитка «оплачено за период» показывала бы не то же число, что статистика.
     """
-    today = datetime.now(UTC).date()
+    # «Сегодня» — по часовому поясу организации, не по UTC: иначе в последние
+    # часы дня по Москве (21:00–24:00 UTC) сервер уже считал бы «сегодня»
+    # вчерашним, и только что оплаченная сделка выпадала бы из периода
+    # по умолчанию (последний год до сегодня).
+    today = datetime.now(UTC).astimezone(await local_zone(db)).date()
     since = date_from or today - timedelta(days=365)
     until = date_to or today
     event_at = func.coalesce(Deal.paid_at, Deal.created_at)
-    conds: list[Any] = [
-        event_at >= datetime.combine(since, time.min, tzinfo=UTC),
-        event_at < datetime.combine(until + timedelta(days=1), time.min, tzinfo=UTC),
-    ]
+    lo, hi = await day_bounds(db, since, until)
+    conds: list[Any] = [event_at >= lo, event_at < hi]
     if status is not None:
         conds.append(Deal.status == status)
     if client_id is not None:
@@ -363,7 +367,6 @@ async def create_deal(db: AsyncSession, user: User, data: DealCreate) -> dict[st
     _replace_items(deal, items)
     db.add(deal)
     await db.flush()
-    deal.payment_code = await _new_payment_code(db)
     money = {"total_amount": deal.total_amount, "payment_method": deal.payment_method.value}
     await _record(
         db, deal, user, DealEventKind.CREATED, action="deal.create",
@@ -411,8 +414,7 @@ async def update_deal(
             text = (
                 "Счёт изменён — актуальные данные для оплаты:\n\n"
                 f"{requisite.details_text}\n\n"
-                f"Сумма к оплате: {format_rubles(deal.total_amount)}\n"
-                f"Код платежа: {deal.payment_code} — укажите его в комментарии к переводу"
+                f"Сумма к оплате: {format_rubles(deal.total_amount)}"
             )
         await send_outgoing(db, conversation=conversation, author=user, text=text)
         resent_to_client = True
@@ -425,49 +427,22 @@ async def update_deal(
     return await _commit_and_emit(db, deal)
 
 
-async def _new_payment_code(db: AsyncSession) -> str:
-    """Свободный код платежа. Уникальность держит индекс в базе, здесь — попытки:
-    совпадение маловероятно, но «маловероятно» и «невозможно» — разные вещи, а
-    два клиента с одним кодом означают неверно засчитанную оплату."""
-    for _ in range(10):
-        code = payment_code.generate()
-        taken = await db.scalar(select(Deal.id).where(Deal.payment_code == code))
-        if taken is None:
-            return code
-    raise Invalid("Не удалось выдать код платежа, попробуйте ещё раз")
-
-
-async def find_by_payment_code(db: AsyncSession, raw: str) -> Deal | None:
-    """Сделка по коду из комментария к переводу или из банковской выписки.
-
-    Понимает и новый код (`AC-K7M2QP`), и числовой код старых сделок: истории
-    оплат не одна неделя, и сверять по ней тоже придётся.
-    """
-    code = payment_code.normalize(raw)
-    if code:
-        found = await db.scalar(select(Deal).where(Deal.payment_code == code))
-        if found is not None:
-            return found
-    digits = "".join(ch for ch in (raw or "") if ch.isdigit())
-    if digits:
-        return await db.scalar(select(Deal).where(Deal.payment_code == digits))
-    return None
-
-
 def invoice_text(deal: Deal, requisite: PaymentRequisite) -> str:
-    """Счёт клиенту: сопроводительный текст, реквизиты, сумма и код платежа.
+    """Счёт клиенту: сопроводительный текст, реквизиты и сумма.
 
     Текст менеджера идёт первым — клиент читает сообщение сверху вниз, и сухие
     реквизиты без единого слова выглядят как ошибка отправки (ТЗ п. 4.4 и 4.5).
+
+    Кода платежа для комментария к переводу больше нет: сверка теперь идёт по
+    чеку, который менеджер прикладывает при подтверждении оплаты, а не по
+    надежде, что клиент аккуратно перепишет код в комментарий банковского
+    перевода.
     """
     parts: list[str] = []
     if deal.intro_text and deal.intro_text.strip():
         parts.append(deal.intro_text.strip())
     parts.append(requisite.details_text)
-    parts.append(
-        f"Сумма к оплате: {format_rubles(deal.total_amount)}\n"
-        f"Код платежа: {deal.payment_code} — укажите его в комментарии к переводу"
-    )
+    parts.append(f"Сумма к оплате: {format_rubles(deal.total_amount)}")
     return "\n\n".join(parts)
 
 
@@ -538,34 +513,57 @@ async def send_deal(db: AsyncSession, user: User, deal_id: int) -> dict[str, Any
     return await _commit_and_emit(db, deal)
 
 
+RECEIPT_MIME_TYPES = {
+    "application/pdf",
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+    "image/gif",
+    "image/heic",
+    "image/heif",
+    "image/bmp",
+    "image/tiff",
+}
+
+
 async def pay_deal(
     db: AsyncSession,
     user: User,
     deal_id: int,
     comment: str | None = None,
-    receipt_number: str | None = None,
+    receipt_upload_key: str | None = None,
+    receipt_file_name: str | None = None,
+    receipt_mime_type: str | None = None,
+    receipt_size_bytes: int = 0,
     paid_to_requisite_id: int | None = None,
 ) -> dict[str, Any]:
     deal, _ = await _get_deal(db, user, deal_id, lock=True)
     _ensure_transition(deal, DealStatus.PAID)
-    # ТЗ п. 6.3: чек обязателен. Оплата без чека — это выручка, которой нет
-    # в кассе: расхождение всплывёт при сверке, а найти его будет нечем.
-    receipt = (receipt_number or "").strip()
-    if not receipt:
+    # Чек обязателен, только теперь это файл, а не число, которое менеджер мог
+    # вписать наугад. Оплата без чека — это выручка, которой нет в кассе:
+    # расхождение всплывёт при сверке, а найти его будет нечем.
+    if not receipt_upload_key or not receipt_file_name:
         raise Invalid(
-            "Укажите номер чека — без него оплату подтвердить нельзя",
-            field="receipt_number",
+            "Прикрепите чек оплаты — без него подтвердить нельзя",
+            field="receipt_upload_key",
         )
-    if len(receipt) > 64:
+    if (receipt_mime_type or "").lower() not in RECEIPT_MIME_TYPES:
         raise Invalid(
-            "Номер чека — не длиннее 64 символов", field="receipt_number"
+            "Чек принимается только как изображение или PDF", field="receipt_upload_key"
         )
+    # Оплата необратима (PAID — конечный статус), поэтому чек обязан реально
+    # лежать в хранилище прямо сейчас — иначе сделка навсегда осталась бы
+    # «оплаченной» без единого доказательства этого.
+    if not await storage.object_exists(receipt_upload_key):
+        raise Invalid("Файл чека не найден — загрузите его ещё раз", field="receipt_upload_key")
     deal.status = DealStatus.PAID
     deal.paid_at = datetime.now(UTC)
     deal.paid_by_id = user.id
     deal.paid_source = PaidSource.MANUAL
-    deal.receipt_number = receipt
-    deal.receipt_at = deal.paid_at
+    deal.receipt_storage_key = receipt_upload_key
+    deal.receipt_file_name = receipt_file_name
+    deal.receipt_mime_type = receipt_mime_type
+    deal.receipt_size_bytes = receipt_size_bytes
     # Куда деньги пришли фактически. По умолчанию — тот реквизит, что был
     # в счёте; если платили на другой, менеджер указывает его явно, иначе
     # сверка с выпиской этого счёта не сойдётся.
@@ -598,6 +596,18 @@ async def pay_deal(
     payload = await _commit_and_emit(db, deal)
     await emit("notification.new", {"notification": notice}, recipients)
     return payload
+
+
+async def receipt_file(db: AsyncSession, user: User, deal_id: int) -> tuple[Deal, bytes]:
+    """Файл чека вместе со сделкой — видимость та же, что у самой сделки."""
+    deal, _ = await _get_deal(db, user, deal_id)
+    if not deal.receipt_storage_key:
+        raise NotFound("Чек не прикреплён")
+    try:
+        body = await storage.get_object(deal.receipt_storage_key)
+    except storage.ObjectNotFound as exc:
+        raise NotFound("Файл чека не найден в хранилище") from exc
+    return deal, body
 
 
 class ProviderResult:

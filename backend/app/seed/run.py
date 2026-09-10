@@ -9,6 +9,7 @@
 import asyncio
 import random
 import sys
+import uuid
 from datetime import UTC, date, datetime, time, timedelta
 
 from sqlalchemy import text
@@ -79,6 +80,12 @@ TABLES = [
 
 rnd = random.Random(d.RANDOM_SEED)  # noqa: S311 — демо-данные, а не криптография
 NOW = datetime.now(UTC)
+
+# Минимальный валидный PNG 1×1 — реальный файл для демо-чеков, не заглушка.
+DEMO_RECEIPT_PNG = bytes.fromhex(
+    "89504e470d0a1a0a0000000d494844520000000100000001080600000"
+    "01f15c4890000000a4944415478da6360000002000155ff2ba00000000049454e44ae426082"
+)
 
 
 def ago(days: float = 0, hours: float = 0, minutes: float = 0) -> datetime:
@@ -457,7 +464,6 @@ async def make_deals(
         db.add(deal)
         await db.flush()
 
-        deal.payment_code = str(deal.id)
         names = rnd.sample(list(d.DEAL_ITEM_PRICES), rnd.randint(1, 3))
         total = 0
         for position, name in enumerate(names):
@@ -485,7 +491,15 @@ async def make_deals(
             deal.paid_at = paid_at
             deal.paid_by_id = seller.id
             deal.paid_source = PaidSource.MANUAL
-            events.append((DealEventKind.PAID, "Поступление сверено по коду платежа", paid_at))
+            events.append((DealEventKind.PAID, "Оплата подтверждена вручную по чеку", paid_at))
+            # Оплаченная сделка без чека — то же самое, чего эта фича и должна
+            # была избежать. Демо обязано показывать реальный прикреплённый файл.
+            receipt_key = f"uploads/{paid_at:%Y}/{paid_at:%m}/{uuid.uuid4()}.png"
+            await put_object(receipt_key, DEMO_RECEIPT_PNG, filename="чек.png")
+            deal.receipt_storage_key = receipt_key
+            deal.receipt_file_name = "чек.png"
+            deal.receipt_mime_type = "image/png"
+            deal.receipt_size_bytes = len(DEMO_RECEIPT_PNG)
         elif status == DealStatus.EXPIRED:
             # Срок истёк — двигаем отправку назад, чтобы это было правдой.
             deal.sent_at = ago(days=rnd.randint(9, 30))
