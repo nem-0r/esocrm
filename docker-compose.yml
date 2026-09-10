@@ -79,6 +79,9 @@ services:
     depends_on:
       api: {condition: service_started}
     command: python -m app.gateway.worker
+    # Один контейнер — но внутри него несколько процессов (app/gateway/worker.py
+    # сам решает сколько, по числу ядер, видных контейнеру: app/gateway/topology.py).
+    # Реплики контейнеров тут не нужны: параллелизм уже внутри одного.
 
   scheduler:
     restart: unless-stopped

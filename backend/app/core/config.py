@@ -121,6 +121,12 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql+asyncpg://astra:astra@db:5432/astra"
     redis_url: str = "redis://cache:6379/0"
+    # Для api/scheduler — размер пула НА процесс (он один). Для gateway — общий
+    # бюджет НА КОНТЕЙНЕР, который app/core/db.py делит на число процессов
+    # шлюза (растёт с числом ядер, topology.worker_count()) — без этого деления
+    # апгрейд сервера незаметно умножал бы число соединений с базой на N.
+    db_pool_size: int = 10
+    db_max_overflow: int = 20
 
     s3_endpoint_url: str = "http://storage:9000"
     s3_public_endpoint_url: str = "http://localhost:9000"

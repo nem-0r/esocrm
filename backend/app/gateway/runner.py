@@ -26,7 +26,7 @@ from app.core import storage
 from app.core.command_bus import serve as serve_commands
 from app.core.config import settings
 from app.core.db import SessionLocal
-from app.gateway import handlers, lease
+from app.gateway import handlers, lease, load
 from app.gateway.provider import get_provider
 from app.models import (
     ActorKind,
@@ -62,6 +62,15 @@ _held: set[int] = set()
 
 
 def _worker_id(hostname: str) -> str:
+    """Случайный хвост нарочно: если бы id переживал перезапуск процесса (например,
+    был завязан на номер слота), heartbeat при старте продлил бы аренду аккаунтов,
+    которые числятся за этим id с прошлой жизни процесса — раньше, чем этот же
+    процесс успеет поднять для них настоящую сессию Telethon (`_start_accounts`
+    вызывается только для только что ЗАНЯТЫХ в этом заходе, а не для уже
+    числящихся). Аккаунт выглядел бы «удержанным» без единого живого соединения.
+    Случайный id гарантирует, что после падения процесса его старые аккаунты
+    для новой попытки — чужие, и достаются через обычный `claim_accounts` вместе
+    с настоящим стартом сессии."""
     return f"{hostname}-{uuid.uuid4().hex[:8]}"
 
 
@@ -125,7 +134,15 @@ async def _lease_loop(worker_id: str, hostname: str, stop: asyncio.Event) -> Non
         try:
             async with SessionLocal() as db:
                 await lease.heartbeat(db, worker_id)
-                claimed = await lease.claim_accounts(db, worker_id, settings.gateway_capacity)
+                capacity = load.effective_capacity(settings.gateway_capacity)
+                if capacity < settings.gateway_capacity:
+                    log.info(
+                        "Шлюз %s придерживает рост: хост занят, лимит на этот заход %s из %s",
+                        worker_id,
+                        capacity,
+                        settings.gateway_capacity,
+                    )
+                claimed = await lease.claim_accounts(db, worker_id, capacity)
             # Набор пересобираем из базы, а не копим: аккаунт могли отобрать,
             # отключить или удалить, и тогда команды по нему не наши.
             new_held = await handlers.held_account_ids(worker_id)
