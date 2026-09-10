@@ -78,9 +78,8 @@ function ClientPane({ clientId }: { clientId: number }) {
     <div className="flex min-h-0 flex-1 flex-col">
       <header className="shrink-0 border-b border-line px-4 py-3">
         <div className="flex items-start gap-3">
-          {/* ТЗ п. 1.2: из карточки клиента нужен явный выход назад. На десктопе
-              слева есть список, поэтому стрелка только в мобильной раскладке. */}
-          <BackButton fallback="/clients" className="-ml-1 mt-0.5 desk:hidden" />
+          {/* ТЗ п. 1.2: из карточки клиента нужен явный выход назад. */}
+          <BackButton fallback="/clients" className="-ml-1 mt-0.5" />
           <Avatar name={client.name} size="lg" />
           <div className="flex min-w-0 flex-1 flex-col gap-0.5">
             <h1 className="truncate text-lg font-semibold text-ink">{client.name}</h1>

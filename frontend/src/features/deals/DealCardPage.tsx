@@ -189,7 +189,7 @@ function DealPane({ dealId }: { dealId: number }) {
     <div className="flex min-h-0 flex-1 flex-col">
       <header className="shrink-0 border-b border-line px-4 py-3">
         <div className="flex items-center gap-2">
-          <BackButton fallback="/payments" className="desk:hidden" />
+          <BackButton fallback="/payments" />
           <div className="flex min-w-0 flex-1 flex-col gap-1">
             <div className="flex items-center gap-2">
               <Badge tone={DEAL_STATUS_TONE[deal.status]}>{DEAL_STATUS_LABEL[deal.status]}</Badge>
