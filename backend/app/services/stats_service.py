@@ -464,6 +464,16 @@ async def personal_avg_response_seconds(db: AsyncSession, user_id: int) -> int |
 
     Отвечающим считается автор исходящего: именно он закрыл ожидание клиента.
     Служебные заметки исключены — они клиенту не уходят.
+
+    Важно: «следующее исходящее» ищем среди сообщений ЛЮБОГО автора (как и в
+    остальных метриках времени ответа), а не сразу фильтруем по :uid — иначе
+    при передаче диалога или подмене коллегой ожидание, которое коллега закрыл
+    за минуту, приписалось бы этому сотруднику по времени его следующего,
+    никак не связанного сообщения в том же диалоге — то есть завышало бы
+    его личное время часами. `array_agg(...)[1]` в окне с тем же порядком,
+    что и next_out, — это автор именно ТОГО сообщения, что и закрыло ожидание
+    (FILTER для window-функций работает только с агрегатами, поэтому не
+    first_value, а array_agg с выборкой первого элемента).
     """
     start, end = await worktime.current_month_bounds(db)
     sql = text(
@@ -473,12 +483,14 @@ async def personal_avg_response_seconds(db: AsyncSession, user_id: int) -> int |
                    lag(m.direction) over (
                        partition by m.conversation_id order by m.created_at, m.id
                    ) as prev_direction,
-                   min(m.created_at) filter (
-                       where m.direction = 'out' and m.author_id = :uid
-                   ) over (
+                   min(m.created_at) filter (where m.direction = 'out') over (
                        partition by m.conversation_id order by m.created_at, m.id
                        rows between 1 following and unbounded following
-                   ) as next_out
+                   ) as next_out,
+                   (array_agg(m.author_id) filter (where m.direction = 'out') over (
+                       partition by m.conversation_id order by m.created_at, m.id
+                       rows between 1 following and unbounded following
+                   ))[1] as next_out_author_id
             from messages m
             where m.deleted_at is null and m.is_internal = false
               and m.created_at >= :start and m.created_at < :end
@@ -488,6 +500,7 @@ async def personal_avg_response_seconds(db: AsyncSession, user_id: int) -> int |
         where direction = 'in'
           and (prev_direction is null or prev_direction = 'out')
           and next_out is not null
+          and next_out_author_id = :uid
         """
     )
     elapsed, extra = await _elapsed_sql(db)
