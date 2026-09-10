@@ -171,7 +171,7 @@ export function AccountsPage() {
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-2 border-t border-line pt-3">
+                  <div className="flex flex-col gap-2 border-t border-line pt-3 desk:flex-row desk:items-center">
                     <div className="flex min-w-0 flex-1 items-center gap-1.5">
                       {account.managers.length === 0 ? (
                         <span className="text-xs text-warning">Менеджер не назначен</span>

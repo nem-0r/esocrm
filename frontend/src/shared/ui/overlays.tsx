@@ -92,7 +92,7 @@ export function Sheet({
           <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-4">{children}</div>
 
           {footer && (
-            <div className="shrink-0 border-t border-line bg-surface px-4 py-3 pb-safe desk:pb-3">
+            <div className="shrink-0 border-t border-line bg-surface px-4 pt-3 pb-safe-3 desk:pb-3">
               {footer}
             </div>
           )}

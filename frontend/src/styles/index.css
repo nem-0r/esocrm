@@ -53,6 +53,14 @@
   .pt-safe {
     padding-top: env(safe-area-inset-top);
   }
+  /* Для футеров с обычным отступом (py-3 = 12px): на устройстве без вырез
+     (в том числе в эмуляции DevTools) env(safe-area-inset-bottom) = 0, и
+     `pb-safe` рядом с `py-3` СТИРАЕТ те же 12px в 0 — обе задают один и тот
+     же padding-bottom, а не складываются. Кнопка садится вплотную к краю
+     экрана. `max()` берёт большее и не даёт вырезу отобрать обычный отступ. */
+  .pb-safe-3 {
+    padding-bottom: max(0.75rem, env(safe-area-inset-bottom));
+  }
   .h-nav {
     height: calc(56px + env(safe-area-inset-bottom));
   }

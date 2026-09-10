@@ -1,8 +1,22 @@
-import { Ban, Check, Copy, Info, Pencil, Plus, Send, Trash2 } from 'lucide-react'
-import { useState } from 'react'
+import {
+  Ban,
+  Check,
+  Copy,
+  Download,
+  FileText,
+  Info,
+  Paperclip,
+  Pencil,
+  Plus,
+  Send,
+  Trash2,
+  X,
+} from 'lucide-react'
+import { useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 
-import { dateTimeFull, money } from '@/shared/lib/format'
+import { ApiError, api } from '@/shared/api/client'
+import { dateTimeFull, fileSize, money } from '@/shared/lib/format'
 import {
   Avatar,
   BackButton,
@@ -20,6 +34,7 @@ import {
   Sheet,
   Textarea,
 } from '@/shared/ui'
+import { ImagePreview } from '@/features/chats/components/MediaAttachment'
 import { PaymentsLayout } from '@/features/deals/components/PaymentsLayout'
 import {
   DEAL_EVENT_LABEL,
@@ -65,6 +80,13 @@ export function DealCardPage() {
   )
 }
 
+interface ReceiptUpload {
+  upload_key: string
+  file_name: string
+  size_bytes: number
+  mime_type: string | null
+}
+
 function DealPane({ dealId }: { dealId: number }) {
   const card = useDeal(dealId)
   const conversationId = card.data?.conversation_id ?? null
@@ -77,11 +99,31 @@ function DealPane({ dealId }: { dealId: number }) {
   const [payOpen, setPayOpen] = useState(false)
   const [cancelOpen, setCancelOpen] = useState(false)
   const [reason, setReason] = useState('')
-  const [receipt, setReceipt] = useState('')
+  const [receipt, setReceipt] = useState<ReceiptUpload | null>(null)
+  const [receiptUploading, setReceiptUploading] = useState(false)
+  const [receiptError, setReceiptError] = useState<string | null>(null)
+  const receiptInput = useRef<HTMLInputElement>(null)
   const [paidTo, setPaidTo] = useState<string | null>(null)
   const requisites = useRequisites()
   const [error, setError] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
+
+  async function onPickReceipt(files: FileList | null) {
+    const file = files?.[0]
+    if (!file) return
+    setReceiptError(null)
+    setReceiptUploading(true)
+    try {
+      const form = new FormData()
+      form.append('file', file)
+      setReceipt(await api.upload<ReceiptUpload>('/files/upload', form))
+    } catch (cause) {
+      setReceiptError(cause instanceof ApiError ? cause.message : 'Не удалось загрузить чек')
+    } finally {
+      setReceiptUploading(false)
+      if (receiptInput.current) receiptInput.current.value = ''
+    }
+  }
 
   const [editOpen, setEditOpen] = useState(false)
   const [editItems, setEditItems] = useState<ItemDraft[]>([newItemDraft()])
@@ -198,37 +240,6 @@ function DealPane({ dealId }: { dealId: number }) {
                 {deal.requisites_snapshot}
               </pre>
             )}
-            {/* Код платежа значим только для реквизитов: у ссылки сверка идёт по
-                InvId (id сделки) внутри Робокассы, а не по коду в комментарии. */}
-            {deal.payment_method === 'requisites' && deal.payment_code && (
-              <div className="flex items-start gap-2 rounded-md bg-accent-soft px-3 py-2.5">
-                <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                  <span className="tnum text-sm font-medium text-accent-text">
-                    Код платежа: {deal.payment_code}
-                  </span>
-                  <span className="text-micro text-ink-faint">
-                    Клиент указывает его в комментарии к переводу — по нему сверяем поступление
-                  </span>
-                </div>
-                <button
-                  aria-label="Скопировать код платежа"
-                  onClick={() => {
-                    void navigator.clipboard.writeText(deal.payment_code ?? '')
-                    setCopied(true)
-                    setTimeout(() => setCopied(false), 1600)
-                  }}
-                  // Иконка 16px — мимо неё пальцем промахиваются. Псевдоэлемент
-                  // расширяет зону нажатия до 44px, вид при этом не меняется.
-                  className="relative shrink-0 text-ink-faint transition-colors hover:text-ink before:absolute before:-inset-3.5 before:content-['']"
-                >
-                  {copied ? (
-                    <Check className="size-4" aria-hidden />
-                  ) : (
-                    <Copy className="size-4" aria-hidden />
-                  )}
-                </button>
-              </div>
-            )}
             {deal.payment_method === 'link' && deal.payment_url && (
               <div className="flex items-start gap-2 rounded-md bg-accent-soft px-3 py-2.5">
                 <div className="flex min-w-0 flex-1 flex-col gap-0.5">
@@ -265,6 +276,36 @@ function DealPane({ dealId }: { dealId: number }) {
             {deal.status === 'paid' && (
               <p className="text-xs text-ink-faint">Оплаченную сделку изменить нельзя.</p>
             )}
+            {deal.receipt_url && (
+              <div className="flex flex-col gap-1.5">
+                <span className="text-label uppercase tracking-wide text-ink-faint">
+                  Чек оплаты
+                </span>
+                {deal.receipt_mime_type?.startsWith('image/') ? (
+                  <ImagePreview src={deal.receipt_url} alt={deal.receipt_file_name ?? 'Чек'} />
+                ) : (
+                  <a
+                    href={deal.receipt_url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="flex items-center gap-2 rounded-md bg-surface-raised px-3 py-2.5 transition-colors hover:bg-line"
+                  >
+                    <FileText className="size-4 shrink-0 text-accent-text" aria-hidden />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-sm text-ink">
+                        {deal.receipt_file_name}
+                      </span>
+                      {deal.receipt_size_bytes !== null && (
+                        <span className="block text-micro text-ink-faint">
+                          {fileSize(deal.receipt_size_bytes)}
+                        </span>
+                      )}
+                    </span>
+                    <Download className="size-4 shrink-0 text-ink-faint" aria-hidden />
+                  </a>
+                )}
+              </div>
+            )}
           </Card>
 
           <Card>
@@ -286,8 +327,8 @@ function DealPane({ dealId }: { dealId: number }) {
       </div>
 
       {(canSend(deal.status) || canPay(deal.status) || canCancel(deal.status)) && (
-        <div className="shrink-0 border-t border-line bg-surface px-4 py-3 pb-safe">
-          <div className="mx-auto flex w-full max-w-2xl gap-2">
+        <div className="shrink-0 border-t border-line bg-surface px-4 pt-3 pb-safe-3">
+          <div className="mx-auto flex w-full max-w-2xl flex-col gap-2 desk:flex-row">
             {canSend(deal.status) && (
               <Button
                 fullWidth
@@ -303,7 +344,7 @@ function DealPane({ dealId }: { dealId: number }) {
                 fullWidth
                 onClick={() => {
                   // Предзаполняем реквизитом из счёта: чаще всего деньги приходят
-                  // именно туда, и менеджеру остаётся только номер чека.
+                  // именно туда, и менеджеру остаётся только приложить чек.
                   setPaidTo(deal.requisite_id ? String(deal.requisite_id) : null)
                   setPayOpen(true)
                 }}
@@ -314,6 +355,7 @@ function DealPane({ dealId }: { dealId: number }) {
             )}
             {canEdit(deal.status) && (
               <Button
+                fullWidth
                 variant="secondary"
                 onClick={() => {
                   setEditItems(
@@ -338,7 +380,7 @@ function DealPane({ dealId }: { dealId: number }) {
               </Button>
             )}
             {canCancel(deal.status) && (
-              <Button variant="danger" onClick={() => setCancelOpen(true)}>
+              <Button fullWidth variant="danger" onClick={() => setCancelOpen(true)}>
                 <Ban className="size-4" aria-hidden />
                 Отменить
               </Button>
@@ -347,33 +389,36 @@ function DealPane({ dealId }: { dealId: number }) {
         </div>
       )}
 
-      {/* ТЗ п. 6.3: подтверждение оплаты требует номер чека. Оплата без чека —
-          выручка, которой нет в кассе: расхождение всплывёт при сверке. */}
+      {/* ТЗ п. 6.3: подтверждение оплаты требует приложенный чек. Оплата без
+          чека — выручка, которой нет в кассе: расхождение всплывёт при сверке. */}
       <Sheet
         open={payOpen}
         onOpenChange={setPayOpen}
         title="Подтвердить оплату"
         description={
           deal.payment_method === 'requisites'
-            ? `Поступление на ${money(deal.total_amount)}, код платежа ${deal.payment_code}`
+            ? `Поступление на ${money(deal.total_amount)} — приложите чек, который прислал клиент`
             : `Поступление на ${money(deal.total_amount)} — подтверждаете вручную, в обход Робокассы`
         }
         className="desk:w-[460px]"
         footer={
           <Button
             fullWidth
-            disabled={!receipt.trim()}
+            disabled={!receipt || receiptUploading}
             loading={pay.isPending}
             onClick={() =>
               void run(
                 () =>
                   pay.mutateAsync({
-                    receipt_number: receipt.trim(),
+                    receipt_upload_key: receipt!.upload_key,
+                    receipt_file_name: receipt!.file_name,
+                    receipt_mime_type: receipt!.mime_type,
+                    receipt_size_bytes: receipt!.size_bytes,
                     paid_to_requisite_id: paidTo ? Number(paidTo) : null,
                   }),
                 () => {
                   setPayOpen(false)
-                  setReceipt('')
+                  setReceipt(null)
                 },
               )
             }
@@ -383,16 +428,45 @@ function DealPane({ dealId }: { dealId: number }) {
         }
       >
         <div className="flex flex-col gap-3">
-          <Field label="Номер чека" hint="Без чека подтвердить нельзя" required>
-            <Input
-              value={receipt}
-              maxLength={64}
-              onChange={(event: React.ChangeEvent<HTMLInputElement>) =>
-                setReceipt(event.target.value)
-              }
-              placeholder="ЧЕК-000123"
-              autoFocus
-            />
+          <Field label="Чек оплаты" hint="Без чека подтвердить нельзя" required>
+            {receiptError && <InlineError message={receiptError} />}
+            {receipt ? (
+              <div className="flex items-center gap-2 rounded-md bg-surface-raised px-2.5 py-2">
+                <FileText className="size-4 shrink-0 text-accent-text" aria-hidden />
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-xs text-ink">{receipt.file_name}</span>
+                  <span className="block text-micro text-ink-faint">
+                    {fileSize(receipt.size_bytes)}
+                  </span>
+                </span>
+                <button
+                  aria-label="Убрать чек"
+                  onClick={() => setReceipt(null)}
+                  className="text-ink-faint transition-colors hover:text-danger"
+                >
+                  <X className="size-3.5" aria-hidden />
+                </button>
+              </div>
+            ) : (
+              <>
+                <input
+                  ref={receiptInput}
+                  type="file"
+                  accept="image/*,application/pdf"
+                  className="hidden"
+                  onChange={(event) => void onPickReceipt(event.target.files)}
+                />
+                <Button
+                  variant="secondary"
+                  fullWidth
+                  loading={receiptUploading}
+                  onClick={() => receiptInput.current?.click()}
+                >
+                  <Paperclip className="size-4" aria-hidden />
+                  Прикрепить файл — фото или PDF
+                </Button>
+              </>
+            )}
           </Field>
           {/* Куда деньги пришли фактически: клиент часто платит другим способом,
               и сверка с выпиской сойдётся только по реальному счёту. */}
