@@ -25,11 +25,17 @@ import csv
 import io
 import re
 import sys
-from datetime import date
+from datetime import datetime
 from typing import Any
 from urllib.parse import unquote
+from zoneinfo import ZoneInfo
 
 import httpx
+
+# Те же подписи, что в app/services/deal_export.py (FUNNEL_LABEL) и на экране
+# настроек аккаунтов (frontend/src/features/profile/lib.ts) — дублируется
+# нарочно: тест не должен молча совпасть с сервисом при их независимом дрейфе.
+FUNNEL_LABEL = {"warmup": "Бот", "diagnostic": "Первые продажи", "sales": "Допы"}
 
 BASE = "http://localhost:8000/api/v1"
 ADMIN = {"email": "elena@astra.ru", "password": "demo1234"}
@@ -190,7 +196,10 @@ def filename_checks(title: str, response: httpx.Response, expected: str) -> None
 
 async def run() -> int:
     print("Проверка выгрузок")
-    today = date.today().isoformat()
+    # По поясу организации, не по системному времени контейнера (UTC) — иначе
+    # с 21:00 до 24:00 UTC (00:00–03:00 по Москве) имя файла на сервере уже
+    # показывает следующий календарный день по Москве, а тест ждёт вчерашний.
+    today = datetime.now(ZoneInfo("Europe/Moscow")).date().isoformat()
 
     async with (
         httpx.AsyncClient(base_url=BASE, timeout=60) as admin,
@@ -206,6 +215,7 @@ async def run() -> int:
             deals,
             money=["Сумма (руб)"],
             moments=["Дата события", "Отправлено", "Оплачено", "Срок действия"],
+            days=["Дата рождения"],
         )
         filename_checks("Оплаты", deals, f"Оплаты {today}.csv")
 
@@ -265,13 +275,25 @@ async def run() -> int:
         accounts = (await admin.get("/accounts")).json()
         for account in accounts if isinstance(accounts, list) else accounts["items"]:
             params = {"account_id": account["id"]}
-            _, rows = parse(await admin.get("/deals/export", params=params))
+            header, rows = parse(await admin.get("/deals/export", params=params))
             on_screen = await collect(admin, "/deals", params)
             check(
                 f"канал «{account['title']}»",
                 deal_ids(rows) == on_screen,
                 f"в файле {len(rows)}, на экране {len(on_screen)}",
             )
+            if rows:
+                expected_stage = FUNNEL_LABEL[account["funnel_stage"]]
+                check(
+                    f"канал «{account['title']}»: колонка «Аккаунт» — как в настройках",
+                    set(column(header, "Аккаунт", rows)) == {account["title"]},
+                    sorted(set(column(header, "Аккаунт", rows)))[:3],
+                )
+                check(
+                    f"канал «{account['title']}»: колонка «Этап воронки» совпадает с настройками",
+                    set(column(header, "Этап воронки", rows)) == {expected_stage},
+                    sorted(set(column(header, "Этап воронки", rows)))[:3],
+                )
 
         for params in ({"status": "paid"}, {"status": "cancelled"}, {"status": "awaiting"}):
             _, rows = parse(await admin.get("/deals/export", params=params))

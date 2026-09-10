@@ -12,6 +12,7 @@
 import asyncio
 import sys
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import httpx
 from sqlalchemy import text, update
@@ -22,6 +23,7 @@ from app.models import Conversation, TelegramAccount
 BASE = "http://localhost:8000/api/v1"
 ADMIN = {"email": "elena@astra.ru", "password": "demo1234"}
 MANAGER = {"email": "marina@astra.ru", "password": "demo1234"}
+DEFAULT_TZ = ZoneInfo("Europe/Moscow")
 
 ok: list[str] = []
 bad: list[str] = []
@@ -169,7 +171,7 @@ async def run() -> int:
         )
 
         print("\n4.6 — оплаты по каналу")
-        period = {"date_from": "2026-01-01", "date_to": datetime.now(UTC).date().isoformat()}
+        period = {"date_from": "2026-01-01", "date_to": datetime.now(DEFAULT_TZ).date().isoformat()}
         deals = (await admin.get(f"{BASE}/deals", params={**period, "limit": 50})).json()["items"]
         check("в строке сделки указан канал", all("account" in d for d in deals))
         acc_id = deals[0]["account"]["id"]
@@ -235,7 +237,10 @@ async def run() -> int:
         print("\n4.4 и 4.5 — текст к счёту")
         card_deal = (await admin.get(f"{BASE}/deals/{deals[0]['id']}")).json()
         check("карточка сделки отдаёт текст к счёту", "intro_text" in card_deal)
-        check("карточка сделки отдаёт номер чека", "receipt_number" in card_deal)
+        check(
+            "карточка сделки отдаёт поля чека",
+            "receipt_file_name" in card_deal and "receipt_url" in card_deal,
+        )
 
         print("\nБ.1, Б.2, Б.5 — профиль: срок работы, показатели, требующие внимания")
         me_admin = (await admin.get(f"{BASE}/auth/me")).json()

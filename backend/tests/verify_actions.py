@@ -12,7 +12,8 @@
 import asyncio
 import io
 import sys
-from datetime import date, timedelta
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import httpx
 from sqlalchemy import text
@@ -24,6 +25,13 @@ from app.scheduler.jobs import expire_overdue_deals
 BASE = "http://localhost:8000/api/v1"
 ADMIN = {"email": "elena@astra.ru", "password": "demo1234"}
 MANAGER = {"email": "marina@astra.ru", "password": "demo1234"}
+DEFAULT_TZ = ZoneInfo("Europe/Moscow")
+
+# Минимальный валидный PNG 1×1 — реальный файл, не заглушка с произвольными байтами.
+RECEIPT_PNG = bytes.fromhex(
+    "89504e470d0a1a0a0000000d494844520000000100000001080600000"
+    "01f15c4890000000a4944415478da6360000002000155ff2ba00000000049454e44ae426082"
+)
 
 ok: list[str] = []
 bad: list[str] = []
@@ -255,11 +263,10 @@ async def run() -> int:
                 msgs = (
                     await c.get(f"{BASE}/conversations/{target_conv}/messages", params={"limit": 5})
                 ).json()["items"]
-                code = from_card.json()["payment_code"]
                 check(
                     "счёт попал именно в выбранный чат",
-                    any(f"Код платежа: {code}" in (m["text"] or "") for m in msgs),
-                    f"чат {target_conv}, сделка {did}, код {code}",
+                    any("Сумма к оплате" in (m["text"] or "") for m in msgs),
+                    f"чат {target_conv}, сделка {did}",
                 )
 
         link = await c.post(
@@ -292,14 +299,6 @@ async def run() -> int:
         if check("сделка создаётся", created.status_code in (200, 201), created.text[:140]):
             deal = created.json()
             did = deal["id"]
-            # Код платежа перестал быть номером сделки: опечатка клиента в одной
-            # цифре попадала в чужую оплату, а номер сделки ещё и показывал
-            # клиенту счётчик продаж компании.
-            check(
-                "код платежа выдан и не совпадает с номером сделки",
-                bool(deal["payment_code"]) and deal["payment_code"] != str(did),
-                str(deal.get("payment_code")),
-            )
             check(
                 "сумма считается из позиций",
                 deal["total_amount"] == 490000,
@@ -349,7 +348,7 @@ async def run() -> int:
                 texts = " ".join((m["text"] or "") for m in msgs["items"])
                 check(
                     "клиент получил реквизиты в чате",
-                    (deal.get("payment_code") or str(did)) in texts,
+                    "Сумма к оплате" in texts,
                     texts[:100],
                 )
 
@@ -366,9 +365,23 @@ async def run() -> int:
                 no_receipt.text[:120],
             )
 
-            paid = await c.post(f"{BASE}/deals/{did}/pay", json={"receipt_number": "ЧЕК-000777"})
+            uploaded = (
+                await c.post(
+                    f"{BASE}/files/upload",
+                    files={"file": ("чек.png", io.BytesIO(RECEIPT_PNG), "image/png")},
+                )
+            ).json()
+            paid = await c.post(
+                f"{BASE}/deals/{did}/pay",
+                json={
+                    "receipt_upload_key": uploaded["upload_key"],
+                    "receipt_file_name": uploaded["file_name"],
+                    "receipt_mime_type": uploaded["mime_type"],
+                    "receipt_size_bytes": uploaded["size_bytes"],
+                },
+            )
             if check("оплата подтверждается", paid.status_code == 200, paid.text[:140]):
-                check("номер чека сохранён", paid.json()["receipt_number"] == "ЧЕК-000777")
+                check("файл чека сохранён", paid.json()["receipt_file_name"] == "чек.png")
                 card = paid.json()
                 check("статус стал «оплачена»", card["status"] == "paid", card["status"])
                 check(
@@ -618,8 +631,8 @@ async def run() -> int:
         long_period = await c.get(
             f"{BASE}/stats/series",
             params={
-                "date_from": (date.today() - timedelta(days=200)).isoformat(),
-                "date_to": date.today().isoformat(),
+                "date_from": (datetime.now(DEFAULT_TZ).date() - timedelta(days=200)).isoformat(),
+                "date_to": datetime.now(DEFAULT_TZ).date().isoformat(),
                 "granularity": "day",
             },
         )

@@ -1,12 +1,13 @@
 """Статистика. Менеджер видит свои цифры, руководитель — все и в разрезе менеджеров."""
 
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Query
 
 from app.core.deps import AdminUser, CurrentUser, Db
 from app.services import stats_service
+from app.services.worktime import local_zone
 
 router = APIRouter()
 
@@ -15,9 +16,14 @@ DateTo = Annotated[date | None, Query(description="Конец периода в�
 UserId = Annotated[int | None, Query(description="Разрез по сотруднику, только руководителю")]
 
 
-def _period(date_from: date | None, date_to: date | None) -> tuple[date, date]:
-    """По умолчанию — текущий месяц: именно он открыт на макете при входе."""
-    today = date.today()
+async def _period(db: Db, date_from: date | None, date_to: date | None) -> tuple[date, date]:
+    """По умолчанию — текущий месяц: именно он открыт на макете при входе.
+
+    «Сегодня» — по часовому поясу организации, не по UTC: иначе в последние
+    часы дня по Москве (21:00–24:00 UTC) сервер уже считал бы «сегодня»
+    вчерашним днём, и сегодняшняя сделка выпадала бы из периода по умолчанию.
+    """
+    today = datetime.now(UTC).astimezone(await local_zone(db)).date()
     end = date_to or today
     start = date_from or end.replace(day=1)
     return start, end
@@ -31,7 +37,7 @@ async def overview(
     date_to: DateTo = None,
     user_id: UserId = None,
 ) -> dict[str, Any]:
-    start, end = _period(date_from, date_to)
+    start, end = await _period(db, date_from, date_to)
     return await stats_service.overview(db, user, start, end, user_id)
 
 
@@ -44,7 +50,7 @@ async def series(
     granularity: Annotated[str, Query(pattern="^(day|week|month)$")] = "day",
     user_id: UserId = None,
 ) -> dict[str, Any]:
-    start, end = _period(date_from, date_to)
+    start, end = await _period(db, date_from, date_to)
     return await stats_service.series(db, user, start, end, granularity, user_id)
 
 
@@ -56,7 +62,7 @@ async def managers(
     date_to: DateTo = None,
 ) -> list[dict[str, Any]]:
     _ = user
-    start, end = _period(date_from, date_to)
+    start, end = await _period(db, date_from, date_to)
     return await stats_service.managers(db, start, end)
 
 

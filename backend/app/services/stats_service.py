@@ -11,7 +11,7 @@
   · единица измерения одна на весь стек и подписана в интерфейсе.
 """
 
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import text
@@ -21,6 +21,7 @@ from app.core.deps import visible_account_ids
 from app.core.errors import Invalid, NotFound
 from app.models import DealStatus, User, UserRole
 from app.services import settings_service, worktime
+from app.services.worktime import day_bounds
 
 # Ниже несколько запросов собираются склейкой строк. Это безопасно и помечено
 # noqa: S608 — подставляются только внутренние константы из _seller_clause и
@@ -82,22 +83,6 @@ async def build_scope(db: AsyncSession, user: User, user_id: int | None) -> Scop
     if user_id is not None and user_id != user.id:
         raise Invalid("Чужая статистика недоступна")
     return Scope([user.id], await visible_account_ids(db, user) or [], user.id)
-
-
-async def _bounds(db: AsyncSession, date_from: date, date_to: date) -> tuple[datetime, datetime]:
-    """Границы периода — по часовому поясу организации, не по UTC.
-
-    Иначе продажа в 23:25 по Москве (20:25 UTC) могла бы попасть не в тот
-    день — а на границе месяца или квартала не в тот период вовсе. Верхняя
-    граница — начало следующего дня в том же поясе: иначе последний день теряется.
-    """
-    from app.services.worktime import _zone
-
-    tz_name = await settings_service.get_value(db, "timezone")
-    zone = _zone(tz_name)
-    start = datetime.combine(date_from, datetime.min.time(), tzinfo=zone)
-    end = datetime.combine(date_to + timedelta(days=1), datetime.min.time(), tzinfo=zone)
-    return start.astimezone(UTC), end.astimezone(UTC)
 
 
 def _seller_clause(scope: Scope, prefix: str = "d") -> str:
@@ -264,7 +249,7 @@ async def overview(
             "awaiting_count": 0,
         }
 
-    start, end = await _bounds(db, date_from, date_to)
+    start, end = await day_bounds(db, date_from, date_to)
     span = end - start
     prev_start, prev_end = start - span, start
 
@@ -308,7 +293,7 @@ async def series(
     if scope.empty:
         return {"points": [], "granularity": granularity}
 
-    start, end = await _bounds(db, date_from, date_to)
+    start, end = await day_bounds(db, date_from, date_to)
     tz_name = await settings_service.get_value(db, "timezone")
     # Корзины считаются в НАИВНОМ локальном времени (после одного AT TIME ZONE,
     # без обратного перевода в timestamptz): месяц/неделя — календарная
@@ -374,7 +359,7 @@ async def managers(
     db: AsyncSession, date_from: date, date_to: date
 ) -> list[dict[str, Any]]:
     """Разрез по менеджерам — только для руководителя."""
-    start, end = await _bounds(db, date_from, date_to)
+    start, end = await day_bounds(db, date_from, date_to)
     sql = text(
         """
         select u.id, u.full_name, u.avatar_color,
@@ -480,6 +465,7 @@ async def personal_avg_response_seconds(db: AsyncSession, user_id: int) -> int |
     Отвечающим считается автор исходящего: именно он закрыл ожидание клиента.
     Служебные заметки исключены — они клиенту не уходят.
     """
+    start, end = await worktime.current_month_bounds(db)
     sql = text(
         """
         with base as (
@@ -495,7 +481,7 @@ async def personal_avg_response_seconds(db: AsyncSession, user_id: int) -> int |
                    ) as next_out
             from messages m
             where m.deleted_at is null and m.is_internal = false
-              and m.created_at >= date_trunc('month', now())
+              and m.created_at >= :start and m.created_at < :end
         )
         select avg(ELAPSED)::numeric
         from base
@@ -506,6 +492,9 @@ async def personal_avg_response_seconds(db: AsyncSession, user_id: int) -> int |
     )
     elapsed, extra = await _elapsed_sql(db)
     value = (
-        await db.execute(text(str(sql).replace("ELAPSED", elapsed)), {"uid": user_id, **extra})
+        await db.execute(
+            text(str(sql).replace("ELAPSED", elapsed)),
+            {"uid": user_id, "start": start, "end": end, **extra},
+        )
     ).scalar_one_or_none()
     return None if value is None else int(round(float(value)))

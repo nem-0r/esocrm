@@ -13,7 +13,7 @@
 две независимые реализации между собой.
 """
 
-from datetime import datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 DAY = 24 * 60 * 60
@@ -24,6 +24,42 @@ def _zone(name: str | None) -> ZoneInfo:
         return ZoneInfo(name or "Europe/Moscow")
     except (ZoneInfoNotFoundError, ValueError):
         return ZoneInfo("Europe/Moscow")
+
+
+async def local_zone(db) -> ZoneInfo:  # noqa: ANN001 — AsyncSession, импорт не нужен
+    from app.services import settings_service
+
+    return _zone(await settings_service.get_value(db, "timezone"))
+
+
+async def day_bounds(db, date_from: date, date_to: date) -> tuple[datetime, datetime]:  # noqa: ANN001
+    """Границы периода по датам — в часовом поясе организации, не по UTC.
+
+    Иначе продажа в 23:25 по Москве (20:25 UTC) могла бы попасть не в тот
+    день — а на границе месяца или квартала не в тот период вовсе. Верхняя
+    граница — начало следующего дня в том же поясе: иначе последний день теряется.
+    Единственная реализация на весь бэкенд — используется статистикой, списком
+    сделок и профильными показателями, чтобы день не «плавал» между экранами.
+    """
+    zone = await local_zone(db)
+    start = datetime.combine(date_from, time.min, tzinfo=zone)
+    end = datetime.combine(date_to + timedelta(days=1), time.min, tzinfo=zone)
+    return start.astimezone(UTC), end.astimezone(UTC)
+
+
+async def current_month_bounds(db) -> tuple[datetime, datetime]:  # noqa: ANN001
+    """Границы текущего месяца — в часовом поясе организации, не в UTC.
+
+    Тот же принцип, что и в `day_bounds`: в последние часы месяца по Москве
+    (21:00–24:00 UTC) `date_trunc('month', now())` в UTC уже посчитал бы это
+    следующим месяцем."""
+    zone = await local_zone(db)
+    local_now = datetime.now(UTC).astimezone(zone)
+    start = local_now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    end = start.replace(year=start.year + 1, month=1) if start.month == 12 else start.replace(
+        month=start.month + 1
+    )
+    return start.astimezone(UTC), end.astimezone(UTC)
 
 
 def _window_seconds(work_start: time, work_end: time) -> int:

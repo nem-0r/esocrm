@@ -17,6 +17,7 @@
 """
 
 import asyncio
+import io
 import math
 import sys
 from datetime import UTC, date, datetime, time, timedelta
@@ -32,6 +33,12 @@ from app.services.money import format_rubles
 BASE = "http://localhost:8000/api/v1"
 ADMIN = {"email": "elena@astra.ru", "password": "demo1234"}
 MANAGER = {"email": "marina@astra.ru", "password": "demo1234"}
+
+# Минимальный валидный PNG 1×1 — реальный файл, не заглушка с произвольными байтами.
+RECEIPT_PNG = bytes.fromhex(
+    "89504e470d0a1a0a0000000d494844520000000100000001080600000"
+    "01f15c4890000000a4944415478da6360000002000155ff2ba00000000049454e44ae426082"
+)
 
 ok: list[str] = []
 bad: list[str] = []
@@ -442,7 +449,10 @@ async def check_money_roundtrip(api: httpx.AsyncClient, db: Any, admin_id: int) 
     # же частей, что и сам format_rubles, а не подставляем текст руками.
     check("формат суммы не теряет копейки", "1 234,56 ₽", format_rubles(kopecks))
 
-    today = date.today()
+    # date.today() — по системному времени контейнера (UTC), а не по поясу
+    # организации: с 21:00 до 24:00 UTC (00:00–03:00 по Москве) это уже вчера
+    # для сервера и не совпадает с тем, что сервер сам считает «сегодня».
+    today = datetime.now(DEFAULT_TZ).date()
     params = {"date_from": today.isoformat(), "date_to": today.isoformat()}
     month = {"date_from": today.replace(day=1).isoformat(), "date_to": today.isoformat()}
 
@@ -512,9 +522,21 @@ async def check_money_roundtrip(api: httpx.AsyncClient, db: Any, admin_id: int) 
     try:
         check("сумма сделки в копейках", kopecks, deal["total_amount"])
         await api.post(f"{BASE}/deals/{deal_id}/send")
+        uploaded = (
+            await api.post(
+                f"{BASE}/files/upload",
+                files={"file": ("чек.png", io.BytesIO(RECEIPT_PNG), "image/png")},
+            )
+        ).json()
         paid = await api.post(
             f"{BASE}/deals/{deal_id}/pay",
-            json={"receipt_number": "СВЕРКА-КОПЕЕК", "paid_to_requisite_id": requisite_id},
+            json={
+                "receipt_upload_key": uploaded["upload_key"],
+                "receipt_file_name": uploaded["file_name"],
+                "receipt_mime_type": uploaded["mime_type"],
+                "receipt_size_bytes": uploaded["size_bytes"],
+                "paid_to_requisite_id": requisite_id,
+            },
         )
         check("оплата подтверждена", 200, paid.status_code, paid.text)
         check("сумма после оплаты не изменилась", kopecks, paid.json()["total_amount"])
@@ -577,6 +599,11 @@ async def check_money_roundtrip(api: httpx.AsyncClient, db: Any, admin_id: int) 
         await db.execute(text("delete from payment_events where deal_id=:id"), {"id": deal_id})
         await db.execute(text("delete from deals where id=:id"), {"id": deal_id})
         if message_id is not None:
+            # Шлюз лочит сначала outbox, потом messages (обрабатывая отправку).
+            # Удаление messages первым — с каскадом на outbox — лочит их в
+            # обратном порядке и может словить deadlock с ещё не завершившейся
+            # отправкой. Чистим в том же порядке, что и шлюз.
+            await db.execute(text("delete from outbox where message_id=:id"), {"id": message_id})
             await db.execute(text("delete from messages where id=:id"), {"id": message_id})
         if conv_id is not None:
             await db.execute(
@@ -595,7 +622,11 @@ async def check_money_roundtrip(api: httpx.AsyncClient, db: Any, admin_id: int) 
 
 
 async def main() -> int:  # noqa: PLR0915
-    today = date.today()
+    # По поясу организации, не по системному времени контейнера (UTC) — иначе
+    # с 21:00 до 24:00 UTC (00:00–03:00 по Москве) «сегодня» здесь и «сегодня»
+    # на сервере — разные календарные дни, и сравнения с сервером расходятся
+    # ровно на данные из этого узкого окна.
+    today = datetime.now(DEFAULT_TZ).date()
     month_start = today.replace(day=1)
 
     async with httpx.AsyncClient(timeout=60) as api, SessionLocal() as db:
