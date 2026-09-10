@@ -1,9 +1,12 @@
-"""Проверка денежного контура: код платежа, поиск по нему, чек, сверка с выпиской.
+"""Проверка денежного контура: счёт клиенту, чек-файл, сверка с выпиской.
 
 Деньги приходят на карту отдельным потоком: банк не знает ни про сделку, ни про
-клиента. Связь одна — код в комментарии к переводу. Поэтому проверяем не форму,
-а весь путь: код выдан, дошёл до счёта клиенту, находится поиском в том виде,
-в каком его перепишет человек, и попадает в сверку по реквизитам.
+клиента. Раньше связь была кодом в комментарии к переводу — клиенты его
+проставляли ненадёжно, поэтому сверка теперь идёт по чеку, который менеджер
+прикладывает файлом при подтверждении оплаты. Проверяем весь путь: без чека
+оплату не подтвердить, файл реально загружается через общий /files/upload
+(тот же путь, что и вложения в чате), чек виден и скачивается в карточке
+сделки, а сумма попадает в сверку по реквизитам.
 """
 
 import asyncio
@@ -11,9 +14,23 @@ import sys
 
 import httpx
 
-BASE = "http://localhost:8000/api/v1"
+ROOT = "http://localhost:8000"
+BASE = f"{ROOT}/api/v1"
 ADMIN = {"email": "elena@astra.ru", "password": "demo1234"}
 MANAGER = {"email": "marina@astra.ru", "password": "demo1234"}
+
+# Минимальный валидный PNG 1×1 — реальный файл, не заглушка с произвольными байтами.
+RECEIPT_PNG = bytes.fromhex(
+    "89504e470d0a1a0a0000000d494844520000000100000001080600000"
+    "01f15c4890000000a4944415478da6360000002000155ff2ba00000000049454e44ae426082"
+)
+
+
+async def upload_receipt(client: httpx.AsyncClient) -> dict:
+    files = {"file": ("chek.png", RECEIPT_PNG, "image/png")}
+    uploaded = await client.post("/files/upload", files=files)
+    return uploaded.json()
+
 
 ok: list[str] = []
 bad: list[str] = []
@@ -39,104 +56,81 @@ async def run() -> int:
         requisites = (await admin.get("/requisites")).json()
         requisites = requisites if isinstance(requisites, list) else requisites.get("items", [])
 
-        print("Код платежа")
+        print("Счёт клиенту")
         created = await admin.post(
             "/deals",
             json={
                 "conversation_id": conversation_id,
                 "payment_method": "requisites",
                 "requisite_id": requisites[0]["id"],
-                "items": [{"name": "Проверка кода", "amount": 100000}],
+                "items": [{"name": "Проверка чека", "amount": 100000}],
             },
         )
         check("сделка создаётся", created.status_code == 201, created.text[:80])
         deal = created.json()
-        code = deal.get("payment_code") or ""
-        check("код платежа выдан", bool(code), code)
-        check(
-            "код не равен номеру сделки — опечатка не попадёт в чужую оплату",
-            code != str(deal["id"]) and code.startswith("AC-"),
-            code,
-        )
 
-        second = (
-            await admin.post(
-                "/deals",
-                json={
-                    "conversation_id": conversation_id,
-                    "payment_method": "requisites",
-                    "requisite_id": requisites[0]["id"],
-                    "items": [{"name": "Второй код", "amount": 100000}],
-                },
-            )
-        ).json()
-        check(
-            "у второй сделки другой код",
-            second.get("payment_code") != code,
-            second.get("payment_code"),
-        )
-
-        print("\nПоиск по коду — так, как его перепишет человек")
-        variants = {
-            "как есть": code,
-            "строчными": code.lower(),
-            "фразой из чата": f"оплатил, {code.lower()} спасибо",
-            "с пробелом вместо дефиса": code.replace("-", " "),
-        }
-        for label, query in variants.items():
-            found = (await admin.get("/search", params={"q": query})).json().get("deals", [])
-            check(
-                f"находится {label}",
-                any(item["id"] == deal["id"] for item in found),
-                f"{len(found)} совпадений",
-            )
-
-        wrong = code[:-1] + ("A" if code[-1] != "A" else "C")
-        found_wrong = (await admin.get("/search", params={"q": wrong})).json().get("deals", [])
-        check(
-            "код с опечаткой не приводит к чужой сделке",
-            not any(item["id"] == deal["id"] for item in found_wrong),
-            f"{wrong}: {len(found_wrong)} совпадений",
-        )
-
-        print("\nСчёт клиенту")
         sent = await admin.post(f"/deals/{deal['id']}/send")
         check("счёт уходит в чат", sent.status_code == 200, sent.text[:80])
         messages = (
             await admin.get(f"/conversations/{conversation_id}/messages", params={"limit": 5})
         ).json()
         texts = " ".join((m.get("text") or "") for m in messages.get("items", []))
-        check("в тексте счёта есть код платежа", code in texts, code)
-        check(
-            "клиенту сказано, куда его писать",
-            "комментарии к переводу" in texts,
-        )
+        check("в тексте счёта есть сумма", "Сумма к оплате" in texts)
 
-        print("\nПодтверждение оплаты")
-        no_receipt = await admin.post(f"/deals/{deal['id']}/pay", json={"receipt_number": "  "})
+        print("\nПодтверждение оплаты чеком")
+        no_receipt = await admin.post(f"/deals/{deal['id']}/pay", json={})
         check(
-            "без номера чека оплата не подтверждается",
+            "без чека оплата не подтверждается",
             no_receipt.status_code == 422,
             f"{no_receipt.status_code} {no_receipt.json()['error']['message'][:50]}",
         )
+
+        upload = await upload_receipt(admin)
+        check("чек загружается через /files/upload", bool(upload.get("upload_key")), str(upload))
+
         target = requisites[1]["id"] if len(requisites) > 1 else requisites[0]["id"]
         paid = await admin.post(
             f"/deals/{deal['id']}/pay",
-            json={"receipt_number": "ЧЕК-ПРОВЕРКА", "paid_to_requisite_id": target},
+            json={
+                "receipt_upload_key": upload["upload_key"],
+                "receipt_file_name": upload["file_name"],
+                "receipt_mime_type": upload["mime_type"],
+                "receipt_size_bytes": upload["size_bytes"],
+                "paid_to_requisite_id": target,
+            },
         )
         check("оплата с чеком подтверждается", paid.status_code == 200, paid.text[:80])
         card = paid.json()
-        check("чек сохранён в карточке", card.get("receipt_number") == "ЧЕК-ПРОВЕРКА")
+        check("чек сохранён в карточке", card.get("receipt_file_name") == "chek.png")
+        check("ссылка на скачивание чека отдана", bool(card.get("receipt_url")))
         check(
             "записано, на какой счёт деньги пришли фактически",
             card.get("paid_to_requisite_id") == target,
             str(card.get("paid_to_requisite_title")),
         )
+
+        # receipt_url — абсолютный путь от корня сервера (как и url файлов в поиске),
+        # поэтому качаем его клиентом без префикса /api/v1, а не через admin.get().
+        async with httpx.AsyncClient(base_url=ROOT, cookies=admin.cookies, timeout=30) as root:
+            download = await root.get(card["receipt_url"])
+        check(
+            "чек реально скачивается тем же файлом",
+            download.status_code == 200 and download.content == RECEIPT_PNG,
+            f"HTTP {download.status_code}, {len(download.content)} байт",
+        )
+
+        second_upload = await upload_receipt(admin)
         check(
             "повторная оплата той же сделки не проходит",
             (
                 await admin.post(
-                    f"/deals/{deal['id']}/pay", json={"receipt_number": "ЧЕК-ДУБЛЬ"}
+                    f"/deals/{deal['id']}/pay",
+                    json={
+                        "receipt_upload_key": second_upload["upload_key"],
+                        "receipt_file_name": second_upload["file_name"],
+                        "receipt_mime_type": second_upload["mime_type"],
+                        "receipt_size_bytes": second_upload["size_bytes"],
+                    },
                 )
             ).status_code
             in (400, 409, 422),

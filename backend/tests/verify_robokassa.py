@@ -15,6 +15,7 @@
 
 import asyncio
 import hashlib
+import io
 import sys
 
 import httpx
@@ -26,6 +27,12 @@ from app.scheduler.jobs import expire_overdue_deals
 
 BASE = "http://localhost:8000/api/v1"
 ADMIN = {"email": "elena@astra.ru", "password": "demo1234"}
+
+# Минимальный валидный PNG 1×1 — реальный файл, не заглушка с произвольными байтами.
+RECEIPT_PNG = bytes.fromhex(
+    "89504e470d0a1a0a0000000d494844520000000100000001080600000"
+    "01f15c4890000000a4944415478da6360000002000155ff2ba00000000049454e44ae426082"
+)
 
 ok: list[str] = []
 bad: list[str] = []
@@ -203,8 +210,20 @@ async def run() -> int:
         card = (await c.get(f"{BASE}/deals/{expired_deal['id']}")).json()
         check("статус — истекла", card["status"] == "expired", card["status"])
 
+        uploaded = (
+            await c.post(
+                f"{BASE}/files/upload",
+                files={"file": ("чек.png", io.BytesIO(RECEIPT_PNG), "image/png")},
+            )
+        ).json()
         manual = await c.post(
-            f"{BASE}/deals/{expired_deal['id']}/pay", json={"receipt_number": "РУЧНОЙ-ЧЕК"}
+            f"{BASE}/deals/{expired_deal['id']}/pay",
+            json={
+                "receipt_upload_key": uploaded["upload_key"],
+                "receipt_file_name": uploaded["file_name"],
+                "receipt_mime_type": uploaded["mime_type"],
+                "receipt_size_bytes": uploaded["size_bytes"],
+            },
         )
         check(
             "ручное подтверждение истёкшей сделки закрыто и для ссылки",

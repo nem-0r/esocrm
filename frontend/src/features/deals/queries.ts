@@ -197,8 +197,11 @@ export function useSendDeal(dealId: number, conversationId: number | null) {
 }
 
 export interface PayDealInput {
-  /** ТЗ п. 6.3: без номера чека сервер не подтвердит оплату. */
-  receipt_number: string
+  /** ТЗ п. 6.3: без приложенного чека сервер не подтвердит оплату. */
+  receipt_upload_key: string
+  receipt_file_name: string
+  receipt_mime_type: string | null
+  receipt_size_bytes: number
   /** Куда деньги пришли фактически. Пусто — на реквизит из счёта. */
   paid_to_requisite_id?: number | null
 }

@@ -33,18 +33,9 @@ from app.schemas.user import (
 )
 from app.services import audit, schedule, settings_service
 from app.services.auth_service import normalize_email
+from app.services.worktime import current_month_bounds as _month_bounds
 
 INVITE_TTL_DAYS = 7
-
-
-def _month_bounds() -> tuple[datetime, datetime]:
-    now = datetime.now(UTC)
-    start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    if start.month == 12:
-        end = start.replace(year=start.year + 1, month=1)
-    else:
-        end = start.replace(month=start.month + 1)
-    return start, end
 
 
 async def _get_or_404(db: AsyncSession, user_id: int) -> User:
@@ -92,7 +83,7 @@ async def _load_month_stats(
     """Диалоги и продажи за месяц: один сгруппированный запрос на метрику для всего списка."""
     if not user_ids:
         return {}, {}
-    start, end = _month_bounds()
+    start, end = await _month_bounds(db)
 
     conv_rows = await db.execute(
         select(Message.author_id, func.count(distinct(Message.conversation_id)))

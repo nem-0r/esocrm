@@ -60,8 +60,6 @@ async def run() -> int:
             },
         )
         check("сделка создаётся", deal.status_code == 201, deal.text[:90])
-        code = deal.json().get("payment_code") if deal.status_code == 201 else None
-        check("код платежа выдан", bool(code), str(code))
 
         check("счётчики отвечают", (await c.get("/conversations/counters")).status_code == 200)
         check("оплаты открываются", (await c.get("/deals", params={"limit": 3})).status_code == 200)

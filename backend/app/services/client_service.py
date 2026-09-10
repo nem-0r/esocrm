@@ -50,6 +50,7 @@ from app.schemas.client import (
 from app.schemas.common import CursorPage, decode_cursor, encode_cursor
 from app.services.audit import log_event
 from app.services.export_format import csv_safe
+from app.services.worktime import day_bounds, local_zone
 
 PHONE_RE = re.compile(r"^[0-9+\-\s]+$")
 MAX_LIMIT = 200
@@ -575,6 +576,8 @@ CSV_HEADER = [
     "Имя",
     "Телефон",
     "Telegram",
+    "Telegram ID",
+    "Имя в Telegram",
     "Дата рождения",
     "Время рождения",
     "Город",
@@ -599,11 +602,14 @@ async def export_csv_rows(
 ) -> AsyncIterator[bytes]:
     """CSV построчно, без накопления в одну гигантскую строку. UTF-8 с BOM — иначе
     Excel на Windows ломает кириллицу. Разделитель `;` — под русскую локаль Excel."""
-    today = date.today()
+    # «Сегодня» и границы дня — по часовому поясу организации, не по UTC:
+    # тот же принцип, что и в разделе «Оплаты» (worktime.day_bounds), иначе
+    # выгрузки двух разделов за «сегодня» расходились бы в последние часы
+    # дня по Москве.
+    today = datetime.now(UTC).astimezone(await local_zone(db)).date()
     date_from = date_from or (today - timedelta(days=365))
     date_to = date_to or today
-    start = datetime.combine(date_from, datetime.min.time(), tzinfo=UTC)
-    end = datetime.combine(date_to, datetime.min.time(), tzinfo=UTC) + timedelta(days=1)
+    start, end = await day_bounds(db, date_from, date_to)
 
     account_ids = await visible_account_ids(db, user)
     deal_agg = _deal_agg_subquery(user, account_ids)
@@ -672,12 +678,17 @@ async def export_csv_rows(
             paid_count,
             awaiting_amount,
         ) = row
+        # Отдельно от «Имя» — то самое, «Имя» может быть переписано менеджером
+        # руками, а тут именно то, что сейчас видно в профиле Telegram.
+        tg_name = csv_safe(" ".join(p for p in (first, last) if p))
         writer.writerow(
             [
                 client_id,
                 csv_safe(_display_name(display_name, first, last, telegram_id)),
                 csv_safe(phone or ""),
                 csv_safe(f"@{tg_username}" if tg_username else ""),
+                telegram_id,
+                tg_name,
                 birth_date.isoformat() if birth_date else "",
                 birth_time.strftime("%H:%M") if birth_time else "",
                 csv_safe(birth_city or ""),

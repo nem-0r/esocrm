@@ -80,8 +80,7 @@ export function RequisiteBreakdown({ filters }: { filters: DealFilters }) {
                 <span className="tabular-nums text-ink">{money(total)}</span>
               </div>
               <p className="text-micro text-ink-faint">
-                Сравните с выпиской по каждому счёту. Код платежа из комментария к
-                переводу ищется в общем поиске — он приведёт к сделке.
+                Сравните с выпиской по каждому счёту — сверка идёт по приложенному чеку.
               </p>
             </>
           )}

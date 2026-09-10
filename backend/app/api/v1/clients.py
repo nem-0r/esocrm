@@ -6,7 +6,7 @@
 а не отдало файл.
 """
 
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Query
@@ -24,6 +24,7 @@ from app.schemas.client import (
 from app.schemas.common import CursorPage, Ok
 from app.services import client_service
 from app.services.export_format import content_disposition
+from app.services.worktime import local_zone
 
 router = APIRouter()
 
@@ -49,7 +50,8 @@ async def export_clients(
     ] = None,
     date_to: Annotated[date | None, Query(description="Конец периода, включительно")] = None,
 ) -> StreamingResponse:
-    day = (date_to or date.today()).isoformat()
+    today = datetime.now(UTC).astimezone(await local_zone(db)).date()
+    day = (date_to or today).isoformat()
     return StreamingResponse(
         client_service.export_csv_rows(db, user, date_from, date_to),
         media_type="text/csv; charset=utf-8",

@@ -213,14 +213,6 @@ async def run() -> int:
         awaiting_deal = next((d for d in deals["items"] if d["status"] == "awaiting"), None)
         if awaiting_deal:
             card = (await c.get(f"{BASE}/deals/{awaiting_deal['id']}")).json()
-            # Раньше кодом платежа был номер сделки. Так делать нельзя: ошибка
-            # клиента в одной цифре — валидный код чужой сделки, и оплата
-            # привязывается не туда. Теперь код с проверочным символом.
-            check(
-                "п.5 у сделки есть код платежа для комментария к переводу",
-                bool(card["payment_code"]),
-                card["payment_code"],
-            )
             check("п.4 у сделки есть срок действия", card["expires_at"] is not None)
             check("п.6 реквизиты зафиксированы снимком", bool(card["requisites_snapshot"]))
 

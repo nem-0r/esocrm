@@ -1,6 +1,7 @@
 """Раздел «Оплаты». Роутер тонкий: разбирает запрос и зовёт сервис."""
 
-from datetime import date
+from collections.abc import AsyncIterator
+from datetime import UTC, date, datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query
@@ -20,8 +21,16 @@ from app.schemas.deal import (
 )
 from app.services import deal_export, deal_service
 from app.services.export_format import content_disposition
+from app.services.worktime import local_zone
 
 router = APIRouter()
+
+_CHUNK_SIZE = 1024 * 1024
+
+
+async def _chunks(body: bytes) -> AsyncIterator[bytes]:
+    for offset in range(0, len(body), _CHUNK_SIZE):
+        yield body[offset : offset + _CHUNK_SIZE]
 
 
 async def deal_filters(
@@ -87,7 +96,8 @@ async def export_deals(db: Db, user: CurrentUser, filters: Filters) -> Streaming
     выгрузка объявляла свой урезанный набор, и фильтр по каналу до неё не
     доезжал: на экране оплаты одного аккаунта, в файле — все.
     """
-    day = (filters["date_to"] or date.today()).isoformat()
+    today = datetime.now(UTC).astimezone(await local_zone(db)).date()
+    day = (filters["date_to"] or today).isoformat()
     return StreamingResponse(
         deal_export.export_csv_rows(db, user, **filters),
         media_type="text/csv; charset=utf-8",
@@ -126,8 +136,28 @@ async def pay_deal(db: Db, user: CurrentUser, deal_id: int, data: DealPay | None
         user,
         deal_id,
         data.comment if data else None,
-        data.receipt_number if data else None,
+        data.receipt_upload_key if data else None,
+        data.receipt_file_name if data else None,
+        data.receipt_mime_type if data else None,
+        data.receipt_size_bytes if data else 0,
         data.paid_to_requisite_id if data else None,
+    )
+
+
+@router.get("/{deal_id}/receipt", summary="Скачать чек оплаты")
+async def download_receipt(db: Db, user: CurrentUser, deal_id: int) -> StreamingResponse:
+    deal, body = await deal_service.receipt_file(db, user, deal_id)
+    return StreamingResponse(
+        _chunks(body),
+        media_type=deal.receipt_mime_type or "application/octet-stream",
+        headers={
+            "Content-Disposition": content_disposition(
+                deal.receipt_file_name or "receipt", disposition="inline"
+            ),
+            # Чек неизменяем: один раз прикреплённый файл не переписывается —
+            # подтверждённую оплату не редактируют, отменяют и заводят заново.
+            "Cache-Control": "private, max-age=31536000, immutable",
+        },
     )
 
 

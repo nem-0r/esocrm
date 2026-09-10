@@ -110,16 +110,16 @@ function ManagerBlocks() {
       <div className="grid grid-cols-3 gap-2">
         <StatTile value={me.month_conversations} label="моих диалогов за месяц" />
         <StatTile
-          value={money(me.month_sales_amount)}
-          label="моих продаж за месяц"
-          tone="success"
-        />
-        <StatTile
           value={
             me.avg_response_seconds === null ? '—' : durationLabel(me.avg_response_seconds)
           }
           label="среднее время ответа"
           tone={me.avg_response_seconds === null ? 'neutral' : 'accent'}
+        />
+        <StatTile
+          value={money(me.month_sales_amount)}
+          label="моих продаж за месяц"
+          tone="success"
         />
       </div>
 
