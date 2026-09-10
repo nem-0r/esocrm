@@ -222,9 +222,18 @@ docker compose -f docker-compose.prod.yml ps               # все должны
 ```bash
 git pull
 docker compose -f docker-compose.prod.yml up -d --build
+docker compose -f docker-compose.prod.yml restart nginx
 ```
 
 `migrate` отработает заново перед стартом `api`.
+
+**Перезапуск `nginx` в конце — не для порядка.** `api`/`web` пересоздаются
+командой выше (новые контейнеры — новые внутренние IP), а `nginx` при этом
+не трогается: его апстримы (`upstream astra_api`/`astra_web`) резолвятся
+один раз при собственном старте и дальше не обновляются. Без перезапуска
+`nginx` продолжит стучаться в адрес старого, уже не существующего
+контейнера — `502 Bad Gateway` для всех, включая уже открытые вкладки,
+до первого ручного вмешательства.
 
 ### 6. Первый вход
 
