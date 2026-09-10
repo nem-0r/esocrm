@@ -20,6 +20,7 @@
 """
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
@@ -103,8 +104,31 @@ async def upsert_peer(db: AsyncSession, account_id: int, peer: PeerData) -> Tele
     return row
 
 
+def _sync_client_from_peer(client: Client, peer: PeerData) -> None:
+    """Профиль в Telegram меняется — держим карточку в актуальном виде,
+    но имя, вписанное менеджером руками (display_name), не трогаем.
+
+    Вызывается на каждое входящее, а не только при создании клиента: телефон
+    и username часто не видны при первом сообщении (закрыты приватностью или
+    ещё не заведены) и появляются в профиле позже."""
+    if peer.username is not None:
+        client.tg_username = peer.username
+    # Телефон, в отличие от tg_username/имени, редактируется менеджером
+    # вручную (docs: карточка клиента) — заполняем из Telegram только пока
+    # там пусто, а не переписываем чужую правку на каждое сообщение.
+    if peer.phone is not None and client.phone is None:
+        client.phone = peer.phone
+    if peer.first_name is not None:
+        client.tg_first_name = peer.first_name
+    if peer.last_name is not None:
+        client.tg_last_name = peer.last_name
+
+
 async def _get_or_create_client(
-    db: AsyncSession, account: TelegramAccount, peer: PeerData
+    db: AsyncSession,
+    account: TelegramAccount,
+    peer: PeerData,
+    on_new_client: Callable[[Client], None] | None = None,
 ) -> Client:
     client = await db.scalar(select(Client).where(Client.telegram_id == peer.tg_user_id))
     if client is None:
@@ -113,6 +137,7 @@ async def _get_or_create_client(
             tg_username=peer.username,
             tg_first_name=peer.first_name,
             tg_last_name=peer.last_name,
+            phone=peer.phone,
             # Через какой аккаунт человек впервые пришёл — нужно для отчёта по каналам.
             created_via_account_id=account.id,
         )
@@ -127,20 +152,22 @@ async def _get_or_create_client(
             if client is None:
                 raise
             return client
+        # Новый клиент — шанс подхватить день рождения из Telegram, если он там
+        # открыт. Само обращение к Telegram сюда не входит намеренно: этот
+        # модуль не знает про MTProto, вызывающий (шлюз) сам решает, как и когда.
+        if on_new_client is not None:
+            on_new_client(client)
     else:
-        # Профиль в Telegram меняется — держим карточку в актуальном виде,
-        # но имя, вписанное менеджером руками (display_name), не трогаем.
-        if peer.username is not None:
-            client.tg_username = peer.username
-        if peer.first_name is not None:
-            client.tg_first_name = peer.first_name
-        if peer.last_name is not None:
-            client.tg_last_name = peer.last_name
+        _sync_client_from_peer(client, peer)
     return client
 
 
 async def get_or_create_conversation(
-    db: AsyncSession, account: TelegramAccount, peer: PeerData, started_at: datetime | None = None
+    db: AsyncSession,
+    account: TelegramAccount,
+    peer: PeerData,
+    started_at: datetime | None = None,
+    on_new_client: Callable[[Client], None] | None = None,
 ) -> Conversation:
     conversation = await db.scalar(
         select(Conversation).where(
@@ -149,9 +176,15 @@ async def get_or_create_conversation(
         )
     )
     if conversation is not None:
+        # Диалог уже есть — но синк профиля раньше происходил только при первом
+        # сообщении. Телефон/username часто становятся видны позже, поэтому
+        # обновляем при каждом входящем, а не только при создании диалога.
+        client = await db.get(Client, conversation.client_id)
+        if client is not None:
+            _sync_client_from_peer(client, peer)
         return conversation
 
-    client = await _get_or_create_client(db, account, peer)
+    client = await _get_or_create_client(db, account, peer, on_new_client)
     peer_row = await upsert_peer(db, account.id, peer)
     peer_row.client_id = client.id
     # Если на аккаунте работает ровно один менеджер, диалог сразу закрепляется
@@ -200,14 +233,24 @@ async def _sole_manager_id(db: AsyncSession, account_id: int) -> int | None:
 
 
 async def ingest(
-    db: AsyncSession, account: TelegramAccount, event: InboundMessage
+    db: AsyncSession,
+    account: TelegramAccount,
+    event: InboundMessage,
+    on_new_client: Callable[[Client], None] | None = None,
 ) -> Message | None:
     """Записать событие Telegram. Возвращает сообщение или None, если это повтор.
 
     Транзакцию не закрывает: вызывающий решает, когда фиксировать. При подтяжке
     истории это позволяет писать пачками, а не по строке на коммит.
+
+    `on_new_client` — необязательный обратный вызов на случай, когда клиент
+    заведён впервые (не при повторных сообщениях). Ничего не ждёт и не должен
+    падать — вызывающий сам решает, что с этим делать (например, спросить
+    у Telegram дату рождения в отдельной задаче, не задерживая приём).
     """
-    conversation = await get_or_create_conversation(db, account, event.peer, event.date)
+    conversation = await get_or_create_conversation(
+        db, account, event.peer, event.date, on_new_client
+    )
     peer_row = await upsert_peer(db, account.id, event.peer)
     if peer_row.client_id is None:
         peer_row.client_id = conversation.client_id

@@ -84,7 +84,7 @@ class OutboxStatus(StrEnum):
 
 class PaymentMethod(StrEnum):
     LINK = "link"  # ссылка провайдера, включается вместе с Робокассой
-    REQUISITES = "requisites"  # реквизиты + код платежа, подтверждение вручную
+    REQUISITES = "requisites"  # реквизиты, подтверждение вручную по приложенному чеку
 
 
 class DealStatus(StrEnum):
