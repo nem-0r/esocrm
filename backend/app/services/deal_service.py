@@ -344,11 +344,17 @@ async def create_deal(db: AsyncSession, user: User, data: DealCreate) -> dict[st
     items = _validated_items(data.items)
     # Реквизит нужен только для оплаты по реквизитам: у ссылки его нет и не будет —
     # деньги идут на счёт магазина в Робокассе, а не на конкретный счёт из справочника.
-    requisite = (
-        await _active_requisite(db, data.requisite_id)
-        if data.payment_method == PaymentMethod.REQUISITES
-        else None
-    )
+    # «Другое» — реквизитов из справочника нет, менеджер вписал их сам: тогда
+    # requisite_id остаётся пустым, а снимок реквизитов фиксируется сразу, а не
+    # при отправке (нечего переснимать — это и так текст менеджера, не запись
+    # из справочника, которую могли отредактировать позже).
+    custom_text = (data.custom_requisites_text or "").strip()
+    requisite: PaymentRequisite | None = None
+    if data.payment_method == PaymentMethod.REQUISITES:
+        if data.requisite_id is not None:
+            requisite = await _active_requisite(db, data.requisite_id)
+        elif not custom_text:
+            raise Invalid("Выберите счёт для оплаты или укажите реквизиты вручную")
     stmt = await _scoped(
         db, user, select(Conversation).where(Conversation.id == data.conversation_id)
     )
@@ -361,6 +367,7 @@ async def create_deal(db: AsyncSession, user: User, data: DealCreate) -> dict[st
         created_by_id=user.id, sold_by_id=user.id,  # продажу засчитываем создателю оплаты
         payment_method=data.payment_method,
         requisite_id=requisite.id if requisite else None,
+        requisites_snapshot=custom_text if (requisite is None and custom_text) else None,
         status=DealStatus.DRAFT,
         intro_text=(data.intro_text or "").strip() or None,
     )
@@ -408,12 +415,20 @@ async def update_deal(
                 f"Оплатить: {deal.payment_url}\n\n"
                 f"Сумма к оплате: {format_rubles(deal.total_amount)}"
             )
-        else:
+        elif deal.requisite_id is not None:
             requisite = await _active_requisite(db, deal.requisite_id)
             deal.requisites_snapshot = requisite.details_text
             text = (
                 "Счёт изменён — актуальные данные для оплаты:\n\n"
                 f"{requisite.details_text}\n\n"
+                f"Сумма к оплате: {format_rubles(deal.total_amount)}"
+            )
+        else:
+            # «Другое»: реквизиты — текст менеджера, править справочнику нечего,
+            # пересобираем сообщение с тем же снимком.
+            text = (
+                "Счёт изменён — актуальные данные для оплаты:\n\n"
+                f"{deal.requisites_snapshot}\n\n"
                 f"Сумма к оплате: {format_rubles(deal.total_amount)}"
             )
         await send_outgoing(db, conversation=conversation, author=user, text=text)
@@ -427,8 +442,12 @@ async def update_deal(
     return await _commit_and_emit(db, deal)
 
 
-def invoice_text(deal: Deal, requisite: PaymentRequisite) -> str:
+def invoice_text(deal: Deal, details_text: str) -> str:
     """Счёт клиенту: сопроводительный текст, реквизиты и сумма.
+
+    `details_text` — текст реквизита из справочника либо то, что менеджер
+    вписал вручную при выборе «Другое»; для счёта разницы нет, это просто
+    текст блока с реквизитами.
 
     Текст менеджера идёт первым — клиент читает сообщение сверху вниз, и сухие
     реквизиты без единого слова выглядят как ошибка отправки (ТЗ п. 4.4 и 4.5).
@@ -441,7 +460,7 @@ def invoice_text(deal: Deal, requisite: PaymentRequisite) -> str:
     parts: list[str] = []
     if deal.intro_text and deal.intro_text.strip():
         parts.append(deal.intro_text.strip())
-    parts.append(requisite.details_text)
+    parts.append(details_text)
     parts.append(f"Сумма к оплате: {format_rubles(deal.total_amount)}")
     return "\n\n".join(parts)
 
@@ -492,11 +511,17 @@ async def send_deal(db: AsyncSession, user: User, deal_id: int) -> dict[str, Any
         # сохраняем его же, чтобы поле не пустовало и было чем искать в логах.
         deal.provider_payment_id = str(deal.id)
         text = link_invoice_text(deal)
-    else:
+    elif deal.requisite_id is not None:
         requisite = await _active_requisite(db, deal.requisite_id)
         # Снимок реквизитов: правка справочника не должна переписывать историю.
         deal.requisites_snapshot = requisite.details_text
-        text = invoice_text(deal, requisite)
+        text = invoice_text(deal, requisite.details_text)
+    else:
+        # «Другое»: снимок уже зафиксирован при создании сделки (create_deal) —
+        # это текст самого менеджера, переснимать с ним нечего.
+        if not deal.requisites_snapshot:
+            raise Invalid("Реквизиты не указаны")
+        text = invoice_text(deal, deal.requisites_snapshot)
 
     message = await send_outgoing(db, conversation=conversation, author=user, text=text)
     await db.flush()

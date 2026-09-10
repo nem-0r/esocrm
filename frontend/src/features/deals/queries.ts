@@ -124,8 +124,10 @@ export interface DealItemInput {
 export interface CreateDealInput {
   conversation_id: number
   payment_method: PaymentMethod
-  /** Обязателен для оплаты по реквизитам; у ссылки счёта нет — деньги идут в Робокассу. */
+  /** Один из двух — этот либо custom_requisites_text; у ссылки счёта нет вообще. */
   requisite_id?: number
+  /** «Другое»: реквизиты, которые менеджер вписал сам, а не выбрал из справочника. */
+  custom_requisites_text?: string
   items: DealItemInput[]
   /** Текст, которым менеджер сопровождает счёт (ТЗ п. 4.4). */
   intro_text?: string

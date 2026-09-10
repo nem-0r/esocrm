@@ -526,7 +526,7 @@ async def make_deals(
             author_kind=AuthorKind.MANAGER,
             author_id=seller.id,
             kind=MessageKind.TEXT,
-            text=invoice_text(deal, requisite),
+            text=invoice_text(deal, requisite.details_text),
             status=MessageStatus.READ,
             random_id=rnd.getrandbits(62),
             sent_at=deal.sent_at,

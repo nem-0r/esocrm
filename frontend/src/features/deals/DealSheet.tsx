@@ -47,6 +47,10 @@ export function DealSheet({
   const [items, setItems] = useState<ItemDraft[]>([newItemDraft()])
   const [method, setMethod] = useState<PaymentMethod>('requisites')
   const [requisiteId, setRequisiteId] = useState<string | null>(null)
+  // «Другое»: значение-метка в том же поле выбора, а не отдельный переключатель —
+  // менеджер выбирает счёт из одного списка, «Другое» просто последний пункт в нём.
+  const CUSTOM_REQUISITE = 'custom'
+  const [customText, setCustomText] = useState('')
   const [introText, setIntroText] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [touched, setTouched] = useState(false)
@@ -55,6 +59,7 @@ export function DealSheet({
     if (!open) {
       setItems([newItemDraft()])
       setMethod('requisites')
+      setCustomText('')
       setIntroText('')
       setError(null)
       setTouched(false)
@@ -72,10 +77,13 @@ export function DealSheet({
     if (requisiteId === null && active.length > 0) setRequisiteId(String(active[0].id))
   }, [active, requisiteId])
 
+  const isCustom = requisiteId === CUSTOM_REQUISITE
   const total = draftTotal(items)
   const validation = itemsError(items)
   const needsRequisite = method === 'requisites'
-  const canSend = !validation && (!needsRequisite || requisiteId !== null) && !createAndSend.isPending
+  const requisiteFilled =
+    requisiteId !== null && (!isCustom || customText.trim().length > 0)
+  const canSend = !validation && (!needsRequisite || requisiteFilled) && !createAndSend.isPending
 
   function patch(index: number, field: 'name' | 'amount', value: string) {
     setItems((prev) =>
@@ -89,8 +97,8 @@ export function DealSheet({
       setError(validation)
       return
     }
-    if (needsRequisite && requisiteId === null) {
-      setError('Выберите счёт получателя')
+    if (needsRequisite && !requisiteFilled) {
+      setError(isCustom ? 'Впишите реквизиты' : 'Выберите счёт получателя')
       return
     }
     setError(null)
@@ -98,7 +106,8 @@ export function DealSheet({
       await createAndSend.mutateAsync({
         conversation_id: convId,
         payment_method: method,
-        requisite_id: needsRequisite ? Number(requisiteId) : undefined,
+        requisite_id: needsRequisite && !isCustom ? Number(requisiteId) : undefined,
+        custom_requisites_text: needsRequisite && isCustom ? customText.trim() : undefined,
         items: toItemsPayload(items),
         intro_text: introText.trim() || undefined,
       })
@@ -236,16 +245,32 @@ export function DealSheet({
               onChange={setRequisiteId}
               placeholder={requisites.isLoading ? 'Загружаем…' : 'Выберите счёт'}
               // Счета сгруппированы по стране: отправить казахстанскую карту
-              // клиенту из России — значит не получить оплату.
-              options={active.map((requisite) => ({
-                value: String(requisite.id),
-                label: requisite.country
-                  ? `${requisite.country} — ${requisite.method ?? requisite.title}`
-                  : requisite.title,
-                hint: [requisite.kind, requisite.account_masked, requisite.holder]
-                  .filter(Boolean)
-                  .join(' · '),
-              }))}
+              // клиенту из России — значит не получить оплату. «Другое» —
+              // последним пунктом: для случая, когда клиенту нужно перевести
+              // на счёт, которого нет в справочнике руководителя.
+              options={[
+                ...active.map((requisite) => ({
+                  value: String(requisite.id),
+                  label: requisite.country
+                    ? `${requisite.country} — ${requisite.method ?? requisite.title}`
+                    : requisite.title,
+                  hint: [requisite.kind, requisite.account_masked, requisite.holder]
+                    .filter(Boolean)
+                    .join(' · '),
+                })),
+                { value: CUSTOM_REQUISITE, label: 'Другое', hint: 'Впишу реквизиты вручную' },
+              ]}
+            />
+          </Field>
+        )}
+
+        {needsRequisite && isCustom && (
+          <Field label="Реквизиты" required hint="Уйдут клиенту точно в этом виде — проверьте перед отправкой">
+            <Textarea
+              rows={4}
+              value={customText}
+              onChange={(event) => setCustomText(event.target.value)}
+              placeholder={'Получатель: …\nБанк: …\nНомер счёта/карты: …'}
             />
           </Field>
         )}
