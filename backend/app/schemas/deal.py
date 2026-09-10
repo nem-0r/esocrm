@@ -97,9 +97,6 @@ class DealPay(ApiModel):
     receipt_file_name: str | None = None
     receipt_mime_type: str | None = None
     receipt_size_bytes: int = 0
-    # На какой реквизит деньги пришли фактически. Пусто — значит на тот,
-    # что был в счёте.
-    paid_to_requisite_id: int | None = None
 
 
 class DealRow(ApiModel):

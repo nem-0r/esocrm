@@ -535,7 +535,6 @@ async def check_money_roundtrip(api: httpx.AsyncClient, db: Any, admin_id: int) 
                 "receipt_file_name": uploaded["file_name"],
                 "receipt_mime_type": uploaded["mime_type"],
                 "receipt_size_bytes": uploaded["size_bytes"],
-                "paid_to_requisite_id": requisite_id,
             },
         )
         check("оплата подтверждена", 200, paid.status_code, paid.text)

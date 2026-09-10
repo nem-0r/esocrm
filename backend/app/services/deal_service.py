@@ -203,10 +203,13 @@ async def list_deals(
 async def by_requisite(db: AsyncSession, user: User, **filters: Any) -> list[dict[str, Any]]:
     """Поступления в разрезе реквизитов — то, с чем сверяют банковскую выписку.
 
-    Считаем по реквизиту, на который деньги пришли фактически
-    (`paid_to_requisite_id`), а не по тому, что был в счёте: клиент нередко
-    платит другим способом, и выписка сойдётся только так. У старых сделок
-    фактический реквизит не заполнен — для них берём реквизит счёта.
+    Группируем по `paid_to_requisite_id`, а не по `requisite_id` из счёта:
+    для новых сделок оба поля всегда совпадают (см. `pay_deal` — менеджер
+    выбирает счёт один раз, при создании, повторно при оплате не спрашивают),
+    но у сделок, оплаченных до этого изменения, `paid_to_requisite_id` мог
+    отличаться — это была ручная поправка на случай, если клиент платил не
+    туда, куда предлагал счёт. `coalesce` нужен только на случай, если
+    какое-то старое поле вовсе не заполнено.
     """
     conditions = await _conditions(db, user, **{**filters, "status": None})
     target = func.coalesce(Deal.paid_to_requisite_id, Deal.requisite_id)
@@ -560,7 +563,6 @@ async def pay_deal(
     receipt_file_name: str | None = None,
     receipt_mime_type: str | None = None,
     receipt_size_bytes: int = 0,
-    paid_to_requisite_id: int | None = None,
 ) -> dict[str, Any]:
     deal, _ = await _get_deal(db, user, deal_id, lock=True)
     _ensure_transition(deal, DealStatus.PAID)
@@ -589,10 +591,9 @@ async def pay_deal(
     deal.receipt_file_name = receipt_file_name
     deal.receipt_mime_type = receipt_mime_type
     deal.receipt_size_bytes = receipt_size_bytes
-    # Куда деньги пришли фактически. По умолчанию — тот реквизит, что был
-    # в счёте; если платили на другой, менеджер указывает его явно, иначе
-    # сверка с выпиской этого счёта не сойдётся.
-    deal.paid_to_requisite_id = paid_to_requisite_id or deal.requisite_id
+    # Куда деньги пришли фактически: тот же реквизит, что был в счёте — его
+    # менеджер уже выбрал при создании сделки, повторно спрашивать нечего.
+    deal.paid_to_requisite_id = deal.requisite_id
     await _record(
         db, deal, user, DealEventKind.PAID, action="deal.pay",
         comment=(comment or "").strip() or None,

@@ -88,7 +88,6 @@ async def run() -> int:
         upload = await upload_receipt(admin)
         check("чек загружается через /files/upload", bool(upload.get("upload_key")), str(upload))
 
-        target = requisites[1]["id"] if len(requisites) > 1 else requisites[0]["id"]
         paid = await admin.post(
             f"/deals/{deal['id']}/pay",
             json={
@@ -96,7 +95,6 @@ async def run() -> int:
                 "receipt_file_name": upload["file_name"],
                 "receipt_mime_type": upload["mime_type"],
                 "receipt_size_bytes": upload["size_bytes"],
-                "paid_to_requisite_id": target,
             },
         )
         check("оплата с чеком подтверждается", paid.status_code == 200, paid.text[:80])
@@ -104,8 +102,10 @@ async def run() -> int:
         check("чек сохранён в карточке", card.get("receipt_file_name") == "chek.png")
         check("ссылка на скачивание чека отдана", bool(card.get("receipt_url")))
         check(
-            "записано, на какой счёт деньги пришли фактически",
-            card.get("paid_to_requisite_id") == target,
+            # Менеджер выбирает счёт один раз, при создании — повторно при
+            # оплате его больше не спрашивают (поле убрали из формы).
+            "записано, что деньги пришли на счёт из счёта клиенту",
+            card.get("paid_to_requisite_id") == requisites[0]["id"],
             str(card.get("paid_to_requisite_title")),
         )
 
@@ -140,7 +140,7 @@ async def run() -> int:
         report = await admin.get("/deals/by-requisite")
         check("отчёт по реквизитам отвечает", report.status_code == 200, report.text[:80])
         rows = report.json()
-        row = next((r for r in rows if r["requisite_id"] == target), None)
+        row = next((r for r in rows if r["requisite_id"] == requisites[0]["id"]), None)
         check("оплата попала в строку своего реквизита", row is not None, str(row))
         check(
             "сумма отчёта сходится с суммой оплаченных сделок",

@@ -140,7 +140,6 @@ async def pay_deal(db: Db, user: CurrentUser, deal_id: int, data: DealPay | None
         data.receipt_file_name if data else None,
         data.receipt_mime_type if data else None,
         data.receipt_size_bytes if data else 0,
-        data.paid_to_requisite_id if data else None,
     )
 
 

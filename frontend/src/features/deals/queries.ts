@@ -204,8 +204,6 @@ export interface PayDealInput {
   receipt_file_name: string
   receipt_mime_type: string | null
   receipt_size_bytes: number
-  /** Куда деньги пришли фактически. Пусто — на реквизит из счёта. */
-  paid_to_requisite_id?: number | null
 }
 
 export function usePayDeal(dealId: number, conversationId: number | null) {

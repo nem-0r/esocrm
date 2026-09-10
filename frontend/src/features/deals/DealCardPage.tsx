@@ -103,7 +103,6 @@ function DealPane({ dealId }: { dealId: number }) {
   const [receiptUploading, setReceiptUploading] = useState(false)
   const [receiptError, setReceiptError] = useState<string | null>(null)
   const receiptInput = useRef<HTMLInputElement>(null)
-  const [paidTo, setPaidTo] = useState<string | null>(null)
   const requisites = useRequisites()
   const [error, setError] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
@@ -340,15 +339,7 @@ function DealPane({ dealId }: { dealId: number }) {
               </Button>
             )}
             {canPay(deal.status) && (
-              <Button
-                fullWidth
-                onClick={() => {
-                  // Предзаполняем реквизитом из счёта: чаще всего деньги приходят
-                  // именно туда, и менеджеру остаётся только приложить чек.
-                  setPaidTo(deal.requisite_id ? String(deal.requisite_id) : null)
-                  setPayOpen(true)
-                }}
-              >
+              <Button fullWidth onClick={() => setPayOpen(true)}>
                 <Check className="size-4" aria-hidden />
                 Отметить оплаченной
               </Button>
@@ -414,7 +405,6 @@ function DealPane({ dealId }: { dealId: number }) {
                     receipt_file_name: receipt!.file_name,
                     receipt_mime_type: receipt!.mime_type,
                     receipt_size_bytes: receipt!.size_bytes,
-                    paid_to_requisite_id: paidTo ? Number(paidTo) : null,
                   }),
                 () => {
                   setPayOpen(false)
@@ -467,18 +457,6 @@ function DealPane({ dealId }: { dealId: number }) {
                 </Button>
               </>
             )}
-          </Field>
-          {/* Куда деньги пришли фактически: клиент часто платит другим способом,
-              и сверка с выпиской сойдётся только по реальному счёту. */}
-          <Field label="Куда пришли деньги" hint="По умолчанию — реквизит из счёта">
-            <Select
-              value={paidTo}
-              onChange={setPaidTo}
-              options={(requisites.data ?? []).map((item) => ({
-                value: String(item.id),
-                label: item.country ? `${item.country} · ${item.title}` : item.title,
-              }))}
-            />
           </Field>
         </div>
       </Sheet>
