@@ -15,6 +15,7 @@ JSON, чтобы разъехаться было негде.
 
 import hashlib
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 from urllib.parse import quote, urlencode
@@ -84,12 +85,18 @@ def build_payment_url(
     sno: str,
     tax: str,
     is_test: bool,
+    expires_at: datetime | None = None,
 ) -> str:
     """Собирается на нашей стороне, редиректа через сервер не требует.
 
     `description` — это поле формата запроса к Робокассе (её лимиты, её страница
     оплаты), не сообщение клиенту в чате: то сообщение собирает
     `deal_service.link_invoice_text()` и начинается с `deal.intro_text` (ТЗ п. 4.5).
+
+    `expires_at`, если передан, обязан быть уже в местном времени организации
+    (aware или naive — используется только `strftime`) и НЕ входит в подпись
+    (docs.robokassa.ru/ru/pay-interface — ExpirationDate не участвует в формуле
+    SignatureValue, в отличие от Receipt).
     """
     out_sum = kopecks_to_robokassa(out_sum_kopecks)
     receipt = build_receipt(receipt_items, sno, tax)
@@ -112,6 +119,8 @@ def build_payment_url(
     }
     if is_test:
         params["IsTest"] = "1"
+    if expires_at is not None:
+        params["ExpirationDate"] = expires_at.strftime("%Y-%m-%dT%H:%M")
     # Receipt кодируем сами и подставляем как готовую строку: urlencode закодировал
     # бы уже закодированное значение повторно и сломал бы JSON.
     query = urlencode(params) + f"&Receipt={receipt_encoded}"

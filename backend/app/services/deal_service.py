@@ -488,6 +488,10 @@ async def _build_payment_link(db: AsyncSession, deal: Deal) -> str:
     if not settings.robokassa_enabled:
         raise Invalid(LINK_NOT_READY)
     all_settings = await settings_get_all(db)
+    # Робокасса не документирует часовой пояс ExpirationDate — передаём в местном
+    # времени организации (тот же перевод, что и везде в этом сервисе), а не в UTC,
+    # как хранится deal.expires_at.
+    zone = await local_zone(db)
     return robokassa.build_payment_url(
         merchant_login=settings.robokassa_active_merchant_login,
         password1=settings.robokassa_active_password1,
@@ -500,12 +504,19 @@ async def _build_payment_link(db: AsyncSession, deal: Deal) -> str:
         sno=str(all_settings.get("robokassa_sno") or "usn_income"),
         tax=str(all_settings.get("robokassa_tax") or "none"),
         is_test=settings.robokassa_is_test,
+        expires_at=deal.expires_at.astimezone(zone) if deal.expires_at else None,
     )
 
 
 async def send_deal(db: AsyncSession, user: User, deal_id: int) -> dict[str, Any]:
     deal, conversation = await _get_deal(db, user, deal_id)
     _ensure_transition(deal, DealStatus.AWAITING)
+
+    now = datetime.now(UTC)
+    # Считаем срок ДО сборки ссылки: _build_payment_link читает deal.expires_at,
+    # чтобы сообщить его же Робокассе через ExpirationDate — иначе её страница
+    # оплаты жила бы по умолчанию Робокассы, не совпадающему с нашим сроком.
+    deal.expires_at = now + timedelta(days=int(await get_value(db, "deal_link_ttl_days") or 7))
 
     if deal.payment_method == PaymentMethod.LINK:
         deal.payment_url = await _build_payment_link(db, deal)
@@ -529,10 +540,8 @@ async def send_deal(db: AsyncSession, user: User, deal_id: int) -> dict[str, Any
     message = await send_outgoing(db, conversation=conversation, author=user, text=text)
     await db.flush()
 
-    now = datetime.now(UTC)
     deal.status = DealStatus.AWAITING
     deal.sent_at = now
-    deal.expires_at = now + timedelta(days=int(await get_value(db, "deal_link_ttl_days") or 7))
     deal.sent_message_id = message.id
     await _record(
         db, deal, user, DealEventKind.SENT, action="deal.send",

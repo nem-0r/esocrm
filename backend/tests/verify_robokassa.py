@@ -106,6 +106,7 @@ async def run() -> int:
         )
         check(f"InvId в ссылке — id сделки ({deal['id']})", f"InvId={deal['id']}" in url)
         check("OutSum в ссылке — 1500.00", "OutSum=1500.00" in url)
+        check("в ссылке передан срок действия (ExpirationDate)", "ExpirationDate=" in url, url[:200])
         messages = (
             await c.get(f"{BASE}/conversations/{conversation_id}/messages", params={"limit": 5})
         ).json()
