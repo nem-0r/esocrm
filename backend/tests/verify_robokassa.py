@@ -70,7 +70,9 @@ async def run() -> int:
         print(f"\nИтог: {len(ok)} выполнено, {len(bad)} не выполнено")
         return 1
 
-    password2 = settings.robokassa_password2
+    # Тот же пароль, что реально проверяет сервер сейчас: тестовый, если задан
+    # отдельно и включён тестовый режим, иначе боевой (см. app/core/config.py).
+    password2 = settings.robokassa_active_password2
 
     async with httpx.AsyncClient(timeout=30) as c:
         await c.post(f"{BASE}/auth/login", json=ADMIN)

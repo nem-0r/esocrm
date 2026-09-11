@@ -166,6 +166,16 @@ class Settings(BaseSettings):
     robokassa_password1: str = ""
     robokassa_password2: str = ""
     robokassa_is_test: bool = True
+    # Тестовый режим Робокассы — ОТДЕЛЬНЫЙ комплект паролей, не те же самые, что
+    # боевые (docs.robokassa.ru/ru/testing-mode: «специальный тестовый набор
+    # паролей, не совпадающих с основными рабочими»). Раньше здесь ошибочно
+    # предполагалось, что различается только флаг IsTest — из-за этого тестовая
+    # подпись собиралась бы боевым паролём и Робокасса отбивала бы её как неверную.
+    # Логин магазина при этом обычно один и тот же — тестовый логин задаём только
+    # если Робокасса реально выдаст отдельный (пусто = используем боевой).
+    robokassa_test_merchant_login: str = ""
+    robokassa_test_password1: str = ""
+    robokassa_test_password2: str = ""
 
     @field_validator("telegram_api_id", mode="before")
     @classmethod
@@ -251,12 +261,20 @@ class Settings(BaseSettings):
             self.robokassa_password2,
             "Задайте боевой пароль #2 из личного кабинета Робокассы.",
         )
+        problems += _infra_problems(
+            "ROBOKASSA_TEST_PASSWORD1",
+            self.robokassa_test_password1,
+            "Задайте тестовый пароль #1 — он отдельный от боевого.",
+        )
+        problems += _infra_problems(
+            "ROBOKASSA_TEST_PASSWORD2",
+            self.robokassa_test_password2,
+            "Задайте тестовый пароль #2 — он отдельный от боевого.",
+        )
 
         if self.robokassa_enabled and self.robokassa_is_test:
-            # Не блокируем запуск: у Робокассы тестовый и боевой режим — один
-            # и тот же магазин с одними и теми же паролями, разница только в
-            # этом флаге. Проверка ключей ДО реального запуска (ровно так,
-            # как рекомендует docs/11-payments-architecture.md) требует
+            # Не блокируем запуск: проверка ключей ДО реального включения (ровно
+            # так, как рекомендует docs/11-payments-architecture.md) требует
             # запускаться именно в этой комбинации — блокировать её значило
             # бы запрещать штатный, ожидаемый шаг перед боевым включением.
             # Предупреждение остаётся печататься в лог при каждом запуске,
@@ -266,11 +284,13 @@ class Settings(BaseSettings):
                 "===============================================================\n"
                 " ПРЕДУПРЕЖДЕНИЕ: Робокасса настроена, но в тестовом режиме\n"
                 "===============================================================\n"
-                "ROBOKASSA_MERCHANT_LOGIN/PASSWORD1/PASSWORD2 заполнены, "
                 "ROBOKASSA_IS_TEST=true — каждая ссылка на оплату уйдёт в "
                 "тестовый контур Робокассы, деньги по-настоящему проходить не "
-                "будут. Это ожидаемо при первой проверке ключей. Если магазин "
-                "уже переведён в боевой режим — поставьте ROBOKASSA_IS_TEST=false.\n"
+                "будут. Это ожидаемо при первой проверке ключей. Тестовый режим "
+                "подписывается ОТДЕЛЬНЫМ паролем (ROBOKASSA_TEST_PASSWORD1/2, "
+                "не путать с боевым ROBOKASSA_PASSWORD1/2) — без него подпись "
+                "не сойдётся, даже если боевые пароли верны. Когда магазин "
+                "переведут в боевой режим — поставьте ROBOKASSA_IS_TEST=false.\n"
                 "===============================================================",
                 file=sys.stderr,
             )
@@ -302,12 +322,39 @@ class Settings(BaseSettings):
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
 
     @property
+    def robokassa_active_merchant_login(self) -> str:
+        """Логин магазина обычно один и тот же в тесте и в бою — тестовый
+        задаём отдельно, только если Робокасса реально его выдала."""
+        if self.robokassa_is_test and self.robokassa_test_merchant_login:
+            return self.robokassa_test_merchant_login
+        return self.robokassa_merchant_login
+
+    @property
+    def robokassa_active_password1(self) -> str:
+        """Пароль для подписи исходящей ссылки — тестовый в тестовом режиме,
+        иначе боевой. Не путать: это разные значения, не один и тот же пароль
+        с флагом IsTest (docs.robokassa.ru/ru/testing-mode)."""
+        if self.robokassa_is_test and self.robokassa_test_password1:
+            return self.robokassa_test_password1
+        return self.robokassa_password1
+
+    @property
+    def robokassa_active_password2(self) -> str:
+        """Пароль для проверки подписи входящего уведомления — тот же принцип,
+        что и у пароля №1."""
+        if self.robokassa_is_test and self.robokassa_test_password2:
+            return self.robokassa_test_password2
+        return self.robokassa_password2
+
+    @property
     def robokassa_enabled(self) -> bool:
-        """Все три значения нужны сразу: логин без паролей ничего не подпишет."""
+        """Все три АКТИВНЫХ значения нужны сразу: логин без паролей ничего не
+        подпишет. В тестовом режиме это означает — тестовые пароли заданы (или
+        осознанно оставлены боевыми, если магазин их не разделяет)."""
         return bool(
-            self.robokassa_merchant_login
-            and self.robokassa_password1
-            and self.robokassa_password2
+            self.robokassa_active_merchant_login
+            and self.robokassa_active_password1
+            and self.robokassa_active_password2
         )
 
 

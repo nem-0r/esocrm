@@ -489,8 +489,8 @@ async def _build_payment_link(db: AsyncSession, deal: Deal) -> str:
         raise Invalid(LINK_NOT_READY)
     all_settings = await settings_get_all(db)
     return robokassa.build_payment_url(
-        merchant_login=settings.robokassa_merchant_login,
-        password1=settings.robokassa_password1,
+        merchant_login=settings.robokassa_active_merchant_login,
+        password1=settings.robokassa_active_password1,
         inv_id=deal.id,
         out_sum_kopecks=deal.total_amount,
         description=deal.title,

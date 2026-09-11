@@ -55,7 +55,7 @@ async def robokassa_result(request: Request) -> PlainTextResponse:
         out_sum=out_sum,
         inv_id=inv_id,
         provided_signature=signature,
-        password2=settings.robokassa_password2,
+        password2=settings.robokassa_active_password2,
     )
 
     # Пишем сырое уведомление ДО всякой логики, отдельной транзакцией — даже
