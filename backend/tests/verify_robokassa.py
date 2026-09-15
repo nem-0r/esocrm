@@ -210,20 +210,89 @@ async def run() -> int:
             forged_after.text[:80],
         )
 
-        print("\nСтарая ссылка без Shp_ (до перехода на общий магазин) — обратная совместимость")
-        legacy_deal = await new_link_deal(amount=70000)
-        legacy_inv_id, _legacy_shp = inv_id_and_shp_from_url(legacy_deal.get("payment_url") or "")
-        # У «старой» схемы InvId и был id сделки — подписываем БЕЗ Shp_, как
-        # реальная Робокасса подписала бы уведомление на такую ссылку.
-        sig_legacy = result_signature("700.00", legacy_deal["id"], password2)
-        legacy_paid = await result_notify(c, "700.00", legacy_deal["id"], sig_legacy)
+        print("\nУведомление без Shp_deal_id — отклоняется, не «находит по InvId»")
+        # Магазин общий с ботом Богдана существует только в этой схеме — «старых»
+        # ссылок без Shp_deal_id в реальности никогда не было, отсутствие этого
+        # параметра теперь однозначно подделка/ошибка, а не легитимный legacy-путь.
+        no_shp_deal = await new_link_deal(amount=70000)
+        no_shp_inv_id, _ = inv_id_and_shp_from_url(no_shp_deal.get("payment_url") or "")
+        sig_no_shp = result_signature("700.00", no_shp_inv_id, password2)
+        no_shp_resp = await result_notify(c, "700.00", no_shp_inv_id, sig_no_shp)
         check(
-            "уведомление без Shp_ находит сделку по InvId напрямую",
-            legacy_paid.status_code == 200 and legacy_paid.text == f"OK{legacy_deal['id']}",
-            f"{legacy_paid.status_code} {legacy_paid.text[:40]}",
+            "без Shp_deal_id — 400, сделка НЕ находится по InvId напрямую",
+            no_shp_resp.status_code == 400,
+            f"{no_shp_resp.status_code} {no_shp_resp.text[:80]}",
         )
-        legacy_card = (await c.get(f"{BASE}/deals/{legacy_deal['id']}")).json()
-        check("старая сделка помечена оплаченной", legacy_card["status"] == "paid", legacy_card["status"])
+        no_shp_card = (await c.get(f"{BASE}/deals/{no_shp_deal['id']}")).json()
+        check("сделка без Shp_deal_id не тронута", no_shp_card["status"] == "awaiting", no_shp_card["status"])
+
+        print("\nПодмена набора Shp_-параметров через «:»/«=» в имени — отклоняется")
+        inj_deal = await new_link_deal(amount=55000)
+        inj_inv_id, inj_shp = inv_id_and_shp_from_url(inj_deal.get("payment_url") or "")
+        # То же самое итоговое множество пар после сортировки, что и настоящее
+        # (Shp_deal_id=<id>, Shp_source=esocrm), но с двоеточием в имени ключа —
+        # раньше это давало байт-в-байт ту же строку для подписи на другой набор.
+        sneaky_shp = {f"Shp_deal_id={inj_shp.get('Shp_deal_id')}:Shp_source": "esocrm"}
+        sig_sneaky = result_signature("550.00", inj_inv_id, password2, shp_params=sneaky_shp)
+        sneaky_resp = await result_notify(c, "550.00", inj_inv_id, sig_sneaky, shp_params=sneaky_shp)
+        check(
+            "Shp-параметр с «:» в имени отклоняется, а не разбирается",
+            sneaky_resp.status_code == 400,
+            f"{sneaky_resp.status_code} {sneaky_resp.text[:80]}",
+        )
+        inj_card = (await c.get(f"{BASE}/deals/{inj_deal['id']}")).json()
+        check("сделка с «инъекцией» в Shp_ не тронута", inj_card["status"] == "awaiting", inj_card["status"])
+
+        print("\nДва Shp_deal_id в разном регистре имени — отклоняется, не берём первый попавшийся")
+        dup_deal = await new_link_deal(amount=45000)
+        dup_inv_id, dup_shp = inv_id_and_shp_from_url(dup_deal.get("payment_url") or "")
+        dup_shp_bad = {**dup_shp, "SHP_DEAL_ID": "9999999"}
+        sig_dup = result_signature("450.00", dup_inv_id, password2, shp_params=dup_shp_bad)
+        dup_resp = await result_notify(c, "450.00", dup_inv_id, sig_dup, shp_params=dup_shp_bad)
+        check(
+            "два разных Shp_deal_id одновременно — 400, а не оплата первого попавшегося",
+            dup_resp.status_code == 400,
+            f"{dup_resp.status_code} {dup_resp.text[:80]}",
+        )
+        dup_card = (await c.get(f"{BASE}/deals/{dup_deal['id']}")).json()
+        check("сделка с двойным Shp_deal_id не тронута", dup_card["status"] == "awaiting", dup_card["status"])
+
+        print("\nСделка по реквизитам — провайдер её подтвердить не может, даже с верной подписью")
+        requisites_raw = (await c.get(f"{BASE}/requisites")).json()
+        requisites = requisites_raw if isinstance(requisites_raw, list) else requisites_raw.get("items", [])
+        if requisites:
+            req_deal_resp = await c.post(
+                f"{BASE}/deals",
+                json={
+                    "conversation_id": conversation_id,
+                    "payment_method": "requisites",
+                    "requisite_id": requisites[0]["id"],
+                    "items": [{"name": "Проверка Робокассы — по реквизитам", "amount": 30000}],
+                },
+            )
+            req_deal = req_deal_resp.json()
+            await c.post(f"{BASE}/deals/{req_deal['id']}/send")
+            # У сделки по реквизитам никогда не было ссылки Робокассы — подписываем
+            # уведомление так, будто её InvId/Shp_deal_id — этот id (подобрать
+            # такую подпись без Password2 нельзя, но сам факт совпадения id и
+            # суммы не должен ничего решать за payment_method).
+            fake_inv_id = 2_000_000_000 + req_deal["id"]
+            fake_shp = {"Shp_source": "esocrm", "Shp_deal_id": str(req_deal["id"])}
+            sig_req = result_signature("300.00", fake_inv_id, password2, shp_params=fake_shp)
+            req_resp = await result_notify(c, "300.00", fake_inv_id, sig_req, shp_params=fake_shp)
+            check(
+                "верная подпись, но сделка не по ссылке — 409, не оплата",
+                req_resp.status_code == 409,
+                f"{req_resp.status_code} {req_resp.text[:80]}",
+            )
+            req_card = (await c.get(f"{BASE}/deals/{req_deal['id']}")).json()
+            check(
+                "сделка по реквизитам не помечена оплаченной провайдером",
+                req_card["status"] == "awaiting",
+                req_card["status"],
+            )
+        else:
+            check("сделка по реквизитам — провайдер её подтвердить не может", False, "нет реквизитов для теста")
 
         print("\nНесуществующая сделка")
         ghost_shp = {"Shp_source": "esocrm", "Shp_deal_id": "9999999"}
@@ -248,13 +317,36 @@ async def run() -> int:
             data={
                 "OutSum": "100.00",
                 "InvId": "123",
-                "SignatureValue": "x",
+                # Формально валидная по формату подпись (hex, разумная длина) —
+                # проверяем, что запрос падает именно на разборе Shp_deal_id,
+                # а не раньше на формате самой подписи.
+                "SignatureValue": "0" * 64,
                 "Shp_source": "esocrm",
                 "Shp_deal_id": "не-число",
             },
         )
         check(
             "нечисловой Shp_deal_id — 400, не 500", broken_shp.status_code == 400, str(broken_shp.status_code)
+        )
+
+        print("\nПодпись не похожа на подпись (не hex / слишком длинная)")
+        weird_sig = await c.post(
+            f"{BASE}/payments/robokassa/result",
+            data={"OutSum": "100.00", "InvId": "123", "SignatureValue": "not-a-hex-signature"},
+        )
+        check(
+            "нестандартная подпись отклоняется на входе, не доходит до сравнения",
+            weird_sig.status_code == 400,
+            str(weird_sig.status_code),
+        )
+        too_long_sig = await c.post(
+            f"{BASE}/payments/robokassa/result",
+            data={"OutSum": "100.00", "InvId": "123", "SignatureValue": "a" * 300},
+        )
+        check(
+            "слишком длинная подпись отклоняется, не долетает до колонки БД",
+            too_long_sig.status_code == 400,
+            str(too_long_sig.status_code),
         )
 
         print("\nИстёкшая сделка: ручное подтверждение закрыто, провайдер — нет")

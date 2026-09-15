@@ -2,11 +2,13 @@
 
 Публичный, без авторизации — сам провайдер не входит в CRM. Единственная защита
 здесь — проверка подписи на каждый запрос, а не токен и не IP-фильтр (Робокасса
-не публикует фиксированный список адресов).
+не публикует фиксированный список адресов). Именно поэтому всё, что приходит
+в запросе, — вражеский ввод: валидируем диапазоны/формат ДО обращения к базе,
+чтобы поддельный запрос падал на понятной проверке, а не на исключении СУБД
+(из-за которого запись о самой подделке потерялась бы, см. ниже).
 
 Устройство разобрано в docs/11-payments-architecture.md, разд. 4 и 8. Коротко: сумма
-и статус решаются только своей базой, из запроса берутся лишь Shp_deal_id (или
-InvId — для ссылок, отправленных до перехода на общий магазин) и подпись;
+и статус решаются только своей базой, из запроса берётся лишь Shp_deal_id и подпись;
 повтор уведомления — норма, а не ошибка, и должен приводить к тому же ответу,
 что и первая обработка.
 """
@@ -17,7 +19,7 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, Request
 from fastapi.responses import PlainTextResponse
 from sqlalchemy import exists, select, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from app.core.config import settings
 from app.core.db import SessionLocal
@@ -26,6 +28,28 @@ from app.services import deal_service, robokassa
 
 router = APIRouter()
 log = logging.getLogger("astra.payments")
+
+# InvId у нас — Robokassa-int (asyncpg отдаёт BigInteger, максимум int64).
+# Значения вне диапазона не долетят до базы валидной сделкой ни при каком раскладе —
+# отбиваем на входе, а не на исключении СУБД.
+_MAX_INT64 = 2**63 - 1
+# Обычный hex-дайджест (SHA256 — 64 символа, SHA512 — 128) плюс запас на будущее.
+_MAX_SIGNATURE_LEN = 128
+_HEX_CHARS = frozenset("0123456789abcdefABCDEF")
+
+
+def _get_ci(params: dict[str, str], name: str) -> str:
+    """Регистронезависимый поиск — Робокасса не гарантирует один и тот же
+    регистр имени параметра во всех кабинетах (у бота-посредника код отдельно
+    подстраховывается на этот счёт под именем InvId/InvID)."""
+    lname = name.lower()
+    return next((v for k, v in params.items() if k.lower() == lname), "")
+
+
+def _sanitize_for_jsonb(params: dict[str, str]) -> dict[str, str]:
+    """NUL-байт ломает вставку в JSONB (Postgres 22P05) — вырезаем его, а не
+    отклоняем весь запрос: это поле только для аудита, а не для логики ниже."""
+    return {k: v.replace("\x00", "") for k, v in params.items()}
 
 
 @router.post(
@@ -37,32 +61,68 @@ log = logging.getLogger("astra.payments")
     ),
 )
 async def robokassa_result(request: Request) -> PlainTextResponse:
+    if not settings.robokassa_enabled:
+        # Без активных паролей verify_result_signature подписывала бы пустой
+        # строкой — «неверной подписи» тогда не бывает вообще, любой запрос
+        # с правильно посчитанным (без пароля!) хешем прошёл бы проверку.
+        # Раз оплата по ссылке не настроена — эндпоинт не должен принимать
+        # решения по сделкам вообще, а не полагаться на пустой пароль как на отказ.
+        log.warning("Робокасса: уведомление получено, но приём по ссылке не настроен")
+        return PlainTextResponse("robokassa disabled", status_code=503)
+
     # Робокасса шлёт form-urlencoded; на всякий случай подстраховываемся
     # query-параметрами — по документации бывают оба варианта в разных кабинетах.
     form = await request.form()
     params: dict[str, str] = {**request.query_params, **{k: str(v) for k, v in form.items()}}
 
-    out_sum = params.get("OutSum", "")
-    inv_id_raw = params.get("InvId", "")
-    signature = params.get("SignatureValue", "")
+    out_sum = _get_ci(params, "OutSum")
+    inv_id_raw = _get_ci(params, "InvId")
+    signature = _get_ci(params, "SignatureValue")
 
     try:
         inv_id = int(inv_id_raw)
     except ValueError:
-        log.warning("Робокасса: нечитаемый InvId %r", inv_id_raw)
+        log.warning("Робокасса: нечитаемый InvId %r", inv_id_raw[:50])
+        return PlainTextResponse("bad request", status_code=400)
+    if not (0 < inv_id <= _MAX_INT64):
+        log.warning("Робокасса: InvId вне диапазона: %r", inv_id_raw[:50])
+        return PlainTextResponse("bad request", status_code=400)
+
+    if not signature or len(signature) > _MAX_SIGNATURE_LEN or not set(signature) <= _HEX_CHARS:
+        # Настоящая подпись Робокассы — это всегда hex-дайджест разумной длины.
+        # Проверяем ДО похода в базу: длинная строка иначе переполнила бы
+        # provider_event_id (String(255)) и упала бы не тем исключением, что мы
+        # ловим ниже, а произвольный не-ASCII символ уронил бы hmac.compare_digest.
+        log.warning("Робокасса: подпись не похожа на подпись (len=%s)", len(signature))
         return PlainTextResponse("bad request", status_code=400)
 
     # Магазин esoterra-pay общий с ботом Богдана — InvId у нас со сдвигом
     # (deal_service.robokassa_inv_id) и не равен id сделки напрямую. Настоящий
     # адрес сделки — Shp_deal_id, который мы сами кладём в ссылку и который
-    # Робокасса возвращает нетронутым. Пусто — старая ссылка без общего магазина
-    # (сделана до этого перехода), там InvId и был id сделки: не отбиваем её.
-    shp_params = robokassa.extract_shp_params(params)
-    shp_deal_id_raw = next((v for k, v in shp_params.items() if k.lower() == "shp_deal_id"), "")
+    # Робокасса возвращает нетронутым. Робокасса никогда не работала с этим
+    # магазином до перехода на общую схему — «старых» ссылок без Shp_deal_id
+    # в реальности нет, поэтому его отсутствие — это подделка/ошибка, а не
+    # легитимный legacy-случай, и разбирать его как валидный больше не нужно.
     try:
-        deal_id = int(shp_deal_id_raw) if shp_deal_id_raw else inv_id
+        shp_params = robokassa.extract_shp_params(params)
+    except robokassa.InvalidShpParams:
+        log.warning("Робокасса: недопустимый символ в Shp-параметре (InvId=%s)", inv_id)
+        return PlainTextResponse("bad request", status_code=400)
+
+    shp_deal_id_values = {v for k, v in shp_params.items() if k.lower() == "shp_deal_id"}
+    if len(shp_deal_id_values) != 1:
+        # Ровно один, не «хотя бы один»: два разных значения под одним именем в
+        # разном регистре означали бы, что кто-то целится в конкретную сделку,
+        # спрятав дубль — надёжнее отказать, чем гадать, какое значение верное.
+        log.warning("Робокасса: не ровно один Shp_deal_id (InvId=%s, получено %s)", inv_id, len(shp_deal_id_values))
+        return PlainTextResponse("bad request", status_code=400)
+    try:
+        deal_id = int(next(iter(shp_deal_id_values)))
     except ValueError:
-        log.warning("Робокасса: нечитаемый Shp_deal_id %r (InvId=%s)", shp_deal_id_raw, inv_id)
+        log.warning("Робокасса: нечитаемый Shp_deal_id (InvId=%s)", inv_id)
+        return PlainTextResponse("bad request", status_code=400)
+    if not (0 < deal_id <= _MAX_INT64):
+        log.warning("Робокасса: Shp_deal_id вне диапазона (InvId=%s)", inv_id)
         return PlainTextResponse("bad request", status_code=400)
 
     valid = robokassa.verify_result_signature(
@@ -74,12 +134,15 @@ async def robokassa_result(request: Request) -> PlainTextResponse:
         hash_alg=settings.robokassa_hash_alg,
     )
 
-    # Пишем сырое уведомление ДО всякой логики, отдельной транзакцией — даже
-    # подделку: иначе разбирать инцидент будет нечем, и её нельзя потерять из-за
-    # отказа в бизнес-логике ниже. Ключ включает подпись: одинаковые повторные
-    # доставки схлопываются в одну строку, а РАЗНЫЕ попытки по одному и тому же
-    # InvId (например, кто-то подбирает подпись) получают каждая свою — это и
-    # есть повод для тревоги из разд. 7, а не то, что можно потерять молча.
+    # Пишем сырое уведомление ДО бизнес-логики, отдельной транзакцией — даже
+    # подделку с неверной подписью: иначе разбирать попытку подбора будет нечем.
+    # Но только правдоподобную по форме (числа в диапазоне, подпись похожа на
+    # подпись, Shp_deal_id ровно один) — совсем случайный мусор отбивается ещё
+    # раньше и до базы не доходит вообще: это не потеря аудита, а осознанная
+    # защита от заполнения таблицы кем попало (см. разд. 8). Ключ включает
+    # подпись: одинаковые повторные доставки схлопываются в одну строку, а
+    # РАЗНЫЕ попытки по одному и тому же InvId (кто-то подбирает подпись)
+    # получают каждая свою — это и есть повод для тревоги из разд. 7.
     event_id = f"robokassa:{inv_id}:{signature.strip().lower()}"
     async with SessionLocal() as db:
         # Верить deal_id нельзя, не проверив, что такая сделка вообще существует:
@@ -92,15 +155,18 @@ async def robokassa_result(request: Request) -> PlainTextResponse:
                 provider="robokassa",
                 provider_event_id=event_id,
                 event_type="result",
-                payload=params,
+                payload=_sanitize_for_jsonb(params),
                 signature_valid=valid,
             )
         )
         try:
             await db.commit()
-        except IntegrityError:
-            # Уже видели ровно эту доставку раньше — не страшно, это и есть
-            # повторная отправка, пока Робокасса не получит «OK».
+        except (IntegrityError, DBAPIError):
+            # IntegrityError — уже видели ровно эту доставку раньше (не страшно,
+            # это и есть повторная отправка, пока Робокасса не получит «OK»).
+            # DBAPIError — подстраховка на случай значения, прошедшего валидацию
+            # выше, но всё равно не принятого СУБД: запись об уведомлении важнее,
+            # чем падение всего запроса без ответа Робокассе.
             await db.rollback()
 
     if not valid:

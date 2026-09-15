@@ -7,6 +7,7 @@
 на которые он назначен. Чужая сделка для менеджера — 404, а не 403.
 """
 
+import logging
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
@@ -44,6 +45,8 @@ from app.services.money import MoneyError, format_rubles, validate_amount
 from app.services.settings_service import get_all as settings_get_all
 from app.services.settings_service import get_value
 from app.services.worktime import day_bounds, local_zone
+
+log = logging.getLogger("astra.deals")
 
 # Провайдера ещё нет, а кнопок-обманок мы не отдаём.
 # При реализации Робокассы: сообщение клиенту обязано начинаться с deal.intro_text,
@@ -689,6 +692,17 @@ async def confirm_paid_by_provider(
     if deal is None:
         return ProviderResult("wrong_status")
 
+    if deal.payment_method != PaymentMethod.LINK:
+        # Уведомление провайдера может подтвердить оплату только той сделки,
+        # которой мы сами выдавали ссылку Робокассы — иначе подделка (или просто
+        # совпадение id с другим платежом) закрыла бы сделку «по реквизитам»,
+        # которую Робокасса вообще не видела.
+        log.warning(
+            "Робокасса: сделка %s оплачена не по ссылке (%s), провайдер её подтвердить не может",
+            deal.id, deal.payment_method.value,
+        )
+        return ProviderResult("wrong_status")
+
     if deal.status == DealStatus.PAID:
         # Повтор уведомления — норма, а не ошибка (Робокасса ретраит, пока не
         # увидит «OK»). Ничего не меняем, отвечаем так, будто обработали сейчас.
@@ -699,6 +713,22 @@ async def confirm_paid_by_provider(
     # после отправки, а клиент заплатил по старой (see update_deal). Деньги уже
     # у провайдера, сделка не закрыта — молчать логом мало, нужен живой человек.
     if amount_kopecks != deal.total_amount:
+        # Та же защита от спама повторами, что и у «wrong_status» ниже: Робокасса
+        # ретраит уведомление, пока не получит «OK», а несовпадение суммы «OK»
+        # никогда не станет — без этой проверки один и тот же случай заваливал
+        # бы админов уведомлением на каждый повтор.
+        already_notified = await db.scalar(
+            select(
+                exists().where(
+                    Notification.kind == NotificationKind.PAYMENT_MISMATCH,
+                    Notification.entity_type == "deal",
+                    Notification.entity_id == deal.id,
+                )
+            )
+        )
+        if already_notified:
+            return ProviderResult("amount_mismatch")
+
         db.add(
             DealEvent(
                 deal_id=deal.id, actor_id=None, kind=DealEventKind.EDITED,

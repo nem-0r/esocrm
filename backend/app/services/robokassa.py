@@ -14,6 +14,7 @@ JSON, чтобы разъехаться было негде.
 """
 
 import hashlib
+import hmac
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import ROUND_HALF_UP, Decimal
@@ -195,21 +196,42 @@ def verify_result_signature(
     shp_params: dict[str, str] | None = None,
     hash_alg: str = "md5",
 ) -> bool:
-    """Сравнение без учёта регистра: Робокасса в проде шлёт заглавными буквами,
-    в тестовом режиме встречается написание вперемешку."""
+    """Сравнение без учёта регистра (Робокасса в проде шлёт заглавными буквами,
+    в тестовом режиме встречается написание вперемешку) и за постоянное время —
+    обе строки после `.lower()` гарантированно ASCII-hex, `hmac.compare_digest`
+    не упадёт (в отличие от сравнения произвольных non-ASCII строк)."""
     if not provided_signature:
         return False
     expected = sign_result(
         out_sum=out_sum, inv_id=inv_id, password2=password2, shp_params=shp_params, hash_alg=hash_alg
     )
-    return expected.lower() == provided_signature.strip().lower()
+    return hmac.compare_digest(expected.lower(), provided_signature.strip().lower())
+
+
+class InvalidShpParams(ValueError):
+    """Shp-параметр содержит `:`/`=` — символы-разделители самой строки подписи."""
 
 
 def extract_shp_params(params: dict[str, str]) -> dict[str, str]:
     """Пользовательские `Shp_*` из входящего уведомления, регистр ключей как
-    пришёл (важно: подпись зависит от регистра значения ключа, не только имени
-    в нижнем `startswith`)."""
-    return {key: value for key, value in params.items() if key.lower().startswith("shp_")}
+    пришёл (важно: подпись зависит от регистра имени ключа, не только от
+    сравнения в нижнем регистре при поиске `startswith`).
+
+    `:`/`=` в имени или значении — это разделители самой строки подписи
+    (`_append_shp`), они не экранируются. Без этой проверки один параметр вида
+    `Shp_x=a:Shp_y` мог бы дать байт-в-байт ту же подписываемую строку, что и
+    два настоящих параметра `Shp_x=a` и `Shp_y=...` — то есть валидную подпись
+    можно получить на НЕ тот набор пар ключ-значение, который в итоге разберут.
+    Отклоняем целиком, а не отфильтровываем один параметр: раз подделка возможна
+    в принципе, доверять остальным параметрам того же запроса тоже нельзя."""
+    result: dict[str, str] = {}
+    for key, value in params.items():
+        if not key.lower().startswith("shp_"):
+            continue
+        if ":" in key or "=" in key or ":" in value or "=" in value:
+            raise InvalidShpParams(key)
+        result[key] = value
+    return result
 
 
 def parse_out_sum_kopecks(out_sum: str) -> int | None:
