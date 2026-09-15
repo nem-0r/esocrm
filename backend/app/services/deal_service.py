@@ -484,6 +484,19 @@ def link_invoice_text(deal: Deal) -> str:
     return "\n\n".join(parts)
 
 
+# Магазин esoterra-pay общий с ботом Богдана — у бота свои InvId в диапазоне
+# 0..1 900 000 000 (время + id пользователя Telegram + случайность, см. переписку
+# и разбор его кода в docs/11, разд. 8). Сдвигаем свои выше этого потолка, чтобы
+# номера не пересеклись НИКОГДА, даже случайно — это подстраховка на уровне
+# протокола вдобавок к Shp_deal_id, а не замена ему: находим сделку всегда по
+# Shp_deal_id (см. api/v1/payments.py), само по себе число InvId для нас неважно.
+ROBOKASSA_INVID_OFFSET = 2_000_000_000
+
+
+def robokassa_inv_id(deal_id: int) -> int:
+    return ROBOKASSA_INVID_OFFSET + deal_id
+
+
 async def _build_payment_link(db: AsyncSession, deal: Deal) -> str:
     if not settings.robokassa_enabled:
         raise Invalid(LINK_NOT_READY)
@@ -495,7 +508,7 @@ async def _build_payment_link(db: AsyncSession, deal: Deal) -> str:
     return robokassa.build_payment_url(
         merchant_login=settings.robokassa_active_merchant_login,
         password1=settings.robokassa_active_password1,
-        inv_id=deal.id,
+        inv_id=robokassa_inv_id(deal.id),
         out_sum_kopecks=deal.total_amount,
         description=deal.title,
         receipt_items=[
@@ -505,6 +518,8 @@ async def _build_payment_link(db: AsyncSession, deal: Deal) -> str:
         tax=str(all_settings.get("robokassa_tax") or "none"),
         is_test=settings.robokassa_is_test,
         expires_at=deal.expires_at.astimezone(zone) if deal.expires_at else None,
+        hash_alg=settings.robokassa_hash_alg,
+        shp_deal_id=deal.id,
     )
 
 
@@ -521,9 +536,10 @@ async def send_deal(db: AsyncSession, user: User, deal_id: int) -> dict[str, Any
     if deal.payment_method == PaymentMethod.LINK:
         deal.payment_url = await _build_payment_link(db, deal)
         # У ссылки нет отдельного идентификатора платежа до оплаты — Робокасса
-        # не выдаёт его заранее. InvId (наш deal.id) и есть устойчивый ключ,
-        # сохраняем его же, чтобы поле не пустовало и было чем искать в логах.
-        deal.provider_payment_id = str(deal.id)
+        # не выдаёт его заранее. InvId — устойчивый ключ, сохраняем его же (со
+        # сдвигом, как в самой ссылке), чтобы поле не пустовало и было чем
+        # искать в логах Робокассы/бота-посредника.
+        deal.provider_payment_id = str(robokassa_inv_id(deal.id))
         text = link_invoice_text(deal)
     elif deal.requisite_id is not None:
         requisite = await _active_requisite(db, deal.requisite_id)

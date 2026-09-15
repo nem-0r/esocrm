@@ -3,8 +3,11 @@
 Живого магазина Робокассы нет — тестовые пароли из .env настоящие только для
 нашего кода, у Робокассы такого магазина не существует. Поэтому здесь не
 дергаем auth.robokassa.ru, а играем за Робокассу сами: подписываем уведомления
-Паролем #2 точно по формуле из документации (OutSum:InvId:Пароль#2 → MD5) и
-шлём их на свой же ResultURL — так же, как это в проде сделает Робокасса.
+Паролем #2 точно по формуле из документации (OutSum:InvId:Пароль#2[:Shp_...] →
+алгоритм магазина, сейчас SHA256) и шлём их на свой же ResultURL — так же, как
+это в проде сделает бот-посредник (магазин esoterra-pay общий с ботом Богдана,
+см. docs/11-payments-architecture.md, разд. 8: InvId у нас со сдвигом и не равен
+id сделки, настоящий адрес сделки — Shp_deal_id).
 Подпись считаем заново, отдельно от app.services.robokassa: если бы в модуле
 была ошибка в формуле, использование того же кода для проверки её бы не поймало.
 
@@ -17,6 +20,7 @@ import asyncio
 import hashlib
 import io
 import sys
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 from sqlalchemy import text
@@ -48,18 +52,34 @@ def check(name: str, condition: bool, detail: str = "") -> bool:
     return condition
 
 
-def result_signature(out_sum: str, inv_id: int, password2: str) -> str:
+def result_signature(
+    out_sum: str, inv_id: int, password2: str, *, shp_params: dict[str, str] | None = None
+) -> str:
     """Формула ResultURL из документации Робокассы, посчитана независимо
     от app.services.robokassa.sign_result — намеренное дублирование."""
     raw = f"{out_sum}:{inv_id}:{password2}"
-    return hashlib.md5(raw.encode("utf-8")).hexdigest()  # noqa: S324 — формат Робокассы
+    if shp_params:
+        ordered = sorted(shp_params.items(), key=lambda kv: kv[0].lower())
+        raw += "".join(f":{k}={v}" for k, v in ordered)
+    return hashlib.new(settings.robokassa_hash_alg, raw.encode("utf-8")).hexdigest()
 
 
-async def result_notify(client: httpx.AsyncClient, out_sum: str, inv_id: int, signature: str):
-    return await client.post(
-        f"{BASE}/payments/robokassa/result",
-        data={"OutSum": out_sum, "InvId": str(inv_id), "SignatureValue": signature},
-    )
+def inv_id_and_shp_from_url(url: str) -> tuple[int, dict[str, str]]:
+    """Достаём InvId и Shp_* из уже сгенерированной ссылки — так тест сверяется
+    с тем, что реально отправил наш код, а не с формулой сдвига отдельно."""
+    params = parse_qs(urlparse(url).query)
+    inv_id = int(params["InvId"][0])
+    shp = {k: v[0] for k, v in params.items() if k.lower().startswith("shp_")}
+    return inv_id, shp
+
+
+async def result_notify(
+    client: httpx.AsyncClient, out_sum: str, inv_id: int, signature: str, *, shp_params: dict[str, str] | None = None
+):
+    data = {"OutSum": out_sum, "InvId": str(inv_id), "SignatureValue": signature}
+    if shp_params:
+        data.update(shp_params)
+    return await client.post(f"{BASE}/payments/robokassa/result", data=data)
 
 
 async def run() -> int:
@@ -104,7 +124,14 @@ async def run() -> int:
         check(
             "ссылка на оплату сгенерирована", url.startswith("https://auth.robokassa.ru/"), url[:60]
         )
-        check(f"InvId в ссылке — id сделки ({deal['id']})", f"InvId={deal['id']}" in url)
+        inv_id, shp = inv_id_and_shp_from_url(url)
+        check("InvId в ссылке смещён — не равен id сделки напрямую", inv_id != deal["id"], str(inv_id))
+        check(
+            f"Shp_deal_id в ссылке — id сделки ({deal['id']})",
+            shp.get("Shp_deal_id") == str(deal["id"]),
+            str(shp),
+        )
+        check("Shp_source в ссылке — esocrm", shp.get("Shp_source") == "esocrm", str(shp))
         check("OutSum в ссылке — 1500.00", "OutSum=1500.00" in url)
         check("в ссылке передан срок действия (ExpirationDate)", "ExpirationDate=" in url, url[:200])
         messages = (
@@ -126,15 +153,15 @@ async def run() -> int:
         )
 
         print("\nПодделка подписи")
-        forged = await result_notify(c, "1500.00", deal["id"], "0" * 32)
+        forged = await result_notify(c, "1500.00", inv_id, "0" * 32, shp_params=shp)
         check("неверная подпись отклоняется", forged.status_code == 403, forged.text[:80])
         card = (await c.get(f"{BASE}/deals/{deal['id']}")).json()
         check("сделка не тронута подделкой", card["status"] == "awaiting", card["status"])
 
         print("\nПодмена суммы")
         bad_sum = "1.00"
-        sig_bad_sum = result_signature(bad_sum, deal["id"], password2)
-        tampered = await result_notify(c, bad_sum, deal["id"], sig_bad_sum)
+        sig_bad_sum = result_signature(bad_sum, inv_id, password2, shp_params=shp)
+        tampered = await result_notify(c, bad_sum, inv_id, sig_bad_sum, shp_params=shp)
         check(
             "несовпадение суммы отклоняется, даже с верной подписью на неё",
             tampered.status_code == 409,
@@ -143,12 +170,12 @@ async def run() -> int:
         card = (await c.get(f"{BASE}/deals/{deal['id']}")).json()
         check("сделка не тронута подменой суммы", card["status"] == "awaiting", card["status"])
 
-        print("\nВерное уведомление")
-        sig_ok = result_signature("1500.00", deal["id"], password2)
-        paid = await result_notify(c, "1500.00", deal["id"], sig_ok)
+        print("\nВерное уведомление (пересланное ботом-посредником, с Shp_)")
+        sig_ok = result_signature("1500.00", inv_id, password2, shp_params=shp)
+        paid = await result_notify(c, "1500.00", inv_id, sig_ok, shp_params=shp)
         check(
             "верная подпись и сумма подтверждают оплату",
-            paid.status_code == 200 and paid.text == f"OK{deal['id']}",
+            paid.status_code == 200 and paid.text == f"OK{inv_id}",
             f"{paid.status_code} {paid.text[:40]}",
         )
         card = (await c.get(f"{BASE}/deals/{deal['id']}")).json()
@@ -162,10 +189,10 @@ async def run() -> int:
         )
 
         print("\nПовторная доставка того же уведомления")
-        repeat = await result_notify(c, "1500.00", deal["id"], sig_ok)
+        repeat = await result_notify(c, "1500.00", inv_id, sig_ok, shp_params=shp)
         check(
             "повтор отвечает так же, как первая обработка",
-            repeat.status_code == 200 and repeat.text == f"OK{deal['id']}",
+            repeat.status_code == 200 and repeat.text == f"OK{inv_id}",
             f"{repeat.status_code} {repeat.text[:40]}",
         )
         card_after_repeat = (await c.get(f"{BASE}/deals/{deal['id']}")).json()
@@ -176,19 +203,34 @@ async def run() -> int:
         )
 
         print("\nПодделка после успешной оплаты")
-        forged_after = await result_notify(c, "1500.00", deal["id"], "1" * 32)
+        forged_after = await result_notify(c, "1500.00", inv_id, "1" * 32, shp_params=shp)
         check(
             "подделка на уже оплаченную сделку тоже отклоняется",
             forged_after.status_code == 403,
             forged_after.text[:80],
         )
 
-        print("\nНесуществующая сделка")
-        ghost_id = 9_999_999
-        sig_ghost = result_signature("100.00", ghost_id, password2)
-        ghost = await result_notify(c, "100.00", ghost_id, sig_ghost)
+        print("\nСтарая ссылка без Shp_ (до перехода на общий магазин) — обратная совместимость")
+        legacy_deal = await new_link_deal(amount=70000)
+        legacy_inv_id, _legacy_shp = inv_id_and_shp_from_url(legacy_deal.get("payment_url") or "")
+        # У «старой» схемы InvId и был id сделки — подписываем БЕЗ Shp_, как
+        # реальная Робокасса подписала бы уведомление на такую ссылку.
+        sig_legacy = result_signature("700.00", legacy_deal["id"], password2)
+        legacy_paid = await result_notify(c, "700.00", legacy_deal["id"], sig_legacy)
         check(
-            "уведомление на несуществующий InvId не роняет сервер",
+            "уведомление без Shp_ находит сделку по InvId напрямую",
+            legacy_paid.status_code == 200 and legacy_paid.text == f"OK{legacy_deal['id']}",
+            f"{legacy_paid.status_code} {legacy_paid.text[:40]}",
+        )
+        legacy_card = (await c.get(f"{BASE}/deals/{legacy_deal['id']}")).json()
+        check("старая сделка помечена оплаченной", legacy_card["status"] == "paid", legacy_card["status"])
+
+        print("\nНесуществующая сделка")
+        ghost_shp = {"Shp_source": "esocrm", "Shp_deal_id": "9999999"}
+        sig_ghost = result_signature("100.00", 2_009_999_999, password2, shp_params=ghost_shp)
+        ghost = await result_notify(c, "100.00", 2_009_999_999, sig_ghost, shp_params=ghost_shp)
+        check(
+            "уведомление на несуществующую сделку не роняет сервер",
             ghost.status_code == 409,
             f"{ghost.status_code} {ghost.text[:80]}",
         )
@@ -200,8 +242,24 @@ async def run() -> int:
         )
         check("нечисловой InvId — 400, не 500", broken.status_code == 400, str(broken.status_code))
 
+        print("\nНечитаемый Shp_deal_id")
+        broken_shp = await c.post(
+            f"{BASE}/payments/robokassa/result",
+            data={
+                "OutSum": "100.00",
+                "InvId": "123",
+                "SignatureValue": "x",
+                "Shp_source": "esocrm",
+                "Shp_deal_id": "не-число",
+            },
+        )
+        check(
+            "нечисловой Shp_deal_id — 400, не 500", broken_shp.status_code == 400, str(broken_shp.status_code)
+        )
+
         print("\nИстёкшая сделка: ручное подтверждение закрыто, провайдер — нет")
         expired_deal = await new_link_deal(amount=90000)
+        expired_inv_id, expired_shp = inv_id_and_shp_from_url(expired_deal.get("payment_url") or "")
         async with SessionLocal() as db:
             await db.execute(
                 text("update deals set expires_at = now() - interval '1 day' where id = :i"),
@@ -234,11 +292,11 @@ async def run() -> int:
             manual.text[:100],
         )
 
-        sig_expired = result_signature("900.00", expired_deal["id"], password2)
-        provider_paid = await result_notify(c, "900.00", expired_deal["id"], sig_expired)
+        sig_expired = result_signature("900.00", expired_inv_id, password2, shp_params=expired_shp)
+        provider_paid = await result_notify(c, "900.00", expired_inv_id, sig_expired, shp_params=expired_shp)
         check(
             "провайдер подтверждает оплату истёкшей сделки — деньги важнее срока",
-            provider_paid.status_code == 200 and provider_paid.text == f"OK{expired_deal['id']}",
+            provider_paid.status_code == 200 and provider_paid.text == f"OK{expired_inv_id}",
             f"{provider_paid.status_code} {provider_paid.text[:40]}",
         )
         card = (await c.get(f"{BASE}/deals/{expired_deal['id']}")).json()

@@ -176,6 +176,10 @@ class Settings(BaseSettings):
     robokassa_test_merchant_login: str = ""
     robokassa_test_password1: str = ""
     robokassa_test_password2: str = ""
+    # Алгоритм подписи настраивается в личном кабинете магазина, не у нас —
+    # общий магазин esoterra-pay (см. docs/11, разд. 8) использует SHA256,
+    # не дефолтный для Робокассы MD5. Меняйте, только если магазин сменится.
+    robokassa_hash_alg: str = "sha256"
 
     @field_validator("telegram_api_id", mode="before")
     @classmethod

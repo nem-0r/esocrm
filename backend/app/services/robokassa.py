@@ -24,6 +24,14 @@ import orjson
 
 PAYMENT_PAGE = "https://auth.robokassa.ru/Merchant/Index.aspx"
 
+# Магазин esoterra-pay общий с ботом Богдана (docs/11-payments-architecture.md,
+# разд. 8) — Shp_source отмечает наши ссылки, чтобы бот форвардил их уведомления
+# нам, а не пытался найти их в своей базе. Регистр и порядок сверены с уже
+# рабочей формулой в его коде (там ошибка Робокассы №29 на нижнем `shp_`).
+SHP_SOURCE_PARAM = "Shp_source"
+SHP_DEAL_ID_PARAM = "Shp_deal_id"
+SHP_SOURCE_VALUE = "esocrm"
+
 
 def kopecks_to_robokassa(kopecks: int) -> str:
     """8500 копеек → «85.00». Только Decimal: float даёт 84.99999999999999."""
@@ -62,16 +70,36 @@ def _receipt_json_encoded(receipt: dict[str, Any]) -> str:
     return quote(orjson.dumps(receipt).decode("utf-8"), safe="")
 
 
-def sign_link(
-    *, merchant_login: str, out_sum: str, inv_id: int, receipt_encoded: str, password1: str
-) -> str:
-    """`MerchantLogin:OutSum:InvId:Receipt:Пароль#1` → MD5, нижним регистром.
+def _append_shp(raw: str, shp_params: dict[str, str] | None) -> str:
+    """`:Shp_key=value`, отсортированные по имени без учёта регистра — Робокасса
+    требует именно такой порядок в подписи (docs.robokassa.ru/ru/pay-interface).
+    Пусто/None — строка не меняется, это и есть обратная совместимость со
+    ссылками без пользовательских параметров."""
+    if not shp_params:
+        return raw
+    ordered = sorted(shp_params.items(), key=lambda kv: kv[0].lower())
+    return raw + "".join(f":{key}={value}" for key, value in ordered)
 
+
+def sign_link(
+    *,
+    merchant_login: str,
+    out_sum: str,
+    inv_id: int,
+    receipt_encoded: str,
+    password1: str,
+    shp_params: dict[str, str] | None = None,
+    hash_alg: str = "md5",
+) -> str:
+    """`MerchantLogin:OutSum:InvId:Receipt:Пароль#1[:Shp_...]` → нижним регистром.
+
+    Алгоритм — параметром, а не константой: у разных магазинов Робокассы он
+    настраивается в личном кабинете (esoterra-pay использует SHA256, не MD5).
     Робокасса принимает подпись в любом регистре, но сравнение и логи читаются
     ровнее, если у нас всегда один и тот же регистр на выходе.
     """
-    raw = f"{merchant_login}:{out_sum}:{inv_id}:{receipt_encoded}:{password1}"
-    return hashlib.md5(raw.encode("utf-8")).hexdigest()  # noqa: S324 — это формат Робокассы, не наш выбор
+    raw = _append_shp(f"{merchant_login}:{out_sum}:{inv_id}:{receipt_encoded}:{password1}", shp_params)
+    return hashlib.new(hash_alg, raw.encode("utf-8")).hexdigest()  # noqa: S324 — формат Робокассы, не наш выбор
 
 
 def build_payment_url(
@@ -86,6 +114,8 @@ def build_payment_url(
     tax: str,
     is_test: bool,
     expires_at: datetime | None = None,
+    hash_alg: str = "md5",
+    shp_deal_id: int | None = None,
 ) -> str:
     """Собирается на нашей стороне, редиректа через сервер не требует.
 
@@ -97,16 +127,27 @@ def build_payment_url(
     (aware или naive — используется только `strftime`) и НЕ входит в подпись
     (docs.robokassa.ru/ru/pay-interface — ExpirationDate не участвует в формуле
     SignatureValue, в отличие от Receipt).
+
+    `shp_deal_id`, если передан, помечает ссылку как нашу (`Shp_source=esocrm`)
+    для общего магазина esoterra-pay — по нему бот-посредник поймёт, что уведомление
+    нужно переслать нам, а не искать в своей базе (docs/11, разд. 8).
     """
     out_sum = kopecks_to_robokassa(out_sum_kopecks)
     receipt = build_receipt(receipt_items, sno, tax)
     receipt_encoded = _receipt_json_encoded(receipt)
+    shp_params = (
+        {SHP_SOURCE_PARAM: SHP_SOURCE_VALUE, SHP_DEAL_ID_PARAM: str(shp_deal_id)}
+        if shp_deal_id is not None
+        else None
+    )
     signature = sign_link(
         merchant_login=merchant_login,
         out_sum=out_sum,
         inv_id=inv_id,
         receipt_encoded=receipt_encoded,
         password1=password1,
+        shp_params=shp_params,
+        hash_alg=hash_alg,
     )
     # Description ограничена Робокассой; обрезаем с запасом, чтобы не поймать
     # отказ на длинном названии услуги.
@@ -121,28 +162,54 @@ def build_payment_url(
         params["IsTest"] = "1"
     if expires_at is not None:
         params["ExpirationDate"] = expires_at.strftime("%Y-%m-%dT%H:%M")
+    if shp_params:
+        params.update(shp_params)
     # Receipt кодируем сами и подставляем как готовую строку: urlencode закодировал
     # бы уже закодированное значение повторно и сломал бы JSON.
     query = urlencode(params) + f"&Receipt={receipt_encoded}"
     return f"{PAYMENT_PAGE}?{query}"
 
 
-def sign_result(*, out_sum: str, inv_id: int, password2: str) -> str:
-    """`OutSum:InvId:Пароль#2` → MD5. Второй пароль, не первый — на ResultURL
-    подписывает сама Робокасса, а не тот, кто собрал ссылку."""
-    raw = f"{out_sum}:{inv_id}:{password2}"
-    return hashlib.md5(raw.encode("utf-8")).hexdigest()  # noqa: S324 — формат Робокассы
+def sign_result(
+    *,
+    out_sum: str,
+    inv_id: int,
+    password2: str,
+    shp_params: dict[str, str] | None = None,
+    hash_alg: str = "md5",
+) -> str:
+    """`OutSum:InvId:Пароль#2[:Shp_...]`. Второй пароль, не первый — на ResultURL
+    подписывает сама Робокасса, а не тот, кто собрал ссылку. `Shp_`-параметры,
+    если магазин их использует, входят в подпись наравне с остальными полями —
+    без них проверка отклонит подлинное уведомление с такими параметрами."""
+    raw = _append_shp(f"{out_sum}:{inv_id}:{password2}", shp_params)
+    return hashlib.new(hash_alg, raw.encode("utf-8")).hexdigest()  # noqa: S324 — формат Робокассы
 
 
 def verify_result_signature(
-    *, out_sum: str, inv_id: int, provided_signature: str, password2: str
+    *,
+    out_sum: str,
+    inv_id: int,
+    provided_signature: str,
+    password2: str,
+    shp_params: dict[str, str] | None = None,
+    hash_alg: str = "md5",
 ) -> bool:
     """Сравнение без учёта регистра: Робокасса в проде шлёт заглавными буквами,
     в тестовом режиме встречается написание вперемешку."""
     if not provided_signature:
         return False
-    expected = sign_result(out_sum=out_sum, inv_id=inv_id, password2=password2)
+    expected = sign_result(
+        out_sum=out_sum, inv_id=inv_id, password2=password2, shp_params=shp_params, hash_alg=hash_alg
+    )
     return expected.lower() == provided_signature.strip().lower()
+
+
+def extract_shp_params(params: dict[str, str]) -> dict[str, str]:
+    """Пользовательские `Shp_*` из входящего уведомления, регистр ключей как
+    пришёл (важно: подпись зависит от регистра значения ключа, не только имени
+    в нижнем `startswith`)."""
+    return {key: value for key, value in params.items() if key.lower().startswith("shp_")}
 
 
 def parse_out_sum_kopecks(out_sum: str) -> int | None:
