@@ -25,13 +25,17 @@ dependencies = [
   # Картинка QR для входа в Telegram. Рисуем на сервере, чтобы её нельзя было
   # испортить темой оформления или размером экрана; PIL не нужен — только SVG.
   "qrcode>=8.0",
+  # Invoice API Робокассы (app/services/robokassa.py) — единственный способ,
+  # которым магазин esoterra-pay принимает чек 54-ФЗ, требует HTTP-запроса.
+  "httpx>=0.27",
 ]
 
 [project.optional-dependencies]
 dev = [
   "pytest>=8.3",
   "pytest-asyncio>=0.24",
-  "httpx>=0.27",
+  # httpx теперь основная зависимость (см. [project.dependencies]) — тестам
+  # достаточно её же, отдельно здесь дублировать не нужно.
   "ruff>=0.8",
   "mypy>=1.13",
   "faker>=30",

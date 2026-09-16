@@ -1,32 +1,39 @@
-"""Робокасса: сборка ссылки на оплату и проверка уведомлений.
+"""Робокасса: создание счёта, проверка входящих уведомлений.
 
 Формулы сверены с docs/11-payments-architecture.md и официальной документацией
-Робокассы. Функции здесь чистые — принимают логин и пароли параметрами, а не
-читают `settings` сами. Так модуль проверяется тестами без поднятого приложения
-и без прогона через HTTP, а вызывающий код (`deal_service.py`, `api/v1/payments.py`)
-остаётся единственным местом, которое решает, откуда брать секреты.
+Робокассы. Проверка входящих уведомлений (`sign_result`/`verify_result_signature`)
+— чистые функции, принимают пароль параметром, а не читают `settings` сами: так
+модуль проверяется тестами без сети. Создание счёта (`create_invoice`) чистым
+быть не может по своей природе — magазин esoterra-pay не принимает чек по 54-ФЗ
+через классическую ссылку `Merchant/Index.aspx` (код ошибки 29, проверено вживую
+на реальном магазине 2026-09-16 — сама подпись и пароли при этом верны), поэтому
+единственный рабочий способ — Invoice API: подписанный JWT-запрос на сервер
+Робокассы, ответом от которого и является ссылка на оплату. Тем же способом
+создаёт свои счета бот Богдана (docs/11, разд. 8).
 
-Ключевая ловушка, из-за которой стоит держать всё в одном месте: `Receipt` входит
-в строку подписи уже URL-кодированным, ровно в том виде, в котором уйдёт в запросе.
-Закодировать после подписи — значит получить «неверная подпись» и полдня искать
-причину. `build_payment_url` и `sign_link` используют один и тот же кодированный
-JSON, чтобы разъехаться было негде.
+Раз создание ссылки требует сети — тестовый прогон (`tests/verify_robokassa.py`)
+теперь дёргает настоящую Робокассу настоящими паролями каждый раз, когда
+проверяет отправку счёта, и оставляет на реальном магазине esoterra-pay мелкие
+неоплаченные счета-«призраки» (по рублю, никогда не оплаченные, сами истекают).
+Это осознанный компромисс, не случайная утечка: без реального ключа магазин не
+провалидирует подпись, а без сети чек 54-ФЗ этому магазину не передать никак.
 """
 
+import base64
 import hashlib
 import hmac
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
-from urllib.parse import quote, urlencode
 
+import httpx
 import orjson
 
-PAYMENT_PAGE = "https://auth.robokassa.ru/Merchant/Index.aspx"
+INVOICE_API_URL = "https://services.robokassa.ru/InvoiceServiceWebApi/api/CreateInvoice"
 
 # Магазин esoterra-pay общий с ботом Богдана (docs/11-payments-architecture.md,
-# разд. 8) — Shp_source отмечает наши ссылки, чтобы бот форвардил их уведомления
+# разд. 8) — Shp_source отмечает наши счета, чтобы бот форвардил их уведомления
 # нам, а не пытался найти их в своей базе. Регистр и порядок сверены с уже
 # рабочей формулой в его коде (там ошибка Робокассы №29 на нижнем `shp_`).
 SHP_SOURCE_PARAM = "Shp_source"
@@ -60,31 +67,6 @@ class ReceiptItem:
     amount_kopecks: int
 
 
-def build_receipt(items: list[ReceiptItem], sno: str, tax: str) -> dict[str, Any]:
-    """Чек по 54-ФЗ. `sno`/`tax` — из настроек (вопрос к бухгалтеру, не константа)."""
-    return {
-        "sno": sno,
-        "items": [
-            {
-                "name": item.name,
-                "quantity": 1,
-                "sum": float(kopecks_to_robokassa(item.amount_kopecks)),
-                "payment_method": "full_payment",
-                "payment_object": "service",
-                "tax": tax,
-            }
-            for item in items
-        ],
-    }
-
-
-def _receipt_json_encoded(receipt: dict[str, Any]) -> str:
-    """JSON без пробелов, потом URL-кодирование — именно в этом виде он входит
-    и в строку подписи, и в саму ссылку. Ключи не сортируем: Робокасса не требует
-    определённого порядка, а сортировка чужого требования не отменяет."""
-    return quote(orjson.dumps(receipt).decode("utf-8"), safe="")
-
-
 def _append_shp(raw: str, shp_params: dict[str, str] | None) -> str:
     """`:Shp_key=value`, отсортированные по имени без учёта регистра — Робокасса
     требует именно такой порядок в подписи (docs.robokassa.ru/ru/pay-interface).
@@ -96,94 +78,108 @@ def _append_shp(raw: str, shp_params: dict[str, str] | None) -> str:
     return raw + "".join(f":{key}={value}" for key, value in ordered)
 
 
-def sign_link(
+def _b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
+
+
+def _jwt_token(payload: dict[str, Any], *, merchant_login: str, password1: str, hash_alg: str) -> str:
+    """JWT для Invoice API — свой формат Робокассы, не стандартный RFC 7519:
+    `alg` в заголовке — буквально название алгоритма («SHA256»), не «HS256»;
+    секрет — `MerchantLogin:Пароль#1` целиком, не сам пароль (docs.robokassa.ru/
+    ru/invoice-api). Не переиспользует `_digest`: тут HMAC, а не голый хеш."""
+    if hash_alg not in SUPPORTED_HASH_ALGS:
+        raise ValueError(f"Робокасса не поддерживает алгоритм {hash_alg!r} (у неё есть: {sorted(SUPPORTED_HASH_ALGS)})")
+    header_part = _b64url(orjson.dumps({"typ": "JWT", "alg": hash_alg.upper()}))
+    payload_part = _b64url(orjson.dumps(payload))
+    signing_input = f"{header_part}.{payload_part}".encode("utf-8")
+    secret = f"{merchant_login}:{password1}".encode("utf-8")
+    signature = hmac.new(secret, signing_input, hash_alg).digest()
+    return f"{header_part}.{payload_part}.{_b64url(signature)}"
+
+
+class InvoiceApiError(RuntimeError):
+    """Робокасса не создала счёт — сеть, таймаут или отказ с её стороны."""
+
+
+async def create_invoice(
     *,
     merchant_login: str,
-    out_sum: str,
-    inv_id: int,
-    receipt_encoded: str,
     password1: str,
-    shp_params: dict[str, str] | None = None,
     hash_alg: str,
-) -> str:
-    """`MerchantLogin:OutSum:InvId:Receipt:Пароль#1[:Shp_...]` → нижним регистром.
-
-    Алгоритм — обязательным параметром, а не константой и не с дефолтом: у
-    разных магазинов Робокассы он настраивается в личном кабинете (esoterra-pay
-    использует SHA256, не MD5-дефолт Робокассы). Робокасса принимает подпись
-    в любом регистре, но сравнение и логи читаются ровнее, если у нас всегда
-    один и тот же регистр на выходе.
-    """
-    raw = _append_shp(f"{merchant_login}:{out_sum}:{inv_id}:{receipt_encoded}:{password1}", shp_params)
-    return _digest(raw, hash_alg)
-
-
-def build_payment_url(
-    *,
-    merchant_login: str,
-    password1: str,
     inv_id: int,
     out_sum_kopecks: int,
     description: str,
     receipt_items: list[ReceiptItem],
-    sno: str,
     tax: str,
-    is_test: bool,
-    hash_alg: str,
     expires_at: datetime | None = None,
     shp_deal_id: int | None = None,
+    timeout: float = 20.0,
 ) -> str:
-    """Собирается на нашей стороне, редиректа через сервер не требует.
+    """Создаёт счёт через Invoice API, возвращает ссылку на оплату.
 
-    `description` — это поле формата запроса к Робокассе (её лимиты, её страница
-    оплаты), не сообщение клиенту в чате: то сообщение собирает
-    `deal_service.link_invoice_text()` и начинается с `deal.intro_text` (ТЗ п. 4.5).
+    `sno` (система налогообложения) сюда сознательно НЕ передаётся: по
+    документации Робокассы, если поле не указано, используется значение из
+    личного кабинета магазина — надёжнее, чем угадывать значение, которое
+    никто в компании не может подтвердить (см. обсуждение в истории проекта).
 
-    `expires_at`, если передан, обязан быть уже в местном времени организации
-    (aware или naive — используется только `strftime`) и НЕ входит в подпись
-    (docs.robokassa.ru/ru/pay-interface — ExpirationDate не участвует в формуле
-    SignatureValue, в отличие от Receipt).
-
-    `shp_deal_id`, если передан, помечает ссылку как нашу (`Shp_source=esocrm`)
-    для общего магазина esoterra-pay — по нему бот-посредник поймёт, что уведомление
-    нужно переслать нам, а не искать в своей базе (docs/11, разд. 8).
+    `expires_at`, если передан, обязан быть timezone-aware — Invoice API (в
+    отличие от классической ссылки) требует смещение часового пояса в формате
+    ISO 8601, например «2026-12-31T23:59:59+03:00».
     """
-    out_sum = kopecks_to_robokassa(out_sum_kopecks)
-    receipt = build_receipt(receipt_items, sno, tax)
-    receipt_encoded = _receipt_json_encoded(receipt)
-    shp_params = (
-        {SHP_SOURCE_PARAM: SHP_SOURCE_VALUE, SHP_DEAL_ID_PARAM: str(shp_deal_id)}
-        if shp_deal_id is not None
-        else None
-    )
-    signature = sign_link(
-        merchant_login=merchant_login,
-        out_sum=out_sum,
-        inv_id=inv_id,
-        receipt_encoded=receipt_encoded,
-        password1=password1,
-        shp_params=shp_params,
-        hash_alg=hash_alg,
-    )
-    # Description ограничена Робокассой; обрезаем с запасом, чтобы не поймать
-    # отказ на длинном названии услуги.
-    params = {
+    payload: dict[str, Any] = {
         "MerchantLogin": merchant_login,
-        "OutSum": out_sum,
+        "InvoiceType": "OneTime",
+        "Culture": "ru",
         "InvId": inv_id,
+        # Число, не строка: JSON-тело (в отличие от query-параметров классической
+        # ссылки) различает типы — "1.00" строкой Робокасса отклоняет как
+        # «Некорректно составлен запрос», хотя формат-то ровно тот же самый.
+        # Проверено вживую 2026-09-16. kopecks_to_robokassa всё равно оставляем
+        # для округления через Decimal, просто переводим результат в float.
+        "OutSum": float(kopecks_to_robokassa(out_sum_kopecks)),
         "Description": description[:100],
-        "SignatureValue": signature,
+        "InvoiceItems": [
+            {
+                "Name": item.name,
+                "Quantity": 1,
+                "Cost": float(kopecks_to_robokassa(item.amount_kopecks)),
+                "Tax": tax,
+                "PaymentMethod": "full_payment",
+                "PaymentObject": "service",
+            }
+            for item in receipt_items
+        ],
+        "IsWithoutFreeSale": True,
     }
-    if is_test:
-        params["IsTest"] = "1"
     if expires_at is not None:
-        params["ExpirationDate"] = expires_at.strftime("%Y-%m-%dT%H:%M")
-    if shp_params:
-        params.update(shp_params)
-    # Receipt кодируем сами и подставляем как готовую строку: urlencode закодировал
-    # бы уже закодированное значение повторно и сломал бы JSON.
-    query = urlencode(params) + f"&Receipt={receipt_encoded}"
-    return f"{PAYMENT_PAGE}?{query}"
+        payload["ExpirationDate"] = expires_at.isoformat(timespec="seconds")
+    if shp_deal_id is not None:
+        payload["UserFields"] = {SHP_SOURCE_PARAM: SHP_SOURCE_VALUE, SHP_DEAL_ID_PARAM: str(shp_deal_id)}
+
+    token = _jwt_token(payload, merchant_login=merchant_login, password1=password1, hash_alg=hash_alg)
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(
+                INVOICE_API_URL,
+                content=orjson.dumps(token),
+                headers={"Content-Type": "application/json", "Accept": "application/json"},
+            )
+    except httpx.HTTPError as exc:
+        raise InvoiceApiError(f"Робокасса недоступна: {exc}") from exc
+
+    try:
+        data = resp.json()
+    except ValueError as exc:
+        raise InvoiceApiError(f"Робокасса вернула не-JSON ответ [{resp.status_code}]: {resp.text[:300]}") from exc
+
+    if not isinstance(data, dict) or not data.get("isSuccess"):
+        raise InvoiceApiError(f"Робокасса отклонила счёт [{resp.status_code}]: {data}")
+
+    url = data.get("url")
+    if not url:
+        raise InvoiceApiError(f"Робокасса не вернула ссылку на оплату: {data}")
+    return str(url)
 
 
 def sign_result(

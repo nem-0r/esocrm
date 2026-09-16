@@ -15,14 +15,7 @@ import {
   Switch,
 } from '@/shared/ui'
 import { ProfileScreen } from '@/features/profile/components/ProfileScreen'
-import {
-  ROBOKASSA_SNO_OPTIONS,
-  ROBOKASSA_TAX_OPTIONS,
-  TIMEZONES,
-  WEEK_DAYS,
-  errorMessage,
-  fieldErrors,
-} from '@/features/profile/lib'
+import { TIMEZONES, WEEK_DAYS, errorMessage, fieldErrors } from '@/features/profile/lib'
 import { useSettings, useUpdateSettings } from '@/features/profile/queries'
 
 export function SettingsPage() {
@@ -179,24 +172,6 @@ export function SettingsPage() {
               max={90}
               value={form.deal_link_ttl_days}
               onChange={(event) => set('deal_link_ttl_days', Number(event.target.value))}
-            />
-          </Field>
-          <Field
-            label="Система налогообложения"
-            hint="Для чека 54-ФЗ в ссылке Робокассы — уточните у бухгалтера"
-            error={fields.robokassa_sno}
-          >
-            <Select
-              value={form.robokassa_sno}
-              onChange={(value) => set('robokassa_sno', value)}
-              options={ROBOKASSA_SNO_OPTIONS}
-            />
-          </Field>
-          <Field label="Ставка НДС" error={fields.robokassa_tax}>
-            <Select
-              value={form.robokassa_tax}
-              onChange={(value) => set('robokassa_tax', value)}
-              options={ROBOKASSA_TAX_OPTIONS}
             />
           </Field>
         </Card>

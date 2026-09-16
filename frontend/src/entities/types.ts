@@ -415,9 +415,6 @@ export interface Settings {
   /** Формат ГГГГ-ММ-ДД. Реально управляет подтяжкой истории — приоритетнее
    *  history_sync_days на бэкенде, поэтому в форме только это поле. */
   history_sync_from: string
-  /** Для чека 54-ФЗ в ссылке Робокассы — ответ бухгалтера, не константа. */
-  robokassa_sno: string
-  robokassa_tax: string
 }
 
 export interface CursorPage<T> {

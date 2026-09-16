@@ -121,7 +121,7 @@ async def robokassa_result(request: Request) -> PlainTextResponse:
         return PlainTextResponse("bad request", status_code=400)
 
     # Магазин esoterra-pay общий с ботом Богдана — InvId у нас со сдвигом
-    # (deal_service.robokassa_inv_id) и не равен id сделки напрямую. Настоящий
+    # (deal_service.fresh_robokassa_inv_id) и не равен id сделки напрямую. Настоящий
     # адрес сделки — Shp_deal_id, который мы сами кладём в ссылку и который
     # Робокасса возвращает нетронутым. Робокасса никогда не работала с этим
     # магазином до перехода на общую схему — «старых» ссылок без Shp_deal_id

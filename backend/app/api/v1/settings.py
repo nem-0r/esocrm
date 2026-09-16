@@ -12,11 +12,6 @@ from app.core.errors import Invalid
 from app.services import settings_service
 from app.services.audit import log_event
 
-# Значения — из документации Робокассы на формат чека по 54-ФЗ. Другие строки
-# JSON-чек не примет, и Робокасса молча отклонит уведомление об оплате.
-ROBOKASSA_SNO_VALUES = {"osn", "usn_income", "usn_income_outcome", "envd", "esn", "patent"}
-ROBOKASSA_TAX_VALUES = {"none", "vat0", "vat10", "vat20", "vat110", "vat120"}
-
 router = APIRouter()
 
 
@@ -33,8 +28,6 @@ class SettingsPatch(BaseModel):
     timezone: str | None = None
     history_sync_days: int | None = None
     history_sync_from: str | None = None
-    robokassa_sno: str | None = None
-    robokassa_tax: str | None = None
 
 
 def _check_minutes(name: str, value: int, label: str) -> None:
@@ -91,16 +84,6 @@ def validate(payload: dict[str, Any]) -> dict[str, Any]:
         raise Invalid(
             "Глубина импорта: допустимо от 1 до 3650 дней",
             field="history_sync_days",
-        )
-    if (value := payload.get("robokassa_sno")) is not None and value not in ROBOKASSA_SNO_VALUES:
-        raise Invalid(
-            "Система налогообложения: недопустимое значение",
-            field="robokassa_sno",
-        )
-    if (value := payload.get("robokassa_tax")) is not None and value not in ROBOKASSA_TAX_VALUES:
-        raise Invalid(
-            "Ставка НДС: недопустимое значение",
-            field="robokassa_tax",
         )
     return payload
 

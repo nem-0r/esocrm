@@ -1,15 +1,26 @@
-"""Проверка приёма оплат через Робокассу: ссылка, подпись, сумма, повтор.
+"""Проверка приёма оплат через Робокассу: счёт, подпись, сумма, повтор.
 
-Живого магазина Робокассы нет — тестовые пароли из .env настоящие только для
-нашего кода, у Робокассы такого магазина не существует. Поэтому здесь не
-дергаем auth.robokassa.ru, а играем за Робокассу сами: подписываем уведомления
-Паролем #2 точно по формуле из документации (OutSum:InvId:Пароль#2[:Shp_...] →
-алгоритм магазина, сейчас SHA256) и шлём их на свой же ResultURL — так же, как
-это в проде сделает бот-посредник (магазин esoterra-pay общий с ботом Богдана,
-см. docs/11-payments-architecture.md, разд. 8: InvId у нас со сдвигом и не равен
-id сделки, настоящий адрес сделки — Shp_deal_id).
-Подпись считаем заново, отдельно от app.services.robokassa: если бы в модуле
-была ошибка в формуле, использование того же кода для проверки её бы не поймало.
+Магазин esoterra-pay общий с ботом Богдана (docs/11-payments-architecture.md,
+разд. 8): InvId у нас со сдвигом и не равен id сделки, настоящий адрес сделки —
+Shp_deal_id. Shp_deal_id детерминирован (это и есть id сделки), а InvId —
+НЕТ: Робокасса требует уникальный номер НАВСЕГДА, повтор (пересборка счёта,
+пересоздание демо-данных) она отклоняет как «Заказ с таким Id уже существует»
+— поэтому InvId свежий на каждый вызов (deal_service.fresh_robokassa_inv_id),
+и тест читает реально использованное значение из базы (provider_payment_id),
+а не вычисляет и не вытаскивает из ссылки — начиная с перехода на Invoice API
+ссылка (`auth.robokassa.ru/merchant/Invoice/<guid>`) параметров не несёт вовсе,
+это просто редирект-адрес созданного на сервере счёта.
+
+ВАЖНО — раньше этот скрипт не трогал сеть вообще («играл за Робокассу сам»).
+Теперь каждый `new_link_deal()` — это НАСТОЯЩИЙ запрос к настоящей Робокассе
+(созданию счёта нужен рабочий JWT, подписанный реальными паролями): нужны
+настоящие ROBOKASSA_PASSWORD1/2 в .env, и на реальном магазине esoterra-pay
+после каждого прогона остаются мелкие неоплаченные счета-«призраки» (сами
+истекают, деньги не списываются). Это осознанный компромисс: магазин не
+принимает чек по 54-ФЗ через старую офлайн-сборку ссылки (код ошибки 29,
+проверено вживую), а без сети чек этому магазину не передать никак.
+Проверку самого ResultURL (подпись, Shp_-параметры) это не касается — она
+по-прежнему играет за Робокассу сама, никуда не стучится.
 
 Скрипт меняет демо-данные (создаёт сделки). После него положено выполнить `make seed`.
 
@@ -20,7 +31,6 @@ import asyncio
 import hashlib
 import io
 import sys
-from urllib.parse import parse_qs, urlparse
 
 import httpx
 from sqlalchemy import text
@@ -64,13 +74,17 @@ def result_signature(
     return hashlib.new(settings.robokassa_hash_alg, raw.encode("utf-8")).hexdigest()
 
 
-def inv_id_and_shp_from_url(url: str) -> tuple[int, dict[str, str]]:
-    """Достаём InvId и Shp_* из уже сгенерированной ссылки — так тест сверяется
-    с тем, что реально отправил наш код, а не с формулой сдвига отдельно."""
-    params = parse_qs(urlparse(url).query)
-    inv_id = int(params["InvId"][0])
-    shp = {k: v[0] for k, v in params.items() if k.lower().startswith("shp_")}
-    return inv_id, shp
+async def inv_id_and_shp_for_deal(deal_id: int) -> tuple[int, dict[str, str]]:
+    """InvId — свежий на каждый вызов (не функция от id), читаем реально
+    сохранённый provider_payment_id из базы. Shp_deal_id — просто id сделки,
+    его вычислять не нужно."""
+    async with SessionLocal() as db:
+        row = (
+            await db.execute(
+                text("select provider_payment_id from deals where id = :i"), {"i": deal_id}
+            )
+        ).first()
+    return int(row[0]), {"Shp_source": "esocrm", "Shp_deal_id": str(deal_id)}
 
 
 async def result_notify(
@@ -118,22 +132,16 @@ async def run() -> int:
             check("счёт со ссылкой отправляется", sent.status_code == 200, sent.text[:120])
             return sent.json()
 
-        print("Ссылка на оплату")
+        print("Счёт на оплату (Invoice API, реальный запрос к Робокассе)")
         deal = await new_link_deal()
         url = deal.get("payment_url") or ""
         check(
-            "ссылка на оплату сгенерирована", url.startswith("https://auth.robokassa.ru/"), url[:60]
+            "ссылка на оплату — настоящий счёт Invoice API",
+            url.startswith("https://auth.robokassa.ru/merchant/Invoice/"),
+            url[:80],
         )
-        inv_id, shp = inv_id_and_shp_from_url(url)
-        check("InvId в ссылке смещён — не равен id сделки напрямую", inv_id != deal["id"], str(inv_id))
-        check(
-            f"Shp_deal_id в ссылке — id сделки ({deal['id']})",
-            shp.get("Shp_deal_id") == str(deal["id"]),
-            str(shp),
-        )
-        check("Shp_source в ссылке — esocrm", shp.get("Shp_source") == "esocrm", str(shp))
-        check("OutSum в ссылке — 1500.00", "OutSum=1500.00" in url)
-        check("в ссылке передан срок действия (ExpirationDate)", "ExpirationDate=" in url, url[:200])
+        inv_id, shp = await inv_id_and_shp_for_deal(deal["id"])
+        check("InvId смещён — не равен id сделки напрямую", inv_id != deal["id"], str(inv_id))
         messages = (
             await c.get(f"{BASE}/conversations/{conversation_id}/messages", params={"limit": 5})
         ).json()
@@ -189,7 +197,7 @@ async def run() -> int:
 
         print("\nNUL-байт в ИМЕНИ параметра — запись в журнал не должна теряться")
         nul_key_deal = await new_link_deal(amount=40000)
-        nul_inv_id, nul_shp = inv_id_and_shp_from_url(nul_key_deal.get("payment_url") or "")
+        nul_inv_id, nul_shp = await inv_id_and_shp_for_deal(nul_key_deal["id"])
         sig_nul = "0" * 64  # заведомо неверная, но по формату — не важно, что случится дальше
         event_id_nul = f"robokassa:{nul_inv_id}:{sig_nul.lower()}"
         nul_resp = await c.post(
@@ -266,7 +274,7 @@ async def run() -> int:
         # ссылок без Shp_deal_id в реальности никогда не было, отсутствие этого
         # параметра теперь однозначно подделка/ошибка, а не легитимный legacy-путь.
         no_shp_deal = await new_link_deal(amount=70000)
-        no_shp_inv_id, _ = inv_id_and_shp_from_url(no_shp_deal.get("payment_url") or "")
+        no_shp_inv_id, _ = await inv_id_and_shp_for_deal(no_shp_deal["id"])
         sig_no_shp = result_signature("700.00", no_shp_inv_id, password2)
         no_shp_resp = await result_notify(c, "700.00", no_shp_inv_id, sig_no_shp)
         check(
@@ -279,7 +287,7 @@ async def run() -> int:
 
         print("\nПодмена набора Shp_-параметров через «:»/«=» в имени — отклоняется")
         inj_deal = await new_link_deal(amount=55000)
-        inj_inv_id, inj_shp = inv_id_and_shp_from_url(inj_deal.get("payment_url") or "")
+        inj_inv_id, inj_shp = await inv_id_and_shp_for_deal(inj_deal["id"])
         # То же самое итоговое множество пар после сортировки, что и настоящее
         # (Shp_deal_id=<id>, Shp_source=esocrm), но с двоеточием в имени ключа —
         # раньше это давало байт-в-байт ту же строку для подписи на другой набор.
@@ -296,7 +304,7 @@ async def run() -> int:
 
         print("\nДва Shp_deal_id в разном регистре имени — отклоняется, не берём первый попавшийся")
         dup_deal = await new_link_deal(amount=45000)
-        dup_inv_id, dup_shp = inv_id_and_shp_from_url(dup_deal.get("payment_url") or "")
+        dup_inv_id, dup_shp = await inv_id_and_shp_for_deal(dup_deal["id"])
         dup_shp_bad = {**dup_shp, "SHP_DEAL_ID": "9999999"}
         sig_dup = result_signature("450.00", dup_inv_id, password2, shp_params=dup_shp_bad)
         dup_resp = await result_notify(c, "450.00", dup_inv_id, sig_dup, shp_params=dup_shp_bad)
@@ -402,7 +410,7 @@ async def run() -> int:
 
         print("\nИстёкшая сделка: ручное подтверждение закрыто, провайдер — нет")
         expired_deal = await new_link_deal(amount=90000)
-        expired_inv_id, expired_shp = inv_id_and_shp_from_url(expired_deal.get("payment_url") or "")
+        expired_inv_id, expired_shp = await inv_id_and_shp_for_deal(expired_deal["id"])
         async with SessionLocal() as db:
             await db.execute(
                 text("update deals set expires_at = now() - interval '1 day' where id = :i"),

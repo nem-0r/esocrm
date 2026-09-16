@@ -91,24 +91,6 @@ export const TIMEZONES: { value: string; label: string }[] = [
   { value: 'Asia/Kamchatka', label: 'Камчатка, UTC+12' },
 ]
 
-/** Система налогообложения для чека 54-ФЗ — значения из формата Робокассы. */
-export const ROBOKASSA_SNO_OPTIONS: { value: string; label: string }[] = [
-  { value: 'osn', label: 'ОСН — общая' },
-  { value: 'usn_income', label: 'УСН — доходы' },
-  { value: 'usn_income_outcome', label: 'УСН — доходы минус расходы' },
-  { value: 'esn', label: 'ЕСН' },
-  { value: 'patent', label: 'Патент' },
-]
-
-export const ROBOKASSA_TAX_OPTIONS: { value: string; label: string }[] = [
-  { value: 'none', label: 'Без НДС' },
-  { value: 'vat0', label: 'НДС 0%' },
-  { value: 'vat10', label: 'НДС 10%' },
-  { value: 'vat20', label: 'НДС 20%' },
-  { value: 'vat110', label: 'НДС 10/110' },
-  { value: 'vat120', label: 'НДС 20/120' },
-]
-
 /** «Более 5 минут отсутствия — офлайн» (бизнес-правила, §7). */
 const ONLINE_WINDOW_MS = 5 * 60_000
 
