@@ -192,6 +192,29 @@ class Settings(BaseSettings):
         """
         return 0 if isinstance(value, str) and not value.strip() else value
 
+    @field_validator("robokassa_hash_alg", mode="before")
+    @classmethod
+    def _normalize_hash_alg(cls, value: object) -> object:
+        """Опечатка вроде `sha-256` иначе всплыла бы не при старте, а на первом
+        реальном уведомлении об оплате — `hashlib.new()` упал бы ДО записи в
+        журнал (app/api/v1/payments.py), и сама попытка оплаты потерялась бы
+        без следа. Проверяем сразу, а не ждём первый реальный платёж.
+
+        Список продублирован из `app.services.robokassa.SUPPORTED_HASH_ALGS`
+        нарочно, не импортом: `config.py` — низкоуровневый модуль, его не
+        должны читать сервисы уровнем выше (см. докстринг robokassa.py).
+        """
+        supported = frozenset({"md5", "sha1", "sha256", "sha512"})
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized not in supported:
+                raise ValueError(
+                    f"ROBOKASSA_HASH_ALG={value!r} не поддерживается Робокассой "
+                    f"(допустимо: {sorted(supported)})"
+                )
+            return normalized
+        return value
+
     @model_validator(mode="after")
     def _refuse_unsafe_production(self) -> "Settings":
         """В продакшене не даём стартовать на настройках для разработки.
@@ -275,6 +298,23 @@ class Settings(BaseSettings):
             self.robokassa_test_password2,
             "Задайте тестовый пароль #2 — он отдельный от боевого.",
         )
+
+        if self.robokassa_enabled and self.robokassa_is_test and not (
+            self.robokassa_test_password1 and self.robokassa_test_password2
+        ):
+            # Это не «предупреждение ниже» (там просто напоминание, что режим
+            # тестовый) — это гарантированно нерабочая комбинация: без тестовых
+            # паролей robokassa_active_password1/2 тихо откатятся на боевые
+            # (см. свойства ниже), ссылка соберётся и уйдёт клиенту, но Робокасса
+            # подписывает тестовый режим ОТДЕЛЬНЫМ паролем и отклонит её как
+            # «неверная подпись». Без блокировки об этом узнали бы только от
+            # недоумевающего клиента, который не смог заплатить.
+            problems.append(
+                "ROBOKASSA_IS_TEST=true, но ROBOKASSA_TEST_PASSWORD1/2 не заданы. "
+                "Любая ссылка на оплату в этом состоянии гарантированно не примет "
+                "деньги — Робокасса подписывает тестовый режим отдельным паролем. "
+                "Заполните оба тестовых пароля или поставьте ROBOKASSA_IS_TEST=false."
+            )
 
         if self.robokassa_enabled and self.robokassa_is_test:
             # Не блокируем запуск: проверка ключей ДО реального включения (ровно

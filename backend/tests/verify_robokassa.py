@@ -170,6 +170,57 @@ async def run() -> int:
         card = (await c.get(f"{BASE}/deals/{deal['id']}")).json()
         check("сделка не тронута подменой суммы", card["status"] == "awaiting", card["status"])
 
+        print("\nВторое, ОТЛИЧНОЕ несовпадение суммы по той же сделке — тоже должно попасть в журнал")
+        bad_sum_2 = "2.00"
+        sig_bad_sum_2 = result_signature(bad_sum_2, inv_id, password2, shp_params=shp)
+        tampered_2 = await result_notify(c, bad_sum_2, inv_id, sig_bad_sum_2, shp_params=shp)
+        check(
+            "второе несовпадение тоже отклоняется",
+            tampered_2.status_code == 409,
+            tampered_2.text[:80],
+        )
+        card_after_second_mismatch = (await c.get(f"{BASE}/deals/{deal['id']}")).json()
+        mismatch_events = [e for e in card_after_second_mismatch["events"] if e["kind"] == "edited"]
+        check(
+            "оба несовпадения (разные суммы) записаны в журнал сделки, не только первое",
+            len(mismatch_events) >= 2,
+            f"событий edited: {len(mismatch_events)}",
+        )
+
+        print("\nNUL-байт в ИМЕНИ параметра — запись в журнал не должна теряться")
+        nul_key_deal = await new_link_deal(amount=40000)
+        nul_inv_id, nul_shp = inv_id_and_shp_from_url(nul_key_deal.get("payment_url") or "")
+        sig_nul = "0" * 64  # заведомо неверная, но по формату — не важно, что случится дальше
+        event_id_nul = f"robokassa:{nul_inv_id}:{sig_nul.lower()}"
+        nul_resp = await c.post(
+            f"{BASE}/payments/robokassa/result",
+            data={
+                "OutSum": "400.00",
+                "InvId": str(nul_inv_id),
+                "SignatureValue": sig_nul,
+                "Shp_source": "esocrm",
+                "Shp_deal_id": str(nul_shp.get("Shp_deal_id")),
+                "junk\x00key": "value\x00with\x00nul",
+            },
+        )
+        check(
+            "запрос с NUL-байтом в имени параметра отклоняется как неверная подпись, не 500",
+            nul_resp.status_code == 403,
+            f"{nul_resp.status_code} {nul_resp.text[:80]}",
+        )
+        async with SessionLocal() as db:
+            row = (
+                await db.execute(
+                    text("select id from payment_events where provider_event_id = :e"),
+                    {"e": event_id_nul},
+                )
+            ).first()
+        check(
+            "запись об уведомлении с NUL в имени параметра всё равно попала в журнал",
+            row is not None,
+            "строка не найдена в payment_events — аудит потерян",
+        )
+
         print("\nВерное уведомление (пересланное ботом-посредником, с Shp_)")
         sig_ok = result_signature("1500.00", inv_id, password2, shp_params=shp)
         paid = await result_notify(c, "1500.00", inv_id, sig_ok, shp_params=shp)

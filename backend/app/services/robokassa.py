@@ -33,6 +33,20 @@ SHP_SOURCE_PARAM = "Shp_source"
 SHP_DEAL_ID_PARAM = "Shp_deal_id"
 SHP_SOURCE_VALUE = "esocrm"
 
+# Алгоритмы, которые Робокасса реально предлагает выбрать в личном кабинете
+# магазина (Настройки → Технические настройки → Алгоритм расчёта хэша).
+SUPPORTED_HASH_ALGS = frozenset({"md5", "sha1", "sha256", "sha512"})
+
+
+def _digest(raw: str, hash_alg: str) -> str:
+    """Без дефолта нарочно: молчаливый откат на MD5 при забытом параметре
+    выглядел бы как «неверная подпись» на реальном магазине esoterra-pay
+    (он настроен на SHA256) — искать причину пришлось бы вслепую, вместо
+    явной ошибки прямо здесь."""
+    if hash_alg not in SUPPORTED_HASH_ALGS:
+        raise ValueError(f"Робокасса не поддерживает алгоритм {hash_alg!r} (у неё есть: {sorted(SUPPORTED_HASH_ALGS)})")
+    return hashlib.new(hash_alg, raw.encode("utf-8")).hexdigest()  # noqa: S324 — формат Робокассы, не наш выбор
+
 
 def kopecks_to_robokassa(kopecks: int) -> str:
     """8500 копеек → «85.00». Только Decimal: float даёт 84.99999999999999."""
@@ -90,17 +104,18 @@ def sign_link(
     receipt_encoded: str,
     password1: str,
     shp_params: dict[str, str] | None = None,
-    hash_alg: str = "md5",
+    hash_alg: str,
 ) -> str:
     """`MerchantLogin:OutSum:InvId:Receipt:Пароль#1[:Shp_...]` → нижним регистром.
 
-    Алгоритм — параметром, а не константой: у разных магазинов Робокассы он
-    настраивается в личном кабинете (esoterra-pay использует SHA256, не MD5).
-    Робокасса принимает подпись в любом регистре, но сравнение и логи читаются
-    ровнее, если у нас всегда один и тот же регистр на выходе.
+    Алгоритм — обязательным параметром, а не константой и не с дефолтом: у
+    разных магазинов Робокассы он настраивается в личном кабинете (esoterra-pay
+    использует SHA256, не MD5-дефолт Робокассы). Робокасса принимает подпись
+    в любом регистре, но сравнение и логи читаются ровнее, если у нас всегда
+    один и тот же регистр на выходе.
     """
     raw = _append_shp(f"{merchant_login}:{out_sum}:{inv_id}:{receipt_encoded}:{password1}", shp_params)
-    return hashlib.new(hash_alg, raw.encode("utf-8")).hexdigest()  # noqa: S324 — формат Робокассы, не наш выбор
+    return _digest(raw, hash_alg)
 
 
 def build_payment_url(
@@ -114,8 +129,8 @@ def build_payment_url(
     sno: str,
     tax: str,
     is_test: bool,
+    hash_alg: str,
     expires_at: datetime | None = None,
-    hash_alg: str = "md5",
     shp_deal_id: int | None = None,
 ) -> str:
     """Собирается на нашей стороне, редиректа через сервер не требует.
@@ -176,15 +191,15 @@ def sign_result(
     out_sum: str,
     inv_id: int,
     password2: str,
+    hash_alg: str,
     shp_params: dict[str, str] | None = None,
-    hash_alg: str = "md5",
 ) -> str:
     """`OutSum:InvId:Пароль#2[:Shp_...]`. Второй пароль, не первый — на ResultURL
     подписывает сама Робокасса, а не тот, кто собрал ссылку. `Shp_`-параметры,
     если магазин их использует, входят в подпись наравне с остальными полями —
     без них проверка отклонит подлинное уведомление с такими параметрами."""
     raw = _append_shp(f"{out_sum}:{inv_id}:{password2}", shp_params)
-    return hashlib.new(hash_alg, raw.encode("utf-8")).hexdigest()  # noqa: S324 — формат Робокассы
+    return _digest(raw, hash_alg)
 
 
 def verify_result_signature(
@@ -193,8 +208,8 @@ def verify_result_signature(
     inv_id: int,
     provided_signature: str,
     password2: str,
+    hash_alg: str,
     shp_params: dict[str, str] | None = None,
-    hash_alg: str = "md5",
 ) -> bool:
     """Сравнение без учёта регистра (Робокасса в проде шлёт заглавными буквами,
     в тестовом режиме встречается написание вперемешку) и за постоянное время —

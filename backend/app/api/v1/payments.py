@@ -7,7 +7,7 @@
 чтобы поддельный запрос падал на понятной проверке, а не на исключении СУБД
 (из-за которого запись о самой подделке потерялась бы, см. ниже).
 
-Устройство разобрано в docs/11-payments-architecture.md, разд. 4 и 8. Коротко: сумма
+Устройство разобрано в docs/11-payments-architecture.md, разд. 8. Коротко: сумма
 и статус решаются только своей базой, из запроса берётся лишь Shp_deal_id и подпись;
 повтор уведомления — норма, а не ошибка, и должен приводить к тому же ответу,
 что и первая обработка.
@@ -36,6 +36,7 @@ _MAX_INT64 = 2**63 - 1
 # Обычный hex-дайджест (SHA256 — 64 символа, SHA512 — 128) плюс запас на будущее.
 _MAX_SIGNATURE_LEN = 128
 _HEX_CHARS = frozenset("0123456789abcdefABCDEF")
+_ASCII_DIGITS = frozenset("0123456789")
 
 
 def _get_ci(params: dict[str, str], name: str) -> str:
@@ -46,10 +47,27 @@ def _get_ci(params: dict[str, str], name: str) -> str:
     return next((v for k, v in params.items() if k.lower() == lname), "")
 
 
+def _parse_ascii_id(raw: str) -> int | None:
+    """Строго ASCII-цифры, без `+`/`_`/юникод-цифр, которые молча принимает
+    обычный `int()` (`int("١٢٣")==123`, `int("1_000")==1000`) — Робокасса
+    подписывает уведомление ИМЕННО той строкой, что прислала, а бот-посредник
+    сверяет подпись по сырой строке (не канонизирует), не по нашему `int()`.
+    Разница в допустимости форматов — это разные проверки на двух концах
+    одной цепочки, а значит потенциальное расхождение "бот принял — мы нет"
+    или наоборот. Дешевле сузить приём до того, что Робокасса реально шлёт."""
+    if not raw or not set(raw) <= _ASCII_DIGITS:
+        return None
+    value = int(raw)
+    return value if 0 < value <= _MAX_INT64 else None
+
+
 def _sanitize_for_jsonb(params: dict[str, str]) -> dict[str, str]:
-    """NUL-байт ломает вставку в JSONB (Postgres 22P05) — вырезаем его, а не
-    отклоняем весь запрос: это поле только для аудита, а не для логики ниже."""
-    return {k: v.replace("\x00", "") for k, v in params.items()}
+    """NUL-байт ломает вставку в JSONB (Postgres 22P05) — вырезаем его из
+    ключей И значений, а не отклоняем весь запрос: это поле только для аудита,
+    а не для логики ниже. Чистить только значения (как было раньше) было
+    ошибкой: NUL в ИМЕНИ параметра ломает INSERT ровно так же, просто на
+    другой части строки — и раньше это тихо проглатывалось общим except."""
+    return {k.replace("\x00", ""): v.replace("\x00", "") for k, v in params.items()}
 
 
 @router.post(
@@ -70,22 +88,28 @@ async def robokassa_result(request: Request) -> PlainTextResponse:
         log.warning("Робокасса: уведомление получено, но приём по ссылке не настроен")
         return PlainTextResponse("robokassa disabled", status_code=503)
 
-    # Робокасса шлёт form-urlencoded; на всякий случай подстраховываемся
-    # query-параметрами — по документации бывают оба варианта в разных кабинетах.
+    # Робокасса шлёт только application/x-www-form-urlencoded. Принимать ещё и
+    # multipart незачем — это спуллинг во временные файлы на непроверенном
+    # публичном вводе, а UploadFile в JSONB-аудите превращается в бесполезную
+    # строку вида "UploadFile(filename=...)". Отбиваем раньше, чем FastAPI
+    # начнёт разбирать тело.
+    content_type = (request.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+    if content_type and content_type not in ("application/x-www-form-urlencoded", ""):
+        log.warning("Робокасса: неожиданный Content-Type %r", content_type[:60])
+        return PlainTextResponse("bad request", status_code=400)
+
+    # На всякий случай подстраховываемся query-параметрами — по документации
+    # бывают оба варианта в разных кабинетах.
     form = await request.form()
     params: dict[str, str] = {**request.query_params, **{k: str(v) for k, v in form.items()}}
 
     out_sum = _get_ci(params, "OutSum")
     inv_id_raw = _get_ci(params, "InvId")
-    signature = _get_ci(params, "SignatureValue")
+    signature = _get_ci(params, "SignatureValue").strip()
 
-    try:
-        inv_id = int(inv_id_raw)
-    except ValueError:
+    inv_id = _parse_ascii_id(inv_id_raw)
+    if inv_id is None:
         log.warning("Робокасса: нечитаемый InvId %r", inv_id_raw[:50])
-        return PlainTextResponse("bad request", status_code=400)
-    if not (0 < inv_id <= _MAX_INT64):
-        log.warning("Робокасса: InvId вне диапазона: %r", inv_id_raw[:50])
         return PlainTextResponse("bad request", status_code=400)
 
     if not signature or len(signature) > _MAX_SIGNATURE_LEN or not set(signature) <= _HEX_CHARS:
@@ -111,18 +135,17 @@ async def robokassa_result(request: Request) -> PlainTextResponse:
 
     shp_deal_id_values = {v for k, v in shp_params.items() if k.lower() == "shp_deal_id"}
     if len(shp_deal_id_values) != 1:
-        # Ровно один, не «хотя бы один»: два разных значения под одним именем в
-        # разном регистре означали бы, что кто-то целится в конкретную сделку,
-        # спрятав дубль — надёжнее отказать, чем гадать, какое значение верное.
+        # Ровно один, не «хотя бы один»: два РАЗНЫХ значения под одним именем
+        # в разном регистре означали бы, что кто-то целится в конкретную
+        # сделку, спрятав дубль — надёжнее отказать, чем гадать, какое верное.
+        # Одинаковые значения под разным регистром имени (Shp_deal_id и
+        # SHP_DEAL_ID с одним и тем же числом) сюда не попадают — множество
+        # схлопывает равные значения, это не тот случай, что выше.
         log.warning("Робокасса: не ровно один Shp_deal_id (InvId=%s, получено %s)", inv_id, len(shp_deal_id_values))
         return PlainTextResponse("bad request", status_code=400)
-    try:
-        deal_id = int(next(iter(shp_deal_id_values)))
-    except ValueError:
+    deal_id = _parse_ascii_id(next(iter(shp_deal_id_values)))
+    if deal_id is None:
         log.warning("Робокасса: нечитаемый Shp_deal_id (InvId=%s)", inv_id)
-        return PlainTextResponse("bad request", status_code=400)
-    if not (0 < deal_id <= _MAX_INT64):
-        log.warning("Робокасса: Shp_deal_id вне диапазона (InvId=%s)", inv_id)
         return PlainTextResponse("bad request", status_code=400)
 
     valid = robokassa.verify_result_signature(
@@ -138,12 +161,9 @@ async def robokassa_result(request: Request) -> PlainTextResponse:
     # подделку с неверной подписью: иначе разбирать попытку подбора будет нечем.
     # Но только правдоподобную по форме (числа в диапазоне, подпись похожа на
     # подпись, Shp_deal_id ровно один) — совсем случайный мусор отбивается ещё
-    # раньше и до базы не доходит вообще: это не потеря аудита, а осознанная
-    # защита от заполнения таблицы кем попало (см. разд. 8). Ключ включает
-    # подпись: одинаковые повторные доставки схлопываются в одну строку, а
-    # РАЗНЫЕ попытки по одному и тому же InvId (кто-то подбирает подпись)
-    # получают каждая свою — это и есть повод для тревоги из разд. 7.
-    event_id = f"robokassa:{inv_id}:{signature.strip().lower()}"
+    # раньше и до базы не доходит вообще: осознанная защита от заполнения
+    # таблицы кем попало, а не потеря аудита.
+    event_id = f"robokassa:{inv_id}:{signature.lower()}"
     async with SessionLocal() as db:
         # Верить deal_id нельзя, не проверив, что такая сделка вообще существует:
         # иначе вставка упадёт на внешнем ключе, и запись о самом уведомлении
@@ -161,25 +181,29 @@ async def robokassa_result(request: Request) -> PlainTextResponse:
         )
         try:
             await db.commit()
-        except (IntegrityError, DBAPIError):
-            # IntegrityError — уже видели ровно эту доставку раньше (не страшно,
-            # это и есть повторная отправка, пока Робокасса не получит «OK»).
-            # DBAPIError — подстраховка на случай значения, прошедшего валидацию
-            # выше, но всё равно не принятого СУБД: запись об уведомлении важнее,
-            # чем падение всего запроса без ответа Робокассе.
+        except IntegrityError:
+            # Уже видели ровно эту доставку раньше — не страшно, это и есть
+            # повторная отправка, пока Робокасса не получит «OK».
+            await db.rollback()
+        except DBAPIError:
+            # Значение прошло валидацию выше, но СУБД всё равно отказала —
+            # неожиданно, и молчать нельзя: раньше этот случай ловился вместе
+            # с IntegrityError и терялся без единой строки в логе, хотя именно
+            # тут аудит-запись о попытке не создалась.
+            log.exception("Робокасса: не удалось записать PaymentEvent (InvId=%s, deal_id=%s)", inv_id, deal_id)
             await db.rollback()
 
     if not valid:
         log.warning("Робокасса: неверная подпись для InvId=%s (deal_id=%s)", inv_id, deal_id)
         return PlainTextResponse("bad sign", status_code=403)
 
-    expected_kopecks = robokassa.parse_out_sum_kopecks(out_sum)
-    if expected_kopecks is None:
+    received_kopecks = robokassa.parse_out_sum_kopecks(out_sum)
+    if received_kopecks is None:
         return PlainTextResponse("bad request", status_code=400)
 
     async with SessionLocal() as db:
         result = await deal_service.confirm_paid_by_provider(
-            db, deal_id, expected_kopecks, provider_payment_id=str(inv_id)
+            db, deal_id, received_kopecks, provider_payment_id=str(inv_id)
         )
         await db.execute(
             update(PaymentEvent)

@@ -713,22 +713,12 @@ async def confirm_paid_by_provider(
     # после отправки, а клиент заплатил по старой (see update_deal). Деньги уже
     # у провайдера, сделка не закрыта — молчать логом мало, нужен живой человек.
     if amount_kopecks != deal.total_amount:
-        # Та же защита от спама повторами, что и у «wrong_status» ниже: Робокасса
-        # ретраит уведомление, пока не получит «OK», а несовпадение суммы «OK»
-        # никогда не станет — без этой проверки один и тот же случай заваливал
-        # бы админов уведомлением на каждый повтор.
-        already_notified = await db.scalar(
-            select(
-                exists().where(
-                    Notification.kind == NotificationKind.PAYMENT_MISMATCH,
-                    Notification.entity_type == "deal",
-                    Notification.entity_id == deal.id,
-                )
-            )
-        )
-        if already_notified:
-            return ProviderResult("amount_mismatch")
-
+        # В журнал сделки — всегда, независимо от того, уведомим ли админов
+        # повторно ниже: это единственный способ увидеть, что по сделке было
+        # НЕСКОЛЬКО разных несовпадений (например, сделку правили дважды, и
+        # клиент дважды платил по устаревшим ссылкам с разными суммами) —
+        # раньше вторая и последующие попытки не попадали в журнал вообще,
+        # если хоть одно несовпадение по этой сделке уже было.
         db.add(
             DealEvent(
                 deal_id=deal.id, actor_id=None, kind=DealEventKind.EDITED,
@@ -742,6 +732,27 @@ async def confirm_paid_by_provider(
                 },
             )
         )
+
+        # Защита от спама повторами: Робокасса ретраит уведомление, пока не
+        # получит «OK», а несовпадение суммы «OK» никогда не станет. Дедуп —
+        # по паре (сделка, ИМЕННО ЭТА полученная сумма), не по одной сделке:
+        # иначе второе, отличное от первого несовпадение (другая устаревшая
+        # ссылка, другая сумма) тоже проглатывалось бы молча, хотя это новый,
+        # ещё не увиденный человеком случай.
+        already_notified = await db.scalar(
+            select(
+                exists().where(
+                    Notification.kind == NotificationKind.PAYMENT_MISMATCH,
+                    Notification.entity_type == "deal",
+                    Notification.entity_id == deal.id,
+                    Notification.payload["amount_received"].astext == str(amount_kopecks),
+                )
+            )
+        )
+        if already_notified:
+            await db.commit()
+            return ProviderResult("amount_mismatch")
+
         admins = await db.execute(
             select(User.id).where(User.role == UserRole.ADMIN, User.is_active.is_(True))
         )
