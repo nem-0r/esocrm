@@ -121,6 +121,23 @@ async def sql_sales(
     return int(row.s), int(row.c)
 
 
+async def sql_sales_by_role(db: Any, lo: datetime, hi: datetime, role: str) -> tuple[int, int]:
+    """Продажи только тех, у кого сейчас указанная роль — независимый расчёт для
+    таблицы «По менеджерам» (docs/03-business-rules.md §10, 2026-09-17: руководитель
+    в этот разрез не входит, даже если сам провёл оплату)."""
+    row = (
+        await db.execute(
+            text(
+                "select coalesce(sum(d.total_amount),0) s, count(*) c from deals d "
+                "join users u on u.id = d.sold_by_id "
+                "where d.status='paid' and d.paid_at >= :lo and d.paid_at < :hi and u.role = :role"
+            ),
+            {"lo": lo, "hi": hi, "role": role},
+        )
+    ).one()
+    return int(row.s), int(row.c)
+
+
 async def sql_active(db: Any, lo: datetime, hi: datetime) -> int:
     return int(
         (
@@ -346,9 +363,21 @@ async def check_managers(
     numbers_are_sane(f"менеджеры · {title}", rows)
 
     lo, hi = bounds(since, until)
-    amount, count = await sql_sales(db, lo, hi)
-    check(f"{title}: сумма по менеджерам = общая", amount, sum(r["sales_amount"] for r in rows))
-    check(f"{title}: продаж по менеджерам = всего", count, sum(r["sales_count"] for r in rows))
+    # Разрез — только менеджеры (docs/03-business-rules.md §10, 2026-09-17): продажа,
+    # проведённая руководителем, остаётся в общей сумме сверху, но не красит ничью
+    # строку в этой таблице. Поэтому сверяем не с общей суммой, а с суммой продаж
+    # именно тех, у кого сейчас роль «менеджер».
+    managers_amount, managers_count = await sql_sales_by_role(db, lo, hi, "manager")
+    check(
+        f"{title}: сумма по менеджерам = сумма продаж менеджеров",
+        managers_amount,
+        sum(r["sales_amount"] for r in rows),
+    )
+    check(
+        f"{title}: продаж по менеджерам = число продаж менеджеров",
+        managers_count,
+        sum(r["sales_count"] for r in rows),
+    )
 
     for row in rows:
         expected_amount, expected_count = await sql_sales(db, lo, hi, row["user"]["id"])
@@ -360,7 +389,6 @@ async def check_managers(
         check(f"{title}: продаж · {row['user']['full_name']}", expected_count, row["sales_count"])
 
     # Продавец мог быть кем угодно — руководителем, отключённым сотрудником.
-    # Если его строки в разрезе нет, деньги есть в итоге и ни у кого в разбивке.
     sellers = {
         int(uid)
         for (uid,) in (
@@ -373,10 +401,32 @@ async def check_managers(
             )
         ).all()
     }
+    manager_sellers = {
+        int(uid)
+        for (uid,) in (
+            await db.execute(
+                text(
+                    "select distinct d.sold_by_id from deals d join users u on u.id = d.sold_by_id "
+                    "where d.status='paid' and d.paid_at >= :lo and d.paid_at < :hi "
+                    "and u.role = 'manager'"
+                ),
+                {"lo": lo, "hi": hi},
+            )
+        ).all()
+    }
+    row_ids = {r["user"]["id"] for r in rows}
+    # Если продавец-менеджер потерял строку — деньги есть в итоге и ни у кого в разбивке.
     check(
-        f"{title}: в разрезе есть все, кому засчитаны продажи",
+        f"{title}: в разрезе есть все менеджеры, кому засчитаны продажи",
         [],
-        sorted(sellers - {r["user"]["id"] for r in rows}),
+        sorted(manager_sellers - row_ids),
+    )
+    # А вот продавец не с ролью «менеджер» (руководитель) строки иметь не должен,
+    # даже если продавал — это таблица скорости и нагрузки менеджеров, не касса.
+    check(
+        f"{title}: продавцы не в роли менеджера в разрезе не участвуют",
+        [],
+        sorted((sellers - manager_sellers) & row_ids),
     )
 
 
@@ -440,7 +490,11 @@ async def check_money_roundtrip(api: httpx.AsyncClient, db: Any, admin_id: int) 
     """Копейки не теряются нигде: ни в сделке, ни в отчёте, ни в подписи.
 
     Заодно это единственный способ проверить продажу, засчитанную руководителю:
-    в демо-данных все оплаты числятся за менеджерами.
+    в демо-данных все оплаты числятся за менеджерами. Ровно поэтому же здесь
+    проверяется и обратное (docs/03-business-rules.md §10, 2026-09-17): деньги
+    руководителя доходят до общей кассы (сводка, плитки, график, его личная
+    карточка), но не создают и не наполняют его строку в «Разрезе по менеджерам» —
+    это таблица скорости и нагрузки менеджеров, не касса.
     """
     print("\nКопейки: сделка на 1 234,56 ₽ от руководителя")
     kopecks = 123_456
@@ -560,8 +614,23 @@ async def check_money_roundtrip(api: httpx.AsyncClient, db: Any, admin_id: int) 
         )
 
         after = await snapshot()
+        # «По менеджерам» — рейтинг менеджеров: продажа руководителя туда не идёт,
+        # ни общей суммой, ни отдельной строкой (§10, 2026-09-17).
+        excluded_from_manager_breakdown = {"разрез по менеджерам", "строка руководителя"}
         for name, value in after.items():
+            if name in excluded_from_manager_breakdown:
+                continue
             check(f"копейки дошли до «{name}»", before[name] + kopecks, value)
+        check(
+            "разрез по менеджерам не меняется от продажи руководителя",
+            before["разрез по менеджерам"],
+            after["разрез по менеджерам"],
+        )
+        check(
+            "руководитель не появляется строкой в разрезе по менеджерам",
+            0,
+            after["строка руководителя"],
+        )
 
         month_stats = (
             await api.get(f"{BASE}/stats/overview", params={**month, "user_id": admin_id})
@@ -618,6 +687,121 @@ async def check_money_roundtrip(api: httpx.AsyncClient, db: Any, admin_id: int) 
             )
         await db.commit()
         print("  · тестовая сделка удалена, демо-данные восстановлены")
+
+
+async def check_admin_excluded_from_response_time(api: httpx.AsyncClient, db: Any) -> None:
+    """Диалог, который сейчас числится за руководителем, не красит среднее время
+    ответа (docs/03-business-rules.md §10, 2026-09-17).
+
+    Входящее от клиента в API не подставить — оно приходит через шлюз, а не REST,
+    поэтому пара сообщений вставляется в базу напрямую и убирается за собой.
+    Год выбран заведомо пустым, чтобы ни с чем реальным не пересечься.
+    """
+    print("\nОтвет руководителя не красит среднее время ответа")
+    year = datetime.now(DEFAULT_TZ).year + 3
+    period = {"date_from": date(year, 1, 1).isoformat(), "date_to": date(year, 12, 31).isoformat()}
+    lo = datetime(year, 6, 15, 12, 0, tzinfo=UTC)
+    hi = lo + timedelta(seconds=42)
+
+    admin_id = int(
+        (
+            await db.execute(text("select id from users where role='admin' order by id limit 1"))
+        ).scalar_one()
+    )
+    manager_id = int(
+        (
+            await db.execute(
+                text(
+                    "select id from users where role='manager' and deleted_at is null "
+                    "order by id limit 1"
+                )
+            )
+        ).scalar_one()
+    )
+    # Диалог обязан заканчиваться исходящим — иначе наше синтетическое входящее
+    # не будет «началом ожидания» (правило «подряд идущие входящие — одно ожидание»).
+    conv_id = int(
+        (
+            await db.execute(
+                text(
+                    "select c.id from conversations c "
+                    "join telegram_accounts a on a.id = c.account_id "
+                    "where a.deleted_at is null and c.responsible_id is not null and ("
+                    "  select m.direction from messages m where m.conversation_id = c.id "
+                    "  and m.deleted_at is null order by m.created_at desc, m.id desc limit 1"
+                    ") = 'out' order by c.id limit 1"
+                )
+            )
+        ).scalar_one()
+    )
+    original_responsible = (
+        await db.execute(
+            text("select responsible_id from conversations where id = :cid"), {"cid": conv_id}
+        )
+    ).scalar_one()
+
+    in_id = await db.scalar(
+        text(
+            "insert into messages (conversation_id, direction, author_kind, kind, text, "
+            "is_internal, status, created_at) "
+            "values (:cid, 'in', 'client', 'text', 'проверка исключения руководителя', "
+            "false, 'sent', :ts) returning id"
+        ),
+        {"cid": conv_id, "ts": lo},
+    )
+    out_id = await db.scalar(
+        text(
+            "insert into messages (conversation_id, direction, author_kind, author_id, kind, "
+            "text, is_internal, status, created_at) "
+            "values (:cid, 'out', 'manager', :uid, 'text', 'ответ', false, 'sent', :ts) "
+            "returning id"
+        ),
+        {"cid": conv_id, "uid": admin_id, "ts": hi},
+    )
+
+    try:
+        await db.execute(
+            text("update conversations set responsible_id = :uid where id = :cid"),
+            {"uid": admin_id, "cid": conv_id},
+        )
+        await db.commit()
+
+        as_admin = (await api.get(f"{BASE}/stats/overview", params=period)).json()
+        check(
+            "диалог за руководителем: время ответа не считается",
+            None,
+            as_admin["avg_response_seconds"],
+        )
+        managers_rows = (await api.get(f"{BASE}/stats/managers", params=period)).json()
+        check(
+            "диалог за руководителем: его нет в разрезе по менеджерам",
+            None,
+            next((r for r in managers_rows if r["user"]["id"] == admin_id), None),
+        )
+
+        await db.execute(
+            text("update conversations set responsible_id = :uid where id = :cid"),
+            {"uid": manager_id, "cid": conv_id},
+        )
+        await db.commit()
+
+        as_manager = (await api.get(f"{BASE}/stats/overview", params=period)).json()
+        close_enough(
+            "тот же диалог за менеджером: время ответа считается",
+            42.0,
+            as_manager["avg_response_seconds"],
+            1,
+        )
+    finally:
+        await db.execute(
+            text("delete from messages where id in (:a, :b)"), {"a": in_id, "b": out_id}
+        )
+        await db.execute(
+            text("update conversations set responsible_id = :orig where id = :cid"),
+            {"orig": original_responsible, "cid": conv_id},
+        )
+        await db.commit()
+        print("  · тестовые сообщения удалены, ответственный диалога восстановлен")
 
 
 async def main() -> int:  # noqa: PLR0915
@@ -802,6 +986,7 @@ async def main() -> int:  # noqa: PLR0915
             )
 
         await check_money_roundtrip(api, db, admin_id)
+        await check_admin_excluded_from_response_time(api, db)
 
         print("\nРабочие часы влияют на метрики, а не только на настройку")
         # Две независимые реализации одного расчёта: функция в базе и код на Python.

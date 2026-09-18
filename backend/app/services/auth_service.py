@@ -209,6 +209,8 @@ async def update_me(
     current_token: str,
     *,
     accepting_leads: bool | None,
+    full_name: str | None,
+    phone: str | None,
     current_password: str | None,
     new_password: str | None,
 ) -> User:
@@ -219,6 +221,14 @@ async def update_me(
         before["accepting_leads"] = user.accepting_leads
         user.accepting_leads = accepting_leads
         after["accepting_leads"] = accepting_leads
+
+    if full_name is not None and full_name != user.full_name:
+        before["full_name"], user.full_name = user.full_name, full_name
+        after["full_name"] = user.full_name
+
+    if phone is not None and phone != user.phone:
+        before["phone"], user.phone = user.phone, phone
+        after["phone"] = user.phone
 
     password_changed = False
     if new_password:

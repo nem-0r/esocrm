@@ -80,6 +80,8 @@ async def update_me(
         user,
         token,
         accepting_leads=payload.accepting_leads,
+        full_name=payload.full_name,
+        phone=payload.phone,
         current_password=payload.current_password,
         new_password=payload.new_password,
     )

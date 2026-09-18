@@ -35,6 +35,8 @@ function unwrap<T>(payload: List<T>): T[] {
 
 export interface UpdateMeInput {
   accepting_leads?: boolean
+  full_name?: string
+  phone?: string | null
   current_password?: string
   new_password?: string
 }

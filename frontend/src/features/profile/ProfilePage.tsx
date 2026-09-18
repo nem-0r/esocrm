@@ -1,4 +1,4 @@
-import { AlertTriangle, Bell, ChevronDown, ChevronRight, ChevronUp, KeyRound, Landmark, LogOut, Settings as SettingsIcon, Smartphone, Users } from 'lucide-react'
+import { AlertTriangle, Bell, ChevronDown, ChevronRight, ChevronUp, KeyRound, Landmark, LogOut, Pencil, Settings as SettingsIcon, Smartphone, Users } from 'lucide-react'
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
 
@@ -20,6 +20,7 @@ import {
   Switch,
 } from '@/shared/ui'
 import { NavRow, ProfileScreen } from '@/features/profile/components/ProfileScreen'
+import { EditProfileSheet } from '@/features/profile/components/EditProfileSheet'
 import { PasswordSheet } from '@/features/profile/components/PasswordSheet'
 import { ROLE_LABEL, STATUS_LABEL, STATUS_TONE, errorMessage } from '@/features/profile/lib'
 import {
@@ -36,6 +37,7 @@ export function ProfilePage() {
   const { logout, isAdmin } = useAuth()
   const updateMe = useUpdateMe()
   const [passwordOpen, setPasswordOpen] = useState(false)
+  const [editOpen, setEditOpen] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   return (
@@ -47,12 +49,20 @@ export function ProfilePage() {
             <div className="flex min-w-0 flex-1 flex-col gap-0.5">
               <span className="truncate text-base font-semibold text-ink">{me.full_name}</span>
               <span className="truncate text-xs text-ink-muted">{me.email}</span>
+              {me.phone && <span className="truncate text-xs text-ink-muted">{me.phone}</span>}
               {/* ТЗ Б.1: с какого момента человек работает. */}
               <span className="mt-1 flex flex-wrap items-center gap-1.5 text-micro text-ink-faint">
                 <Dot tone="success" />в сети · {ROLE_LABEL[me.role]} · работает с{' '}
                 {dateFull(me.works_since)}
               </span>
             </div>
+            <button
+              onClick={() => setEditOpen(true)}
+              className="flex size-8 shrink-0 items-center justify-center rounded-md text-ink-muted transition-colors hover:bg-surface-raised hover:text-ink"
+              aria-label="Изменить имя и телефон"
+            >
+              <Pencil className="size-4" aria-hidden />
+            </button>
           </div>
 
           <div className="border-t border-line pt-3">
@@ -89,6 +99,7 @@ export function ProfilePage() {
         <NotificationsBlock />
       </div>
 
+      <EditProfileSheet me={me} open={editOpen} onOpenChange={setEditOpen} />
       <PasswordSheet open={passwordOpen} onOpenChange={setPasswordOpen} />
     </ProfileScreen>
   )

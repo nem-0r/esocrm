@@ -102,6 +102,27 @@ def _account_clause(scope: Scope, prefix: str = "c") -> str:
     return f" and {prefix}.account_id = any(:account_ids)" + own
 
 
+def _exclude_admin_clause(scope: Scope, prefix: str = "c") -> str:
+    """Свой ответ руководителя не должен красить среднюю скорость менеджеров.
+
+    Руководитель иногда подстраховывает менеджера и отвечает клиенту сам — тогда
+    диалог достаётся ему («кто первый ответил, тот и ведёт»). Раньше такой ответ
+    попадал в общее среднее время ответа наравне с ответами менеджеров. Правило
+    зафиксировано docs/03-business-rules.md §10 (2026-09-17): среднее время ответа —
+    показатель скорости менеджеров, руководитель в него не входит.
+
+    Действует только на агрегате «по всем» (scope.account_ids is None) — общий
+    показатель и разбивка по менеджерам. У личного отчёта конкретного человека
+    (свой профиль, карточка сотрудника) диалоги и так уже отфильтрованы по его id.
+    """
+    if scope.account_ids is not None:
+        return ""
+    return (
+        f" and not exists (select 1 from users ru where ru.id = {prefix}.responsible_id"
+        " and ru.role = 'admin')"
+    )
+
+
 def _params(scope: Scope, start: datetime, end: datetime) -> dict[str, Any]:
     params: dict[str, Any] = {"start": start, "end": end, "paid": DealStatus.PAID.value}
     if scope.seller_ids is not None:
@@ -168,6 +189,7 @@ async def _avg_response_seconds(
             where m.deleted_at is null and m.is_internal = false
         """
         + _account_clause(scope)
+        + _exclude_admin_clause(scope)
         + """
         )
         select avg(ELAPSED)::numeric as avg_seconds
@@ -385,16 +407,13 @@ async def managers(
             where m.created_at >= :start and m.created_at < :end and m.deleted_at is null
             group by 1
         ) active on active.uid = u.id
-        -- Не только роль «менеджер»: руководитель тоже продаёт и подтверждает оплаты.
-        -- Если его строку скрыть, сумма разреза перестанет сходиться с общей —
-        -- деньги будут в итоге и ни у кого в разбивке.
-        where u.deleted_at is null
-          and (
-            u.role = 'manager'
-            or sales.uid is not null
-            or awaiting.uid is not null
-            or active.uid is not null
-          )
+        -- Только менеджеры: это таблица их скорости и нагрузки, а не общей кассы.
+        -- Руководитель сюда не входит, даже если сам закрыл продажу или подстраховал
+        -- чат (docs/03-business-rules.md §10, 2026-09-17) — его деньги по-прежнему
+        -- видны в общей сумме продаж наверху, просто не приписаны ни одному менеджеру.
+        -- Сумма строк поэтому может быть меньше общей цифры — так же, как и с
+        -- «чатов в работе» (см. пояснение в интерфейсе).
+        where u.deleted_at is null and u.role = 'manager'
         order by sales_amount desc, u.full_name
         """
     )

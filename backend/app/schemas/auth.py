@@ -38,8 +38,17 @@ class AcceptInviteIn(ApiModel):
 
 class MeUpdateIn(ApiModel):
     accepting_leads: bool | None = None
+    full_name: str | None = None
+    phone: str | None = None
     current_password: str | None = None
     new_password: str | None = None
+
+    @field_validator("full_name")
+    @classmethod
+    def _full_name(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("Укажите имя")
+        return value.strip() if value is not None else value
 
     @field_validator("new_password")
     @classmethod
