@@ -25,6 +25,7 @@ from app.models import (
     OutboxStatus,
     User,
 )
+from app.models.enums import message_kind_for
 from app.realtime.events import conversation_audience, emit
 from app.schemas.common import CursorPage
 from app.schemas.message import (
@@ -32,6 +33,7 @@ from app.schemas.message import (
     AttachmentOut,
     MessageAuthor,
     MessageCreate,
+    MessageMeta,
     MessageOut,
     attachment_url,
 )
@@ -43,21 +45,49 @@ MAX_LIMIT = 100
 # Столько же разрешает сам Telegram — дальше правка отклонится и там.
 EDIT_WINDOW = timedelta(hours=48)
 
-# По типу файла выбирается вид сообщения: в списке чатов вместо пустоты
-# будет «Фото» или «Файл», а шлюз знает, чем отправлять.
-_MIME_KINDS: list[tuple[str, MessageKind]] = [
-    ("image/", MessageKind.PHOTO),
-    ("video/", MessageKind.VIDEO),
-    ("audio/", MessageKind.VOICE),
+# Вложения, заведённые до появления `attachments.kind`, различаются по типу файла.
+_MIME_ATTACHMENT_KIND: list[tuple[str, str]] = [
+    ("image/", "photo"),
+    ("video/", "video"),
+    ("audio/", "audio"),
 ]
 
 
-def _kind_for(attachment: Attachment) -> MessageKind:
+def attachment_kind(attachment: Attachment) -> str:
+    if attachment.kind:
+        return attachment.kind
     mime = attachment.mime_type or ""
-    for prefix, kind in _MIME_KINDS:
+    for prefix, kind in _MIME_ATTACHMENT_KIND:
         if mime.startswith(prefix):
             return kind
-    return MessageKind.DOCUMENT
+    return "document"
+
+
+def _kind_for(attachment: Attachment) -> MessageKind:
+    return message_kind_for(attachment_kind(attachment))
+
+
+def attachment_out(att: Attachment) -> AttachmentOut:
+    extra = att.meta or {}
+    url = attachment_url(att.id)
+    return AttachmentOut(
+        id=att.id,
+        file_name=att.file_name,
+        mime_type=att.mime_type,
+        size_bytes=att.size_bytes,
+        url=url,
+        width=att.width,
+        height=att.height,
+        duration_sec=att.duration_sec,
+        kind=attachment_kind(att),
+        status=att.status or "ready",
+        waveform=list(att.waveform) if att.waveform else None,
+        thumb_url=f"{url}?variant=thumb" if att.thumb_key else None,
+        title=extra.get("title"),
+        performer=extra.get("performer"),
+        emoji=extra.get("emoji"),
+        error=extra.get("error"),
+    )
 
 
 def to_out(message: Message, attachments: list[Attachment] | None = None) -> MessageOut:
@@ -84,19 +114,11 @@ def to_out(message: Message, attachments: list[Attachment] | None = None) -> Mes
         edited_at=message.edited_at,
         reply_to_tg_id=message.reply_to_tg_id,
         attachments=[
-            AttachmentOut(
-                id=att.id,
-                file_name=att.file_name,
-                mime_type=att.mime_type,
-                size_bytes=att.size_bytes,
-                url=attachment_url(att.id),
-                width=att.width,
-                height=att.height,
-                duration_sec=att.duration_sec,
-            )
+            attachment_out(att)
             for att in (message.attachments if attachments is None else attachments)
             if att.deleted_at is None
         ],
+        meta=MessageMeta.model_validate(message.meta) if message.meta else None,
     )
 
 
@@ -163,6 +185,30 @@ async def _bind_attachments(
     return [found[att_id] for att_id in ids]
 
 
+async def mark_replied(
+    db: AsyncSession, conversation: Conversation, author: User, now: datetime
+) -> None:
+    """Клиенту ответили из CRM (сообщением или пересылкой): таймер ожидания
+    останавливается, ничейный чат закрепляется за ответившим."""
+    conversation.last_message_at = now
+    conversation.last_manager_message_at = now
+    # Ответ дан — таймер ожидания останавливается.
+    conversation.awaiting_reply_since = None
+    # Блокировка строки перед проверкой: без неё два менеджера, ответившие
+    # в один и тот же ничейный чат почти одновременно, оба проходят
+    # проверку «ответственного нет», и один тихо перетирает захват
+    # другого — тот, кто реально ответил первым, теряет свой же чат.
+    current_responsible = await db.scalar(
+        select(Conversation.responsible_id)
+        .where(Conversation.id == conversation.id)
+        .with_for_update()
+    )
+    if current_responsible is None:
+        # Кто первый ответил, тот и ведёт.
+        conversation.responsible_id = author.id
+        conversation.responsible_since = now
+
+
 async def send_outgoing(
     db: AsyncSession,
     *,
@@ -217,22 +263,7 @@ async def send_outgoing(
 
     conversation.last_message_at = now
     if not is_internal:
-        conversation.last_manager_message_at = now
-        # Ответ дан — таймер ожидания останавливается.
-        conversation.awaiting_reply_since = None
-        # Блокировка строки перед проверкой: без неё два менеджера, ответившие
-        # в один и тот же ничейный чат почти одновременно, оба проходят
-        # проверку «ответственного нет», и один тихо перетирает захват
-        # другого — тот, кто реально ответил первым, теряет свой же чат.
-        current_responsible = await db.scalar(
-            select(Conversation.responsible_id)
-            .where(Conversation.id == conversation.id)
-            .with_for_update()
-        )
-        if current_responsible is None:
-            # Кто первый ответил, тот и ведёт.
-            conversation.responsible_id = author.id
-            conversation.responsible_since = now
+        await mark_replied(db, conversation, author, now)
 
     await log_event(
         db,

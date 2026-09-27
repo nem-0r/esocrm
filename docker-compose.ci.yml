@@ -1,0 +1,116 @@
+# Тестовый стенд: ровно те образы, что уедут на продакшен, но с демо-данными,
+# без Telegram, без Робокассы и без nginx с сертификатами.
+#
+# Используется и в GitHub Actions (.github/workflows/ci.yml), и локально —
+# `make ci`. Имя проекта своё: тома и сети не пересекаются ни с контуром
+# разработки (`astra-crm`), ни с продакшеном (`astra-crm-prod`) — прогон
+# тестов никогда не трогает рабочие локальные данные.
+#
+# Образы:
+#   BACKEND_IMAGE / WEB_IMAGE и IMAGE_TAG — какие проверять. Без них
+#   собираются локально из текущих исходников (`make ci` так и делает).
+name: astra-ci
+
+x-backend: &backend
+  image: ${BACKEND_IMAGE:-astra-backend}:${IMAGE_TAG:-ci}
+  build:
+    context: ./backend
+    dockerfile: Dockerfile
+    target: prod
+  env_file: [deploy/ci.env]
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: astra
+      POSTGRES_PASSWORD: astra_ci_only
+      POSTGRES_DB: astra
+    # Данные стенда одноразовые — в памяти быстрее и не мусорят диск.
+    tmpfs: [/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U astra -d astra"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  cache:
+    image: redis:7-alpine
+    command: redis-server --appendonly no --save ""
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  storage:
+    image: minio/minio:latest
+    command: server /data
+    environment:
+      MINIO_ROOT_USER: astra_ci_access
+      MINIO_ROOT_PASSWORD: astra_ci_secret_0123456789
+    tmpfs: [/data]
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  migrate:
+    <<: *backend
+    environment:
+      SERVICE_ROLE: migrate
+    depends_on:
+      db: {condition: service_healthy}
+    command: alembic upgrade head
+
+  api:
+    <<: *backend
+    environment:
+      SERVICE_ROLE: api
+    depends_on:
+      db: {condition: service_healthy}
+      cache: {condition: service_healthy}
+      storage: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
+    # Один процесс, как у проверок принято: они ходят в localhost:8000.
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health || exit 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+
+  gateway:
+    <<: *backend
+    environment:
+      SERVICE_ROLE: gateway
+      # Один процесс: демо-шлюзу на стенде хватает, а по процессу на ядро —
+      # это сотни мегабайт памяти, которых на машине разработчика нет.
+      GATEWAY_WORKERS: "1"
+    depends_on:
+      api: {condition: service_healthy}
+    command: python -m app.gateway.worker
+
+  scheduler:
+    <<: *backend
+    environment:
+      SERVICE_ROLE: scheduler
+    depends_on:
+      api: {condition: service_healthy}
+    command: python -m app.scheduler.runner
+
+  # Прод-сборка фронтенда: проверяется, что образ собирается и отдаёт страницу.
+  web:
+    image: ${WEB_IMAGE:-astra-web}:${IMAGE_TAG:-ci}
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: prod
+    depends_on:
+      api: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1/ || exit 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 20

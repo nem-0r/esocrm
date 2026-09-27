@@ -154,6 +154,61 @@ export const api = {
   file: (path: string, query?: Query) => request<Response>('GET', path, { query, rawResponse: true }),
 }
 
+/**
+ * Загрузка файла с прогрессом. `fetch` не сообщает, сколько отправлено, а видео
+ * на 150 МБ без процентов выглядит как зависшая кнопка — поэтому XHR.
+ * Ошибки — те же `ApiError`, что и у остальных запросов.
+ */
+export function uploadWithProgress<T>(
+  path: string,
+  file: Blob,
+  fileName: string,
+  onProgress?: (fraction: number) => void,
+  signal?: AbortSignal,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    xhr.open('POST', buildUrl(path))
+    xhr.withCredentials = true
+    xhr.responseType = 'text'
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable && onProgress) onProgress(event.loaded / event.total)
+    }
+    xhr.onload = () => {
+      let body: unknown = null
+      try {
+        body = xhr.responseText ? JSON.parse(xhr.responseText) : null
+      } catch {
+        body = null
+      }
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(body as T)
+        return
+      }
+      const error = (body as Partial<ApiErrorBody> | null)?.error
+      let message = error?.message ?? 'Не удалось загрузить файл'
+      if (xhr.status === 413) message = 'Файл слишком большой'
+      else if (xhr.status >= 500 && !error) message = 'Сервер недоступен'
+      const apiError = new ApiError(xhr.status, error?.code ?? 'error', message, error?.details ?? {})
+      if (apiError.isUnauthorized) onUnauthorized?.()
+      reject(apiError)
+    }
+    xhr.onerror = () =>
+      reject(new ApiError(0, 'network', 'Нет связи с сервером. Проверьте подключение.'))
+    xhr.onabort = () => reject(new DOMException('Загрузка отменена', 'AbortError'))
+    if (signal) {
+      if (signal.aborted) {
+        xhr.abort()
+        return
+      }
+      signal.addEventListener('abort', () => xhr.abort(), { once: true })
+    }
+    const form = new FormData()
+    form.append('file', file, fileName)
+    xhr.send(form)
+  })
+}
+
 /** Скачивание файла с проверкой прав на сервере — не прямая ссылка на хранилище.
  *
  * Имя берём из заголовка ответа, `filename` — только запасной вариант: иначе

@@ -1,14 +1,16 @@
-import { AlertTriangle, CreditCard, IdCard, Plus, UserCheck } from 'lucide-react'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { AlertTriangle, Copy, CreditCard, Forward, IdCard, Paperclip, Plus, UserCheck, X } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState, type DragEvent } from 'react'
 import { Link, useParams } from 'react-router-dom'
 
 import { realtime } from '@/shared/api/ws'
 import { dateFull, dayDivider, dayKey, money, plural, waitingLabel } from '@/shared/lib/format'
-import { BackButton, Badge, Button, EmptyState, ErrorState, ListSkeleton } from '@/shared/ui'
+import { BackButton, Badge, Button, EmptyState, ErrorState, ListSkeleton, toast } from '@/shared/ui'
 import { ChatsLayout } from '@/features/chats/ChatsLayout'
-import { Composer } from '@/features/chats/components/Composer'
-import { MessageBubble } from '@/features/chats/components/MessageBubble'
+import { Composer, type ComposerHandle } from '@/features/chats/components/Composer'
+import { ForwardSheet } from '@/features/chats/components/ForwardSheet'
+import { MessageBubble, canForward } from '@/features/chats/components/MessageBubble'
 import { TransferSheet } from '@/features/chats/components/TransferSheet'
+import { copyText, formatForCopy } from '@/features/chats/components/message/copy'
 import { DealSheet } from '@/features/deals/DealSheet'
 import { FUNNEL_LABEL } from '@/features/profile/lib'
 import {
@@ -45,8 +47,22 @@ function ChatPane({ conversationId }: { conversationId: number }) {
   const retryMessage = useRetryMessage(conversationId)
   const editMessage = useEditMessage(conversationId)
   const bottom = useRef<HTMLDivElement>(null)
+  const composer = useRef<ComposerHandle>(null)
   const [dealOpen, setDealOpen] = useState(false)
   const [transferOpen, setTransferOpen] = useState(false)
+  // Режим выбора сообщений: переслать или скопировать несколько разом.
+  const [selecting, setSelecting] = useState(false)
+  const [selected, setSelected] = useState<number[]>([])
+  const [forwardIds, setForwardIds] = useState<number[] | null>(null)
+  const [dragging, setDragging] = useState(false)
+  const dragDepth = useRef(0)
+
+  // Другой чат — выбор из прошлого чата не должен «переехать» сюда.
+  useEffect(() => {
+    setSelecting(false)
+    setSelected([])
+    setForwardIds(null)
+  }, [conversationId])
 
   // Открыли чат — сбрасываем непрочитанные и сообщаем, что мы здесь.
   useEffect(() => {
@@ -74,9 +90,99 @@ function ChatPane({ conversationId }: { conversationId: number }) {
   const chat = conversation.data
   const paidCount = chat.client_paid_count ?? 0
 
+  function toggle(id: number) {
+    setSelected((prev) => (prev.includes(id) ? prev.filter((value) => value !== id) : [...prev, id]))
+  }
+
+  function startSelecting(id: number) {
+    setSelecting(true)
+    setSelected([id])
+  }
+
+  function stopSelecting() {
+    setSelecting(false)
+    setSelected([])
+  }
+
+  // Выбранное — в порядке ленты, а не в порядке нажатий: так и пересылается.
+  const chosen = items.filter((message) => selected.includes(message.id))
+  const forwardable = chosen.filter(canForward)
+
+  function copySelected() {
+    void copyText(formatForCopy(chosen, chat.client.name)).then(
+      () => {
+        toast(`Скопировано: ${chosen.length} ${plural(chosen.length, 'сообщение', 'сообщения', 'сообщений')}`)
+        stopSelecting()
+      },
+      () => toast('Не удалось скопировать'),
+    )
+  }
+
+  function onDragEnter(event: DragEvent<HTMLDivElement>) {
+    if (!Array.from(event.dataTransfer.types).includes('Files')) return
+    event.preventDefault()
+    dragDepth.current += 1
+    setDragging(true)
+  }
+
+  function onDragLeave() {
+    dragDepth.current = Math.max(0, dragDepth.current - 1)
+    if (dragDepth.current === 0) setDragging(false)
+  }
+
+  function onDrop(event: DragEvent<HTMLDivElement>) {
+    event.preventDefault()
+    dragDepth.current = 0
+    setDragging(false)
+    composer.current?.addFiles(Array.from(event.dataTransfer.files))
+  }
+
   return (
-    <>
-      <header className="shrink-0 border-b border-line bg-surface px-3 py-2.5">
+    <div
+      className="relative flex min-h-0 flex-1 flex-col"
+      onDragEnter={onDragEnter}
+      onDragOver={(event) => {
+        if (Array.from(event.dataTransfer.types).includes('Files')) event.preventDefault()
+      }}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
+    >
+      {dragging && (
+        <div className="pointer-events-none absolute inset-2 z-30 flex items-center justify-center rounded-xl border-2 border-dashed border-accent bg-bg/85">
+          <span className="flex items-center gap-2 text-sm text-ink">
+            <Paperclip className="size-5 text-accent-text" aria-hidden />
+            Отпустите, чтобы прикрепить к сообщению
+          </span>
+        </div>
+      )}
+
+      {selecting && (
+        <div className="flex shrink-0 items-center gap-2 border-b border-line bg-surface px-3 py-2.5">
+          <button
+            type="button"
+            aria-label="Отменить выбор"
+            onClick={stopSelecting}
+            className="flex size-9 items-center justify-center rounded text-ink-muted transition-colors hover:bg-surface-raised hover:text-ink"
+          >
+            <X className="size-5" aria-hidden />
+          </button>
+          <span className="flex-1 text-sm text-ink">Выбрано: {chosen.length}</span>
+          <Button size="sm" variant="secondary" disabled={chosen.length === 0} onClick={copySelected}>
+            <Copy className="size-4" aria-hidden />
+            Копировать
+          </Button>
+          <Button
+            size="sm"
+            disabled={forwardable.length === 0}
+            onClick={() => setForwardIds(forwardable.map((message) => message.id))}
+          >
+            <Forward className="size-4" aria-hidden />
+            Переслать
+          </Button>
+        </div>
+      )}
+
+      <header className={selecting ? 'hidden' : 'shrink-0 border-b border-line bg-surface px-3 py-2.5'}>
         <div className="flex items-center gap-2">
           <BackButton fallback="/chats" label="Назад к чатам" />
 
@@ -205,6 +311,13 @@ function ChatPane({ conversationId }: { conversationId: number }) {
                     savingEdit={
                       editMessage.isPending && editMessage.variables?.messageId === message.id
                     }
+                    onForward={() => setForwardIds([message.id])}
+                    selection={{
+                      active: selecting,
+                      selected: selected.includes(message.id),
+                      onToggle: () => toggle(message.id),
+                      onStart: () => startSelecting(message.id),
+                    }}
                   />
                 </div>
               )
@@ -214,7 +327,19 @@ function ChatPane({ conversationId }: { conversationId: number }) {
         )}
       </div>
 
-      <Composer conversationId={conversationId} />
+      {/* Ключ по чату: черновик, вложения и запись голосового принадлежат
+          своему чату — переключились на другого клиента, и незаконченное
+          сообщение не уедет не тому человеку. */}
+      <Composer key={conversationId} ref={composer} conversationId={conversationId} />
+
+      <ForwardSheet
+        open={forwardIds !== null}
+        onOpenChange={(open) => !open && setForwardIds(null)}
+        sourceConversationId={conversationId}
+        sourceAccountId={chat.account.id}
+        messageIds={forwardIds ?? []}
+        onDone={stopSelecting}
+      />
 
       <TransferSheet
         open={transferOpen}
@@ -228,6 +353,6 @@ function ChatPane({ conversationId }: { conversationId: number }) {
         conversationId={conversationId}
         clientName={chat.client.name}
       />
-    </>
+    </div>
   )
 }

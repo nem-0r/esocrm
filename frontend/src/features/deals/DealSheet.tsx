@@ -1,10 +1,11 @@
-import { Info, Plus, Trash2 } from 'lucide-react'
+import { Info } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 
 import type { PaymentMethod } from '@/entities/types'
-import { money, parseMoney } from '@/shared/lib/format'
+import { money } from '@/shared/lib/format'
 import { useMe } from '@/shared/hooks/useAuth'
-import { Button, Field, InlineError, Input, Select, Sheet, Textarea } from '@/shared/ui'
+import { Button, Field, InlineError, Select, Sheet, Textarea } from '@/shared/ui'
+import { ItemsEditor } from '@/features/deals/components/ItemsEditor'
 import {
   LINK_NOT_READY,
   draftTotal,
@@ -84,12 +85,6 @@ export function DealSheet({
   const requisiteFilled =
     requisiteId !== null && (!isCustom || customText.trim().length > 0)
   const canSend = !validation && (!needsRequisite || requisiteFilled) && !createAndSend.isPending
-
-  function patch(index: number, field: 'name' | 'amount', value: string) {
-    setItems((prev) =>
-      prev.map((item, i) => (i === index ? { ...item, [field]: value } : item)),
-    )
-  }
 
   async function submit() {
     setTouched(true)
@@ -190,53 +185,7 @@ export function DealSheet({
           )}
         </section>
 
-        <section className="flex flex-col gap-2">
-          <span className="text-label uppercase tracking-wide text-ink-faint">
-            Услуги · {items.length}
-          </span>
-          {items.map((item, index) => (
-            <div key={item.key} className="flex flex-col gap-2 rounded-md bg-surface-raised p-3">
-              <div className="flex items-center gap-2">
-                <Input
-                  className="flex-1 bg-surface"
-                  value={item.name}
-                  placeholder="Название услуги"
-                  onChange={(event) => patch(index, 'name', event.target.value)}
-                />
-                {items.length > 1 && (
-                  <button
-                    aria-label="Убрать услугу"
-                    onClick={() => setItems((prev) => prev.filter((_, i) => i !== index))}
-                    className="flex size-9 shrink-0 items-center justify-center rounded text-ink-faint transition-colors hover:bg-surface hover:text-danger"
-                  >
-                    <Trash2 className="size-4" aria-hidden />
-                  </button>
-                )}
-              </div>
-              <Input
-                className="bg-surface"
-                inputMode="numeric"
-                value={item.amount}
-                placeholder="Стоимость, ₽"
-                onChange={(event) => patch(index, 'amount', event.target.value)}
-                trailing={
-                  <span className="tnum text-micro text-ink-faint">
-                    {parseMoney(item.amount) ? money(parseMoney(item.amount)!) : ''}
-                  </span>
-                }
-              />
-            </div>
-          ))}
-          <Button
-            variant="secondary"
-            size="sm"
-            className="self-start"
-            onClick={() => setItems((prev) => [...prev, newItemDraft()])}
-          >
-            <Plus className="size-4" aria-hidden />
-            Добавить услугу
-          </Button>
-        </section>
+        <ItemsEditor items={items} onChange={setItems} />
 
         {needsRequisite && (
           <Field label="Счёт получателя" required>

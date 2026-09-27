@@ -1,4 +1,4 @@
-.PHONY: up down logs seed reset test lint fmt web api-shell db-shell verify verify-redis
+.PHONY: up down logs seed reset test lint fmt web api-shell db-shell verify verify-redis ci ci-build ci-up ci-verify ci-down unit
 
 up:            ## поднять всё: интерфейс, бэкенд, шлюз, базу, хранилище
 	docker compose up -d --build
@@ -71,3 +71,24 @@ api-shell:
 
 db-shell:
 	docker compose exec db psql -U astra -d astra
+
+# --- Тестовый стенд: то же, что CI в GitHub, локально и без риска для своих данных ---
+
+ci-build:      ## собрать прод-образы бэкенда и фронтенда (как в CI)
+	docker compose -f docker-compose.ci.yml build
+
+ci-up:         ## поднять тестовый стенд из прод-образов (отдельные тома и сеть)
+	docker compose -f docker-compose.ci.yml up -d --wait
+
+ci-verify:     ## все проверки на тестовом стенде
+	./deploy/ci-verify.sh
+
+ci-down:       ## снести тестовый стенд вместе с данными
+	docker compose -f docker-compose.ci.yml down -v --remove-orphans
+
+ci: ci-build ci-up ci-verify  ## полный прогон CI локально
+	@echo "Стенд оставлен для разбора: make ci-down — убрать"
+
+unit:          ## модульные тесты бэкенда (нужен ffmpeg) и фронтенда
+	docker compose exec -T api python -m pytest tests/unit -q
+	cd frontend && npx vitest run

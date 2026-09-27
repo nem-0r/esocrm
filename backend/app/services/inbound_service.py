@@ -26,13 +26,15 @@ from datetime import UTC, datetime
 from pathlib import PurePosixPath
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import BigInteger, cast, func, or_, select
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
     AccountManager,
     Attachment,
+    AttachmentStatus,
     AuthorKind,
     Client,
     Conversation,
@@ -44,16 +46,11 @@ from app.models import (
     TelegramPeer,
     User,
 )
+from app.models.enums import message_kind_for
 from app.realtime.events import conversation_audience, emit
 
 log = logging.getLogger("astra.inbound")
 
-MEDIA_KINDS = {
-    "photo": MessageKind.PHOTO,
-    "video": MessageKind.VIDEO,
-    "voice": MessageKind.VOICE,
-    "document": MessageKind.DOCUMENT,
-}
 
 
 @dataclass(slots=True)
@@ -84,6 +81,11 @@ class InboundMessage:
     # Живое событие или подтяжка истории.
     live: bool = True
     attachments: list[dict] = field(default_factory=list)
+    # Переслано от, контакт, геопозиция, опрос — см. app/schemas/message.py.
+    meta: dict | None = None
+    # Правка уже известного сообщения (клиент или менеджер с телефона поменял текст).
+    is_edit: bool = False
+    edit_date: datetime | None = None
 
 
 async def upsert_peer(db: AsyncSession, account_id: int, peer: PeerData) -> TelegramPeer:
@@ -266,16 +268,24 @@ async def ingest(
                     own.status = MessageStatus.SENT
             return None
 
-    duplicate = await db.scalar(
-        select(Message.id).where(
+    # Известное сообщение ищем и по главному номеру, и по остальным номерам
+    # альбома: иначе пять фото, отправленные из CRM одним сообщением, при
+    # подтяжке истории вернулись бы ещё четырьмя «новыми».
+    existing = await db.scalar(
+        select(Message).where(
             Message.conversation_id == conversation.id,
-            Message.tg_message_id == event.tg_message_id,
+            or_(
+                Message.tg_message_id == event.tg_message_id,
+                Message.tg_extra_ids.any(event.tg_message_id),
+            ),
         )
     )
-    if duplicate is not None:
+    if existing is not None:
+        if event.is_edit:
+            await _apply_edit(db, conversation, existing, event)
         return None
 
-    kind = MEDIA_KINDS.get(event.media_kind or "", MessageKind.TEXT)
+    kind = message_kind_for(event.media_kind) if event.media_kind else MessageKind.TEXT
     message = Message(
         conversation_id=conversation.id,
         tg_message_id=event.tg_message_id,
@@ -289,6 +299,7 @@ async def ingest(
         sent_at=event.date,
         created_at=event.date,
         reply_to_tg_id=event.reply_to_tg_id,
+        meta=event.meta or None,
     )
     db.add(message)
     try:
@@ -317,21 +328,38 @@ async def _save_attachments(
     db: AsyncSession, conversation: Conversation, message: Message, items: list[dict]
 ) -> None:
     """Файл из чата кладём к себе сразу: ссылка Telegram живёт недолго, а переписку
-    надо будет открывать через год. Не скачался — сообщение всё равно сохраняется,
-    иначе одна картинка потеряла бы текст."""
+    надо будет открывать через год. Не скачался или крупный — вложение всё равно
+    заводится (с пометкой «докачивается» или «слишком большой»): менеджер видит,
+    что клиент что-то прислал, а шлюз докачает файл в фоне."""
     from app.core import storage
 
     now = datetime.now(UTC)
     for item in items:
         body = item.get("body")
-        file_name = item.get("file_name") or "file"
-        key = f"incoming/{now:%Y}/{now:%m}/{uuid4().hex}{PurePosixPath(file_name).suffix.lower()}"
-        try:
-            if body:
+        file_name = (item.get("file_name") or "file")[:255]
+        status = item.get("status") or (
+            AttachmentStatus.READY.value if body else AttachmentStatus.PENDING.value
+        )
+        key: str | None = None
+        if status == AttachmentStatus.READY.value and body:
+            key = (
+                f"incoming/{now:%Y}/{now:%m}/{uuid4().hex}"
+                f"{PurePosixPath(file_name).suffix.lower()[:16]}"
+            )
+            try:
                 await storage.put_object(key, body, filename=file_name)
-        except Exception:
-            log.exception("Файл %s из диалога %s не сохранён", file_name, conversation.id)
-            continue
+            except Exception:
+                log.exception("Файл %s из диалога %s не сохранён", file_name, conversation.id)
+                key = None
+                status = AttachmentStatus.PENDING.value
+        elif status == AttachmentStatus.READY.value:
+            status = AttachmentStatus.PENDING.value
+        extra = {
+            name: item[name] for name in ("title", "performer", "emoji") if item.get(name)
+        }
+        if status == AttachmentStatus.PENDING.value and item.get("source"):
+            extra["source"] = item["source"]
+            extra["attempts"] = 0
         db.add(
             Attachment(
                 message_id=message.id,
@@ -339,15 +367,51 @@ async def _save_attachments(
                 client_id=conversation.client_id,
                 file_name=file_name,
                 mime_type=item.get("mime_type"),
-                size_bytes=len(body or b""),
+                size_bytes=len(body) if key and body else int(item.get("size") or 0),
                 storage_key=key,
+                status=status,
+                kind=item.get("kind"),
+                waveform=item.get("waveform"),
                 telegram_file_id=item.get("telegram_file_id"),
                 width=item.get("width"),
                 height=item.get("height"),
                 duration_sec=item.get("duration_sec"),
+                meta=extra or None,
             )
         )
     await db.flush()
+
+
+async def _apply_edit(
+    db: AsyncSession, conversation: Conversation, message: Message, event: InboundMessage
+) -> None:
+    """Клиент (или менеджер с телефона) поправил сообщение в Telegram.
+
+    Пустой текст правки не стирает наш: Telegram присылает «правку» и когда
+    меняются только реакции или превью ссылки — текст при этом не приходит.
+    """
+    new_text = (event.text or "").strip() or None
+    if new_text is None or new_text == (message.text or "").strip():
+        return
+    message.text = event.text
+    message.edited_at = event.edit_date or datetime.now(UTC)
+    if event.live:
+        await _publish_updated(db, conversation, message)
+
+
+async def _publish_updated(db: AsyncSession, conversation: Conversation, message: Message) -> None:
+    from app.services.message_service import to_out
+
+    await db.flush()
+    audience = await conversation_audience(db, conversation.id)
+    await emit(
+        "message.updated",
+        {
+            "conversation_id": conversation.id,
+            "message": to_out(message).model_dump(mode="json"),
+        },
+        audience,
+    )
 
 
 def _apply_counters(conversation: Conversation, event: InboundMessage) -> None:
@@ -433,3 +497,95 @@ async def mark_outgoing_read(
                 audience,
             )
     return len(rows)
+
+
+async def mark_deleted(
+    db: AsyncSession, account: TelegramAccount, tg_chat_id: int | None, tg_ids: list[int]
+) -> int:
+    """Сообщения удалили в Telegram (клиент или менеджер с телефона).
+
+    В CRM они остаются — это история работы с клиентом, — но с пометкой
+    «удалено в Telegram»: менеджер не должен думать, что клиент это видит.
+    Номера сообщений в личных чатах уникальны в пределах аккаунта, поэтому
+    хватает аккаунта, даже когда Telegram не называет чат.
+    """
+    if not tg_ids:
+        return 0
+    conditions = [Conversation.account_id == account.id]
+    if tg_chat_id is not None:
+        conditions.append(Conversation.tg_chat_id == tg_chat_id)
+    ids_array = cast(tg_ids, ARRAY(BigInteger))
+    rows = (
+        await db.execute(
+            select(Message, Conversation)
+            .join(Conversation, Conversation.id == Message.conversation_id)
+            .where(
+                *conditions,
+                or_(
+                    Message.tg_message_id.in_(tg_ids),
+                    Message.tg_extra_ids.overlap(ids_array),
+                ),
+            )
+        )
+    ).all()
+    now = datetime.now(UTC).isoformat()
+    changed: list[tuple[Message, Conversation]] = []
+    for message, conversation in rows:
+        meta = dict(message.meta or {})
+        if meta.get("deleted_in_telegram_at"):
+            continue
+        meta["deleted_in_telegram_at"] = now
+        message.meta = meta
+        changed.append((message, conversation))
+    for message, conversation in changed:
+        await _publish_updated(db, conversation, message)
+    return len(changed)
+
+
+async def mark_incoming_read(
+    db: AsyncSession, account: TelegramAccount, tg_chat_id: int, max_id: int
+) -> bool:
+    """Сообщения клиента прочитали на телефоне — в CRM они тоже прочитаны.
+
+    Непрочитанными остаются только те, что новее прочитанного в Telegram.
+    Если прочитано всё, гаснет и напоминание «ждёт ответа» (ТЗ п. 2.1: плашка
+    срабатывает один раз и гаснет, когда менеджер увидел чат) — сам счётчик
+    «ждут ответа» остаётся, клиенту ведь ещё не ответили.
+    """
+    conversation = await db.scalar(
+        select(Conversation).where(
+            Conversation.account_id == account.id, Conversation.tg_chat_id == tg_chat_id
+        )
+    )
+    if conversation is None:
+        return False
+    remaining = int(
+        await db.scalar(
+            select(func.count())
+            .select_from(Message)
+            .where(
+                Message.conversation_id == conversation.id,
+                Message.direction == Direction.IN,
+                Message.deleted_at.is_(None),
+                Message.tg_message_id > max_id,
+            )
+        )
+        or 0
+    )
+    changed = False
+    unread = min(conversation.unread_count, remaining)
+    if unread != conversation.unread_count:
+        conversation.unread_count = unread
+        changed = True
+    awaiting = conversation.awaiting_reply_since
+    seen = conversation.awaiting_seen_at
+    if remaining == 0 and awaiting is not None and (seen is None or seen < awaiting):
+        conversation.awaiting_seen_at = datetime.now(UTC)
+        changed = True
+    if changed:
+        from app.services import conversation_service
+
+        await db.flush()
+        detail = await conversation_service.build_detail(db, conversation.id)
+        await conversation_service.emit_updated(db, detail)
+    return changed

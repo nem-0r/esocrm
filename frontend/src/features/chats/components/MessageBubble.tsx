@@ -1,14 +1,16 @@
-import { AlertCircle, Check, CheckCheck, Clock, Download, FileText, Lock, Pencil } from 'lucide-react'
+import { AlertCircle, Check, CheckCheck, Circle, CircleCheck, Clock, Lock, Trash2 } from 'lucide-react'
 import { useState } from 'react'
 
 import type { Message } from '@/entities/types'
-import { ImagePreview, VideoPreview } from '@/features/chats/components/MediaAttachment'
-import { VoicePlayer } from '@/features/chats/components/VoicePlayer'
+import { AttachmentView, kindOf } from '@/features/chats/components/message/AttachmentView'
+import { ForwardedHeader, MetaCard, hasMetaCard } from '@/features/chats/components/message/MetaCards'
+import { MessageMenu, type MessageActions } from '@/features/chats/components/message/MessageMenu'
+import { canCopyImage, copyImage, copyText } from '@/features/chats/components/message/copy'
 import { ApiError } from '@/shared/api/client'
 import { useMe } from '@/shared/hooks/useAuth'
 import { cn } from '@/shared/lib/cn'
-import { fileSize, time } from '@/shared/lib/format'
-import { Button, InlineError, Textarea } from '@/shared/ui'
+import { time } from '@/shared/lib/format'
+import { Button, InlineError, Textarea, toast } from '@/shared/ui'
 
 /** Столько же разрешает сам Telegram — после этого срока правка отклонится сервером. */
 const EDIT_WINDOW_HOURS = 48
@@ -25,6 +27,12 @@ function canEditMessage(message: Message, myUserId: number): boolean {
     (message.status === 'sent' || message.status === 'read') &&
     Date.now() - new Date(sentAt).getTime() < EDIT_WINDOW_HOURS * 3600_000
   )
+}
+
+/** Переслать можно то, что есть в Telegram или хотя бы в CRM: не служебную заметку. */
+export function canForward(message: Message): boolean {
+  if (message.is_internal) return false
+  return Boolean(message.text || message.attachments.length)
 }
 
 /**
@@ -44,18 +52,29 @@ function StatusIcon({ status }: { status: Message['status'] }) {
   }
 }
 
+export interface Selection {
+  active: boolean
+  selected: boolean
+  onToggle: () => void
+  onStart: () => void
+}
+
 export function MessageBubble({
   message,
   onRetry,
   retrying,
   onEdit,
   savingEdit,
+  onForward,
+  selection,
 }: {
   message: Message
   onRetry?: () => void
   retrying?: boolean
   onEdit?: (text: string) => Promise<unknown>
   savingEdit?: boolean
+  onForward?: () => void
+  selection?: Selection
 }) {
   const me = useMe()
   const outgoing = message.direction === 'out'
@@ -63,6 +82,9 @@ export function MessageBubble({
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(message.text ?? '')
   const [editError, setEditError] = useState<string | null>(null)
+  const meta = message.meta ?? null
+  const deleted = Boolean(meta?.deleted_in_telegram_at)
+  const selecting = Boolean(selection?.active)
 
   function startEdit() {
     setDraft(message.text ?? '')
@@ -82,21 +104,68 @@ export function MessageBubble({
     }
   }
 
+  const photo = message.attachments.find(
+    (file) => (file.status ?? 'ready') === 'ready' && kindOf(file) === 'photo',
+  )
+  const single = message.attachments.length === 1 ? message.attachments[0] : null
+  const actions: MessageActions = {
+    onCopyText: message.text
+      ? () =>
+          void copyText(message.text ?? '').then(
+            () => toast('Текст скопирован'),
+            () => toast('Не удалось скопировать — выделите текст вручную'),
+          )
+      : undefined,
+    onCopyImage:
+      photo && canCopyImage()
+        ? () =>
+            void copyImage(photo.url).then(
+              () => toast('Изображение скопировано'),
+              () => toast('Не удалось скопировать изображение'),
+            )
+        : undefined,
+    onDownload:
+      single && (single.status ?? 'ready') === 'ready'
+        ? () => {
+            window.location.href = `${single.url}?download=1`
+          }
+        : undefined,
+    onForward: onForward && canForward(message) ? onForward : undefined,
+    onSelect: selection && !message.is_internal ? selection.onStart : undefined,
+    onEdit: editable ? startEdit : undefined,
+  }
+
+  const checkbox = selecting && !message.is_internal && (
+    <span className="flex w-6 shrink-0 items-center justify-center" aria-hidden>
+      {selection?.selected ? (
+        <CircleCheck className="size-5 text-accent-text" />
+      ) : (
+        <Circle className="size-5 text-ink-faint" />
+      )}
+    </span>
+  )
+
   // Служебная заметка: клиент её не видит, поэтому и выглядит она иначе.
   if (message.is_internal) {
     return (
       <div className="flex justify-center px-4">
         <div className="flex max-w-[80%] items-start gap-2 rounded-md border border-dashed border-line-strong bg-surface px-3 py-2">
           <Lock className="mt-0.5 size-3.5 shrink-0 text-ink-faint" aria-hidden />
-          <div className="flex min-w-0 flex-col gap-0.5">
+          <div className="flex min-w-0 flex-col gap-1">
             <span className="text-micro uppercase tracking-wide text-ink-faint">
               Служебная заметка · клиент не видит
             </span>
-            <span className="whitespace-pre-wrap break-words text-sm text-ink-muted">
-              {message.text}
-            </span>
-            <span className="text-micro text-ink-faint">
+            {message.attachments.map((file) => (
+              <AttachmentView key={file.id} file={file} />
+            ))}
+            {message.text && (
+              <span className="whitespace-pre-wrap break-words text-sm text-ink-muted">
+                {message.text}
+              </span>
+            )}
+            <span className="flex items-center gap-1.5 text-micro text-ink-faint">
               {message.author?.full_name} · {time(message.created_at)}
+              <MessageMenu actions={actions} />
             </span>
           </div>
         </div>
@@ -105,12 +174,24 @@ export function MessageBubble({
   }
 
   return (
-    <div className={cn('flex px-4', outgoing ? 'justify-end' : 'justify-start')}>
+    <div
+      className={cn(
+        'group flex items-center gap-1 px-4',
+        outgoing ? 'justify-end' : 'justify-start',
+        selecting && 'cursor-pointer',
+        selection?.selected && 'bg-accent-soft/50',
+      )}
+      onClick={selecting ? selection?.onToggle : undefined}
+      aria-selected={selecting ? selection?.selected : undefined}
+    >
+      {!outgoing && checkbox}
       <div
         className={cn(
           'flex max-w-[85%] flex-col gap-1.5 rounded-lg px-3 py-2 desk:max-w-[70%]',
           outgoing ? 'bg-bubble-out' : 'bg-bubble-in',
           message.status === 'failed' && 'ring-1 ring-danger/60',
+          deleted && 'opacity-60',
+          selecting && 'pointer-events-none',
         )}
       >
         {message.author_kind === 'userbot' && (
@@ -119,47 +200,13 @@ export function MessageBubble({
           </span>
         )}
 
-        {message.attachments.map((file) => {
-          if (file.mime_type?.startsWith('audio/')) {
-            return (
-              <VoicePlayer key={file.id} src={file.url} durationSec={file.duration_sec ?? null} />
-            )
-          }
-          if (file.mime_type?.startsWith('image/')) {
-            return (
-              <ImagePreview
-                key={file.id}
-                src={file.url}
-                width={file.width}
-                height={file.height}
-                alt={file.file_name}
-              />
-            )
-          }
-          if (file.mime_type?.startsWith('video/')) {
-            return (
-              <VideoPreview key={file.id} src={file.url} width={file.width} height={file.height} />
-            )
-          }
-          return (
-            <a
-              key={file.id}
-              href={file.url}
-              target="_blank"
-              rel="noreferrer"
-              className="flex items-center gap-2 rounded bg-black/25 px-2.5 py-2 transition-colors hover:bg-black/40"
-            >
-              <FileText className="size-4 shrink-0 text-accent-text" aria-hidden />
-              <span className="min-w-0 flex-1">
-                <span className="block truncate text-xs font-medium text-ink">
-                  {file.file_name}
-                </span>
-                <span className="block text-micro text-ink-faint">{fileSize(file.size_bytes)}</span>
-              </span>
-              <Download className="size-4 shrink-0 text-ink-faint" aria-hidden />
-            </a>
-          )
-        })}
+        {meta && <ForwardedHeader meta={meta} />}
+
+        {message.attachments.map((file) => (
+          <AttachmentView key={file.id} file={file} />
+        ))}
+
+        {meta && <MetaCard meta={meta} />}
 
         {editing ? (
           <div className="flex flex-col gap-1.5">
@@ -197,7 +244,8 @@ export function MessageBubble({
             </div>
           </div>
         ) : (
-          message.text && (
+          message.text &&
+          !hasMetaCard(meta) && (
             <span
               className={cn(
                 'whitespace-pre-wrap break-words text-sm',
@@ -211,18 +259,21 @@ export function MessageBubble({
 
         {!editing && (
           <span className="flex items-center justify-end gap-1.5 text-micro text-ink-faint">
-            {editable && (
-              <button
-                aria-label="Изменить сообщение"
-                onClick={startEdit}
-                className="relative text-ink-faint transition-colors hover:text-ink before:absolute before:-inset-2 before:content-['']"
-              >
-                <Pencil className="size-3" aria-hidden />
-              </button>
+            {deleted && (
+              <span className="flex items-center gap-1 text-warning">
+                <Trash2 className="size-3" aria-hidden />
+                удалено в Telegram
+              </span>
             )}
             {message.edited_at && <span>изменено</span>}
             <span className="tnum">{time(message.created_at)}</span>
             {outgoing && <StatusIcon status={message.status} />}
+            {!selecting && (
+              <MessageMenu
+                actions={actions}
+                className="desk:opacity-0 desk:group-hover:opacity-100 desk:focus-visible:opacity-100 desk:data-[state=open]:opacity-100"
+              />
+            )}
           </span>
         )}
 
@@ -243,6 +294,7 @@ export function MessageBubble({
           </div>
         )}
       </div>
+      {outgoing && checkbox}
     </div>
   )
 }

@@ -1,0 +1,127 @@
+# Выкатка на сервер. Вызывается из ci.yml после зелёных проверок на main, а
+# также вручную (Actions → Deploy → Run workflow) — для отката на любой
+# прошлый коммит. Что происходит на сервере — deploy/deploy.sh.
+#
+# Секреты (Settings → Environments → production → Environment secrets):
+#   DEPLOY_HOST         адрес сервера
+#   DEPLOY_USER         пользователь SSH (в группе docker)
+#   DEPLOY_SSH_KEY      закрытый ключ, выданный только для выкатки
+#   DEPLOY_KNOWN_HOSTS  строка ssh-keyscan сервера — защита от подмены хоста
+#   DEPLOY_PATH         каталог проекта на сервере (по умолчанию /opt/astra)
+#   DEPLOY_PORT         порт SSH (по умолчанию 22)
+
+name: Deploy
+
+on:
+  workflow_call:
+    inputs:
+      sha:
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "Полный номер коммита для выкатки. Для отката — номер прошлой рабочей версии."
+        required: true
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  # Две выкатки одновременно на один сервер — никогда. Следующая ждёт.
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Выкатка ${{ inputs.sha }}
+    runs-on: ubuntu-24.04
+    environment: production
+    timeout-minutes: 40
+    steps:
+      - name: проверить настройки
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER_NAME: ${{ secrets.DEPLOY_USER }}
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          SHA: ${{ inputs.sha }}
+        run: |
+          missing=()
+          [ -n "$HOST" ] || missing+=(DEPLOY_HOST)
+          [ -n "$USER_NAME" ] || missing+=(DEPLOY_USER)
+          [ -n "$KEY" ] || missing+=(DEPLOY_SSH_KEY)
+          [ -n "$KNOWN" ] || missing+=(DEPLOY_KNOWN_HOSTS)
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::Не заданы секреты окружения production: ${missing[*]} — см. docs/16-ci-cd.md"
+            exit 1
+          fi
+          if ! [[ "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Номер коммита должен быть полным (40 символов): $SHA"
+            exit 1
+          fi
+
+      - name: ключ SSH
+        env:
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$KNOWN" > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: выкатка
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER_NAME: ${{ secrets.DEPLOY_USER }}
+          PORT: ${{ secrets.DEPLOY_PORT || '22' }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || '/opt/astra' }}
+          SHA: ${{ inputs.sha }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+        run: |
+          repo="$(echo "ghcr.io/${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')"
+          # Токен реестра идёт по SSH через stdin первой строкой: ни в командной
+          # строке сервера, ни в логах его не видно. Живёт он столько же, сколько
+          # эта задача. Удалённая сторона читает токен, а остальное выполняет.
+          {
+            printf '%s\n' "$GHCR_TOKEN"
+            cat <<'REMOTE'
+          set -euo pipefail
+          cd "$DEPLOY_PATH"
+          # Рабочая копия на сервере — только для выкатки. Правка файлов из
+          # репозитория прямо на сервере молча затёрлась бы — поэтому стоп.
+          if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+            echo "На сервере изменены файлы из репозитория — выкатка остановлена:"
+            git status --short --untracked-files=no
+            exit 1
+          fi
+          PREV_SHA="$(git rev-parse HEAD)"
+          git fetch --quiet --prune origin
+          git cat-file -e "${SHA}^{commit}" || { echo "Коммит $SHA не найден в origin"; exit 1; }
+          # Сценарий выкатки — из выкатываемого коммита. В версиях до автовыкатки
+          # его нет, а возврат на них должен работать: тогда берём текущий.
+          DEPLOY_SCRIPT=./deploy/deploy.sh
+          if ! git cat-file -e "${SHA}:deploy/deploy.sh" 2>/dev/null; then
+            DEPLOY_SCRIPT="$(mktemp)"
+            trap 'rm -f "$DEPLOY_SCRIPT"' EXIT
+            git show "${PREV_SHA}:deploy/deploy.sh" > "$DEPLOY_SCRIPT"
+            echo "в ${SHA} нет deploy/deploy.sh — выкатываю сценарием текущей версии"
+          fi
+          git checkout -q -B main "$SHA"
+          echo "код: $(git rev-parse --short "$PREV_SHA") → $(git rev-parse --short HEAD)"
+          PROJECT_DIR="$(pwd)" PREV_SHA="$PREV_SHA" IMAGE_TAG="sha-$SHA" \
+          BACKEND_IMAGE="${REPO}-backend" WEB_IMAGE="${REPO}-web" \
+            bash "$DEPLOY_SCRIPT"
+          REMOTE
+          } | ssh -i ~/.ssh/deploy_key -p "$PORT" \
+            -o BatchMode=yes -o StrictHostKeyChecking=yes -o ServerAliveInterval=30 \
+            "$USER_NAME@$HOST" \
+            "DEPLOY_PATH='$DEPLOY_PATH' SHA='$SHA' REPO='$repo' GHCR_USER='$GHCR_USER' bash -c 'read -r GHCR_TOKEN && export GHCR_TOKEN && exec bash -s'"
+
+      - name: убрать ключ
+        if: always()
+        run: rm -f ~/.ssh/deploy_key

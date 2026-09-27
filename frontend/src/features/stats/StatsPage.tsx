@@ -1,4 +1,4 @@
-import { ChevronDown, TrendingDown, TrendingUp } from 'lucide-react'
+import { ChevronDown } from 'lucide-react'
 import { useState } from 'react'
 import {
   Bar,
@@ -13,9 +13,8 @@ import {
 import type { Granularity } from '@/entities/types'
 import { useAuth } from '@/shared/hooks/useAuth'
 import { cn } from '@/shared/lib/cn'
-import { dateFull, dateShort, daysAgo, durationLabel, isoDate, money } from '@/shared/lib/format'
+import { dateFull, dateShort, daysAgo, isoDate, money } from '@/shared/lib/format'
 import {
-  Avatar,
   Button,
   Card,
   EmptyState,
@@ -26,14 +25,25 @@ import {
   SectionTitle,
   Segmented,
   Sheet,
-  StatTile,
 } from '@/shared/ui'
+import {
+  AccountsTable,
+  ManagersTable,
+  ServicesTable,
+} from '@/features/stats/components/BreakdownTables'
+import {
+  ClientTiles,
+  SalesTiles,
+  SpeedTiles,
+} from '@/features/stats/components/OverviewSections'
 import {
   MAX_DAYS_FOR_DAILY,
   daysBetween,
+  useAccountStats,
   useManagerStats,
   useOverview,
   useSeries,
+  useServiceStats,
 } from '@/features/stats/queries'
 
 // Recharts не понимает классы Tailwind — цвета повторяют токены accent и line.
@@ -66,6 +76,8 @@ export function StatsPage() {
   const overview = useOverview(range)
   const series = useSeries(range, effectiveGranularity)
   const managers = useManagerStats(range, isAdmin)
+  const services = useServiceStats(range)
+  const accounts = useAccountStats(range)
 
   function choose(next: Preset) {
     setPreset(next)
@@ -130,19 +142,7 @@ export function StatsPage() {
             <ErrorState error={overview.error} onRetry={() => void overview.refetch()} />
           ) : overview.data ? (
             <>
-              <div className="grid grid-cols-2 gap-2">
-                <StatTile
-                  value={money(overview.data.sales_amount)}
-                  label="сумма продаж"
-                  tone="success"
-                  delta={<Delta percent={overview.data.sales_amount_delta_pct} />}
-                />
-                <StatTile
-                  value={overview.data.sales_count}
-                  label="продаж"
-                  delta={<Delta count={overview.data.sales_count_delta} />}
-                />
-              </div>
+              <SalesTiles data={overview.data} />
 
               <Card>
                 <SectionTitle
@@ -221,72 +221,14 @@ export function StatsPage() {
                 )}
               </Card>
 
-              <div className="grid grid-cols-2 gap-2 desk:grid-cols-3">
-                <StatTile
-                  value={durationLabel(overview.data.avg_response_seconds)}
-                  label={`среднее время ответа · цель до ${overview.data.response_goal_minutes} мин`}
-                  tone={
-                    overview.data.avg_response_seconds !== null &&
-                    overview.data.avg_response_seconds <= overview.data.response_goal_minutes * 60
-                      ? 'success'
-                      : 'warning'
-                  }
-                />
-                <StatTile value={overview.data.active_conversations} label="чатов в работе" />
-                <StatTile value={overview.data.new_clients} label="новых клиентов" />
-                <StatTile
-                  value={money(overview.data.awaiting_amount)}
-                  label="ждут оплаты · на сегодня"
-                  tone="accent"
-                />
-                <StatTile
-                  value={overview.data.awaiting_count}
-                  label="сделок ждут оплаты · на сегодня"
-                />
-              </div>
+              <ClientTiles data={overview.data} />
+              <SpeedTiles data={overview.data} />
             </>
           ) : null}
 
-          {isAdmin && (
-            <Card>
-              <SectionTitle>По менеджерам</SectionTitle>
-              <p className="-mt-1 text-micro text-ink-faint">
-                Без диалогов без ответственного — их не видно ни в одной строке.
-              </p>
-              {managers.isLoading ? (
-                <ListSkeleton rows={3} />
-              ) : managers.error ? (
-                <ErrorState error={managers.error} onRetry={() => void managers.refetch()} />
-              ) : (managers.data ?? []).length === 0 ? (
-                <EmptyState title="Менеджеров пока нет" />
-              ) : (
-                <ul className="flex flex-col gap-2">
-                  {(managers.data ?? []).map((row) => (
-                    <li
-                      key={row.user.id}
-                      className="flex items-center gap-3 rounded-md bg-surface-raised px-3 py-2.5"
-                    >
-                      <Avatar
-                        name={row.user.full_name}
-                        color={row.user.avatar_color}
-                        size="sm"
-                      />
-                      <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                        <span className="truncate text-sm text-ink">{row.user.full_name}</span>
-                        <span className="text-micro text-ink-faint">
-                          {row.sales_count} продаж · ответ {durationLabel(row.avg_response_seconds)} ·{' '}
-                          {row.active_conversations} чатов · {row.awaiting_count} ждут оплаты
-                        </span>
-                      </div>
-                      <span className="tnum shrink-0 text-sm font-semibold text-ink">
-                        {money(row.sales_amount)}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </Card>
-          )}
+          <ServicesTable query={services} />
+          <AccountsTable query={accounts} />
+          {isAdmin && <ManagersTable query={managers} />}
 
           <Card>
             <button
@@ -328,6 +270,35 @@ export function StatsPage() {
                   <b className="text-ink">Ждут оплаты</b> — сколько сейчас не оплачено, всегда на
                   сегодня. Фильтр периода на эту цифру не влияет: сделка, отправленная давно,
                   всё ещё ждёт оплаты сейчас, и прятать её за датами было бы обманом.
+                </li>
+                <li>
+                  <b className="text-ink">Средний чек</b> — сумма продаж, делённая на их число.
+                </li>
+                <li>
+                  <b className="text-ink">Конверсия счетов</b> — из сделок, отправленных клиенту в
+                  периоде, доля оплаченных на сегодня. Счёт, выставленный в конце периода, может
+                  быть оплачен позже — цифра со временем растёт.
+                </li>
+                <li>
+                  <b className="text-ink">Конверсия новых клиентов</b> — из клиентов, впервые
+                  написавших в периоде, доля тех, у кого есть оплата.
+                </li>
+                <li>
+                  <b className="text-ink">Ответили вовремя</b> — доля ожиданий клиента, закрытых
+                  ответом не позже цели. Свежие ожидания, у которых время ещё не вышло, не
+                  считаются ни в плюс, ни в минус.
+                </li>
+                <li>
+                  <b className="text-ink">Просрочки</b> — ответ пришёл позже порога плашки «ждёт
+                  ответа» или его нет, а клиент ждёт дольше порога.
+                </li>
+                <li>
+                  <b className="text-ink">По услугам</b> — позиции оплаченных сделок. Услуга из
+                  справочника — одна строка, даже если название писали по-разному.
+                </li>
+                <li>
+                  <b className="text-ink">По аккаунтам</b> — продажи относятся к аккаунту чата, в
+                  котором выставлен счёт.
                 </li>
                 <li>
                   <b className="text-ink">Продажа засчитывается</b> тому, кто создал оплату. Снятие
@@ -389,24 +360,5 @@ export function StatsPage() {
         </div>
       </Sheet>
     </div>
-  )
-}
-
-function Delta({ percent, count }: { percent?: number | null; count?: number | null }) {
-  const value = percent ?? count
-  if (value === null || value === undefined) return null
-  const positive = value >= 0
-  const Icon = positive ? TrendingUp : TrendingDown
-  return (
-    <span
-      className={cn(
-        'tnum flex items-center gap-1 text-micro',
-        positive ? 'text-success' : 'text-danger',
-      )}
-    >
-      <Icon className="size-3" aria-hidden />
-      {positive ? '+' : ''}
-      {percent !== undefined && percent !== null ? `${value}%` : value}
-    </span>
   )
 }

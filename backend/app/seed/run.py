@@ -12,7 +12,7 @@ import sys
 import uuid
 from datetime import UTC, date, datetime, time, timedelta
 
-from sqlalchemy import text
+from sqlalchemy import select, text
 
 from app.core.config import settings
 from app.core.crypto import encrypt, new_token, token_hash
@@ -41,6 +41,7 @@ from app.models import (
     PaidSource,
     PaymentMethod,
     PaymentRequisite,
+    Service,
     TelegramAccount,
     Template,
     User,
@@ -72,6 +73,7 @@ TABLES = [
     "telegram_accounts",
     "payment_requisites",
     "templates",
+    "services",
     "clients",
     "gateway_workers",
     "users",
@@ -201,6 +203,13 @@ async def make_reference_books(db, staff: dict[str, User]) -> list[PaymentRequis
             created_at=ago(days=40),
         )
     )
+    # Справочник услуг: те же услуги и цены, что продаются в демо-сделках. Одну
+    # («Матрица судьбы») намеренно не заводим — она будет вписана менеджерами
+    # вручную и покажется в «Подсказках из истории», как на живой базе.
+    for order, (name, price) in enumerate(d.DEAL_ITEM_PRICES.items()):
+        if name in d.SERVICES_NOT_IN_CATALOG:
+            continue
+        db.add(Service(name=name, price=price, sort_order=order, created_at=ago(days=110)))
     await db.flush()
     return requisites
 
@@ -433,6 +442,10 @@ async def make_deals(
     staff: dict[str, User],
 ) -> int:
     """34 сделки во всех состояниях: 24 оплачено, 5 ждут, 2 истекли, 3 отменены."""
+    catalog = {
+        service.name: service
+        for service in (await db.execute(select(Service))).scalars().all()
+    }
     plan = (
         [DealStatus.PAID] * 24
         + [DealStatus.AWAITING] * 5
@@ -468,12 +481,16 @@ async def make_deals(
         total = 0
         for position, name in enumerate(names):
             amount = d.DEAL_ITEM_PRICES[name]
+            service = catalog.get(name)
             db.add(
                 DealItem(
                     deal_id=deal.id,
                     name=name,
                     amount=amount,
                     position=position,
+                    # Выбрана из справочника — со снимком цены по прайсу.
+                    service_id=service.id if service else None,
+                    list_price=service.price if service else None,
                     created_at=created,
                 )
             )

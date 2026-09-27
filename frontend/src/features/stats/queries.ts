@@ -1,6 +1,13 @@
 import { useQuery } from '@tanstack/react-query'
 
-import type { Granularity, ManagerStats, StatsOverview, StatsSeries } from '@/entities/types'
+import type {
+  AccountStatsRow,
+  Granularity,
+  ManagerStats,
+  ServiceStats,
+  StatsOverview,
+  StatsSeries,
+} from '@/entities/types'
 import { api } from '@/shared/api/client'
 
 export interface StatsRange {
@@ -32,6 +39,30 @@ export function useSeries(range: StatsRange, granularity: Granularity, userId?: 
           granularity,
           user_id: userId ?? undefined,
         },
+        signal,
+      ),
+  })
+}
+
+export function useServiceStats(range: StatsRange, userId?: number | null) {
+  return useQuery({
+    queryKey: ['stats', 'services', range.from, range.to, userId ?? null],
+    queryFn: ({ signal }) =>
+      api.get<ServiceStats>(
+        '/stats/services',
+        { date_from: range.from, date_to: range.to, user_id: userId ?? undefined },
+        signal,
+      ),
+  })
+}
+
+export function useAccountStats(range: StatsRange, userId?: number | null) {
+  return useQuery({
+    queryKey: ['stats', 'accounts', range.from, range.to, userId ?? null],
+    queryFn: ({ signal }) =>
+      api.get<AccountStatsRow[]>(
+        '/stats/accounts',
+        { date_from: range.from, date_to: range.to, user_id: userId ?? undefined },
         signal,
       ),
   })

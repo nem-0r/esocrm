@@ -22,7 +22,6 @@
 
 import asyncio
 import contextlib
-import io
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
@@ -34,15 +33,18 @@ from telethon import TelegramClient, events, functions
 from telethon.errors import (
     ApiIdInvalidError,
     AuthKeyUnregisteredError,
+    ChatForwardsRestrictedError,
     FloodWaitError,
     MessageEditTimeExpiredError,
     MessageIdInvalidError,
+    MessageIdsEmptyError,
     MessageNotModifiedError,
     PhoneCodeExpiredError,
     PhoneCodeInvalidError,
     PhoneNumberBannedError,
     PhoneNumberFloodError,
     PhoneNumberInvalidError,
+    RPCError,
     SendCodeUnavailableError,
     SessionPasswordNeededError,
     SessionRevokedError,
@@ -50,35 +52,59 @@ from telethon.errors import (
     UserIsBlockedError,
 )
 from telethon.sessions import StringSession
-from telethon.tl.types import (
-    DocumentAttributeAudio,
-    DocumentAttributeFilename,
-    DocumentAttributeVideo,
-    MessageMediaDocument,
-    MessageMediaPhoto,
-)
-from telethon.tl.types import (
-    User as TgUser,
-)
 from telethon.tl.types.auth import SentCodeTypeApp
 
 from app.core import crypto
 from app.core import qr as qr_image
 from app.core.config import settings
-from app.gateway.provider import CodeRequest, QrCode, QrState, SentMessage, SessionResult
+from app.gateway import mtproto_receive, mtproto_send
+from app.gateway.provider import (
+    CodeRequest,
+    ForwardImpossible,
+    MediaGone,
+    PermanentFailure,
+    QrCode,
+    QrState,
+    SentMessage,
+    SessionResult,
+)
+from app.gateway.send_plan import OutgoingFile
+from app.gateway.send_plan import plan as make_plan
 from app.models import TelegramAccount
-from app.services.inbound_service import InboundMessage, PeerData
+from app.services.inbound_service import InboundMessage
 
 log = logging.getLogger("astra.mtproto")
-
-# Сколько файла соглашаемся тянуть в память при приёме. Больше — не влезет в письмо
-# менеджеру и почти наверняка не нужно в переписке о консультации.
-MAX_INCOMING_BYTES = 25 * 1024 * 1024
 
 Sink = Callable[[int, InboundMessage], Awaitable[None]]
 ReadSink = Callable[[int, int, int], Awaitable[None]]
 StatusSink = Callable[[int, str, str | None], Awaitable[None]]
 SessionSink = Callable[[int, "SessionResult"], Awaitable[None]]
+DeleteSink = Callable[[int, int | None, list[int]], Awaitable[None]]
+
+# Ошибки Telegram, которые повтор не исправит, — и что сказать менеджеру.
+# Коды — из текста ошибки RPC: часть из них у Telethon без отдельного класса.
+PERMANENT_ERRORS: dict[str, str] = {
+    "VOICE_MESSAGES_FORBIDDEN": (
+        "Клиент запретил получать голосовые сообщения — отправьте текстом или файлом"
+    ),
+    "PRIVACY_PREMIUM_REQUIRED": (
+        "Клиент принимает сообщения только от контактов или от Telegram Premium"
+    ),
+    "YOU_BLOCKED_USER": (
+        "Этот аккаунт сам заблокировал клиента в Telegram — разблокируйте его в приложении"
+    ),
+    "INPUT_USER_DEACTIVATED": "Аккаунт клиента удалён в Telegram",
+    "USER_DEACTIVATED": "Аккаунт клиента удалён в Telegram",
+    "PEER_ID_INVALID": "Telegram не находит этого клиента — возможно, его аккаунт удалён",
+    "CHAT_WRITE_FORBIDDEN": "Telegram запрещает писать в этот чат",
+    "USER_PRIVACY_RESTRICTED": "Настройки приватности клиента не позволяют это отправить",
+    "MESSAGE_EMPTY": "Сообщение пустое — отправлять нечего",
+    "MEDIA_EMPTY": "Файл пустой или повреждён",
+}
+
+
+def permanent_reason(exc: RPCError) -> str | None:
+    return PERMANENT_ERRORS.get(str(getattr(exc, "message", "") or "").upper())
 
 # Сколько всего ждём сканирования, прежде чем закрыть попытку. Сам токен живёт
 # около полуминуты и обновляется на месте — это предел на весь вход целиком,
@@ -155,6 +181,8 @@ class MTProtoProvider:
         self._read_sink: ReadSink | None = None
         self._status_sink: StatusSink | None = None
         self._session_sink: SessionSink | None = None
+        self._delete_sink: DeleteSink | None = None
+        self._inbox_read_sink: ReadSink | None = None
         # Лок на аккаунт, не один на весь процесс: иначе подключение одного
         # (медленная сеть, Telegram не спешит отвечать) держит взаперти
         # send_message/mark_read/подтяжку истории для ВСЕХ остальных
@@ -169,6 +197,8 @@ class MTProtoProvider:
         read_sink: ReadSink | None = None,
         status_sink: StatusSink | None = None,
         session_sink: SessionSink | None = None,
+        delete_sink: DeleteSink | None = None,
+        inbox_read_sink: ReadSink | None = None,
     ) -> None:
         """Куда отдавать полученное. Записью в базу занимается шлюз, а не провайдер:
         здесь только Telegram, чтобы эту часть можно было проверять отдельно."""
@@ -176,6 +206,8 @@ class MTProtoProvider:
         self._read_sink = read_sink
         self._status_sink = status_sink
         self._session_sink = session_sink
+        self._delete_sink = delete_sink
+        self._inbox_read_sink = inbox_read_sink
 
     # --------------------------------------------------------------- клиенты
 
@@ -240,10 +272,11 @@ class MTProtoProvider:
 
         @client.on(events.MessageEdited())
         async def _on_edited(event) -> None:  # noqa: ANN001
-            await self._forward(account_id, client, event.message, live=True)
+            await self._forward(account_id, client, event.message, live=True, is_edit=True)
 
         @client.on(events.MessageRead(inbox=False))
         async def _on_read(event) -> None:  # noqa: ANN001
+            # Клиент прочитал наши сообщения — две галочки в CRM.
             if self._read_sink is None:
                 return
             chat_id = getattr(event, "chat_id", None)
@@ -251,13 +284,42 @@ class MTProtoProvider:
                 return
             await self._read_sink(account_id, int(chat_id), int(event.max_id))
 
+        @client.on(events.MessageRead(inbox=True))
+        async def _on_read_inbox(event) -> None:  # noqa: ANN001
+            # Сообщения клиента прочитали на телефоне — в CRM они тоже прочитаны.
+            if self._inbox_read_sink is None:
+                return
+            chat_id = getattr(event, "chat_id", None)
+            if chat_id is None:
+                return
+            await self._inbox_read_sink(account_id, int(chat_id), int(event.max_id))
+
+        @client.on(events.MessageDeleted())
+        async def _on_deleted(event) -> None:  # noqa: ANN001
+            # В личных чатах Telegram не говорит, из какого чата удалено: номера
+            # сообщений уникальны в пределах аккаунта, этого достаточно.
+            if self._delete_sink is None:
+                return
+            ids = [int(value) for value in (getattr(event, "deleted_ids", None) or [])]
+            if not ids:
+                return
+            chat_id = getattr(event, "chat_id", None)
+            await self._delete_sink(account_id, int(chat_id) if chat_id else None, ids)
+
     async def _forward(
-        self, account_id: int, client: TelegramClient, message, live: bool
-    ) -> None:  # noqa: ANN001
+        self,
+        account_id: int,
+        client: TelegramClient,
+        message,  # noqa: ANN001
+        live: bool,
+        is_edit: bool = False,
+    ) -> None:
         if self._sink is None:
             return
         try:
-            inbound = await self._to_inbound(client, message, live=live)
+            inbound = await mtproto_receive.to_inbound(
+                client, message, account_id, live=live, is_edit=is_edit
+            )
         except Exception:
             log.exception(
                 "Не разобрал сообщение %s аккаунта %s",
@@ -267,44 +329,6 @@ class MTProtoProvider:
             return
         if inbound is not None:
             await self._sink(account_id, inbound)
-
-    async def _to_inbound(
-        self, client: TelegramClient, message, live: bool
-    ) -> InboundMessage | None:  # noqa: ANN001
-        """Событие Telethon → то, что понимает CRM.
-
-        Собеседника берём из диалога, а не из отправителя: у исходящего сообщения
-        отправитель — мы сами, и по нему завелась бы карточка «клиента» с нашим же
-        номером. Диалог указывает на человека одинаково в обе стороны.
-
-        Группы и каналы пропускаем: продукт про личную переписку, а групповой чат
-        сломал бы правило «диалог = клиент + аккаунт».
-        """
-        partner = await message.get_chat()
-        if not isinstance(partner, TgUser) or partner.is_self or partner.bot:
-            return None
-        peer = PeerData(
-            tg_user_id=int(partner.id),
-            access_hash=int(partner.access_hash) if partner.access_hash else None,
-            username=partner.username,
-            phone=partner.phone,
-            first_name=partner.first_name,
-            last_name=partner.last_name,
-            is_bot=bool(partner.bot),
-        )
-        media_kind, attachments = await _read_media(client, message)
-        return InboundMessage(
-            peer=peer,
-            tg_message_id=int(message.id),
-            date=message.date.astimezone(UTC),
-            text=message.message or None,
-            outgoing=bool(message.out),
-            random_id=None,
-            reply_to_tg_id=int(message.reply_to_msg_id) if message.reply_to_msg_id else None,
-            media_kind=media_kind,
-            live=live,
-            attachments=attachments,
-        )
 
     # ------------------------------------------------------------------- вход
 
@@ -559,24 +583,115 @@ class MTProtoProvider:
         chat_id: int,
         text: str | None,
         random_id: int,
-        attachments: list[dict],
+        attachments: list[OutgoingFile],
     ) -> SentMessage:
+        """Отправить сообщение CRM: текст, голосовое, альбомы, документы.
+
+        Как разбить на отправки — `send_plan.plan`, как отправить —
+        `mtproto_send.execute`. Здесь — соединение и перевод ошибок Telegram
+        в понятные очереди исходящих."""
+        client = await self._guarded(account)
+        entity = await self._entity(client, account, chat_id)
+        send_plan = make_plan(text, attachments)
+        try:
+            ids = await mtproto_send.execute(
+                client,
+                entity,
+                send_plan,
+                random_id,
+                recover=self._recoverer(client, account, chat_id, entity),
+            )
+        except BaseException as exc:
+            raise self._translate(exc) from exc
+        if not ids:
+            return SentMessage(tg_message_id=None, extra_ids=[])
+        return SentMessage(tg_message_id=ids[-1], extra_ids=ids[:-1])
+
+    async def forward_messages(
+        self,
+        account: TelegramAccount,
+        to_chat_id: int,
+        from_chat_id: int,
+        tg_message_ids: list[int],
+        drop_author: bool,
+        random_id: int,
+    ) -> list[int]:
+        """Настоящая пересылка Telegram внутри одного аккаунта."""
+        client = await self._guarded(account)
+        to_peer = await self._entity(client, account, to_chat_id)
+        from_peer = await self._entity(client, account, from_chat_id)
+        try:
+            return await mtproto_send.forward(
+                client,
+                to_peer,
+                from_peer,
+                tg_message_ids,
+                drop_author=drop_author,
+                base_random_id=random_id,
+                recover=self._recoverer(client, account, to_chat_id, to_peer),
+            )
+        except (ChatForwardsRestrictedError, MessageIdInvalidError, MessageIdsEmptyError) as exc:
+            raise ForwardImpossible(str(exc)) from exc
+        except BaseException as exc:
+            raise self._translate(exc) from exc
+
+    async def download_media(
+        self, account: TelegramAccount, chat_id: int, tg_message_id: int, path: str
+    ) -> int:
+        """Докачать файл сообщения на диск — для больших файлов и повторов."""
         client = await self._guarded(account)
         entity = await self._entity(client, account, chat_id)
         try:
-            files = _as_files(attachments)
-            if files:
-                sent = await client.send_file(entity, file=files, caption=text or "")
-                sent = sent[-1] if isinstance(sent, list) else sent
-            else:
-                sent = await client.send_message(entity, text or "")
+            message = await client.get_messages(entity, ids=tg_message_id)
         except FloodWaitError as exc:
             raise RetryAfter(int(exc.seconds)) from exc
-        except (AuthKeyUnregisteredError, SessionRevokedError, UserDeactivatedBanError) as exc:
-            raise SessionLost(str(exc)) from exc
-        except UserIsBlockedError as exc:
-            raise ClientBlocked("Клиент заблокировал этот номер") from exc
-        return SentMessage(tg_message_id=int(sent.id))
+        if message is None or getattr(message, "media", None) is None:
+            raise MediaGone("Сообщение удалено в Telegram — файла больше нет")
+        try:
+            result = await client.download_media(message, file=path)
+        except FloodWaitError as exc:
+            raise RetryAfter(int(exc.seconds)) from exc
+        size = mtproto_send.local_size(path)
+        if not result or size == 0:
+            raise MediaGone("Telegram не отдал файл")
+        return size
+
+    def _translate(self, exc: BaseException) -> BaseException:
+        """Ошибка Telegram → то, что понимает очередь исходящих."""
+        if isinstance(exc, FloodWaitError):
+            return RetryAfter(int(exc.seconds))
+        if isinstance(
+            exc, (AuthKeyUnregisteredError, SessionRevokedError, UserDeactivatedBanError)
+        ):
+            return SessionLost(str(exc))
+        if isinstance(exc, UserIsBlockedError):
+            return ClientBlocked("Клиент заблокировал этот номер")
+        if isinstance(exc, RPCError) and (reason := permanent_reason(exc)):
+            return PermanentFailure(reason)
+        return exc
+
+    def _recoverer(
+        self, client: TelegramClient, account: TelegramAccount, chat_id: int, entity: Any
+    ) -> mtproto_send.RecoverIds:
+        """Как узнать номера уже отправленного раньше шага (RANDOM_ID_DUPLICATE):
+        последние исходящие в диалоге, которых ещё не знает CRM."""
+
+        async def recover(count: int, already: list[int]) -> list[int]:
+            try:
+                recent = await client.get_messages(entity, limit=max(20, count * 3))
+            except Exception:  # noqa: BLE001 — не узнали, значит не узнали: дубля всё равно нет
+                return []
+            known = await _known_tg_ids(account.id, chat_id)
+            fresh = sorted(
+                int(item.id)
+                for item in recent
+                if getattr(item, "out", False)
+                and int(item.id) not in known
+                and int(item.id) not in already
+            )
+            return fresh[-count:] if count > 0 else []
+
+        return recover
 
     async def mark_read(self, account: TelegramAccount, chat_id: int, max_id: int) -> None:
         """Менеджер прочитал в CRM — гасим непрочитанное и в самом Telegram,
@@ -595,7 +710,9 @@ class MTProtoProvider:
         client = await self._guarded(account)
         entity = await self._entity(client, account, chat_id)
         try:
-            await client.edit_message(entity, tg_message_id, text)
+            # Без разметки — как и при отправке: клиент видит ровно тот текст,
+            # что в CRM.
+            await client.edit_message(entity, tg_message_id, text, parse_mode=None)
         except MessageNotModifiedError:
             # Текст не поменялся с точки зрения Telegram — не ошибка.
             return
@@ -653,7 +770,9 @@ class MTProtoProvider:
                     if message.date.astimezone(UTC) < since:
                         break
                     try:
-                        inbound = await self._to_inbound(client, message, live=False)
+                        inbound = await mtproto_receive.to_inbound(
+                            client, message, account.id, live=False
+                        )
                     except (AuthKeyUnregisteredError, SessionRevokedError, UserDeactivatedBanError):
                         # Сессия отвалилась совсем — дальше нечем ходить ни по
                         # этому, ни по остальным диалогам. Пробрасываем вместо
@@ -757,21 +876,27 @@ class MTProtoProvider:
         return await client.get_input_entity(chat_id)
 
 
-def _as_files(attachments: list[dict]) -> list[io.BytesIO]:
-    """Тело вложения → файлоподобный объект для Telethon.
+async def _known_tg_ids(account_id: int, chat_id: int) -> set[int]:
+    """Номера Telegram, которые CRM уже знает в этом диалоге (последние 300)."""
+    from sqlalchemy import select
 
-    `.name` — не декорация: по нему Telethon определяет расширение и решает,
-    отправлять как фото/видео или как обычный документ.
-    """
-    files: list[io.BytesIO] = []
-    for item in attachments:
-        body = item.get("body")
-        if not body:
-            continue
-        buf = io.BytesIO(body)
-        buf.name = item.get("file_name") or "file"
-        files.append(buf)
-    return files
+    from app.core.db import SessionLocal
+    from app.models import Conversation, Message
+
+    async with SessionLocal() as db:
+        rows = await db.execute(
+            select(Message.tg_message_id, Message.tg_extra_ids)
+            .join(Conversation, Conversation.id == Message.conversation_id)
+            .where(Conversation.account_id == account_id, Conversation.tg_chat_id == chat_id)
+            .order_by(Message.created_at.desc())
+            .limit(300)
+        )
+        known: set[int] = set()
+        for tg_id, extra in rows.all():
+            if tg_id:
+                known.add(int(tg_id))
+            known.update(int(value) for value in (extra or []))
+    return known
 
 
 def _proxy_for(account: TelegramAccount) -> tuple | None:
@@ -791,64 +916,6 @@ def _proxy_for(account: TelegramAccount) -> tuple | None:
         log.warning("Прокси задан непонятной строкой, работаю напрямую: %s", parsed.scheme)
         return None
     return (kind, parsed.hostname, parsed.port, True, parsed.username, parsed.password)
-
-
-async def _read_media(client: TelegramClient, message) -> tuple[str | None, list[dict]]:  # noqa: ANN001
-    """Скачать вложение сразу: ссылка Telegram недолговечна, а переписку открывают и через год."""
-    # message.media truthy — не то же самое, что «собеседник прислал файл».
-    # У обычного текста со ссылкой Telegram сам прикладывает превью
-    # (MessageMediaWebPage) — media есть, а реального вложения нет. message.photo
-    # и message.video прозрачно берут картинку/видео ИЗ ЭТОГО превью, так что
-    # без явной проверки типа обычное сообщение со ссылкой попадало бы в CRM
-    # как «фото»/«документ» без содержимого вместо простого текста.
-    if not isinstance(message.media, (MessageMediaPhoto, MessageMediaDocument)):
-        return None, []
-
-    kind = "document"
-    if message.photo:
-        kind = "photo"
-    elif message.voice:
-        kind = "voice"
-    elif message.video:
-        kind = "video"
-
-    size = getattr(getattr(message, "file", None), "size", 0) or 0
-    if size > MAX_INCOMING_BYTES:
-        log.info("Файл %s байт слишком велик, сохраняю только упоминание", size)
-        return kind, []
-
-    try:
-        body = await client.download_media(message, file=bytes)
-    except Exception:
-        log.exception("Не скачал вложение сообщения %s", message.id)
-        return kind, []
-    if not body:
-        return kind, []
-
-    # У части вложений (превью ссылки, опрос, геометка, контакт) media есть,
-    # а file — нет: тело мы уже скачали выше, но по имени и расширению взять
-    # нечего. Отсюда и падала синхронизация, оставляя не пройденными все
-    # диалоги, что шли в очереди после места сбоя.
-    file = getattr(message, "file", None)
-    ext = getattr(file, "ext", None) or ""
-    name = getattr(file, "name", None) or f"{kind}-{message.id}{ext}"
-    item: dict = {
-        "file_name": name,
-        "mime_type": getattr(message.file, "mime_type", None),
-        "body": body,
-    }
-    for attribute in getattr(getattr(message, "document", None), "attributes", []) or []:
-        if isinstance(attribute, DocumentAttributeVideo):
-            item["duration_sec"] = int(attribute.duration or 0)
-            item["width"], item["height"] = attribute.w, attribute.h
-        elif isinstance(attribute, DocumentAttributeAudio):
-            item["duration_sec"] = int(attribute.duration or 0)
-        elif isinstance(attribute, DocumentAttributeFilename):
-            item["file_name"] = attribute.file_name
-    if message.photo:
-        item["width"] = getattr(message.file, "width", None)
-        item["height"] = getattr(message.file, "height", None)
-    return kind, [item]
 
 
 async def logout(provider: "MTProtoProvider", account: TelegramAccount) -> None:

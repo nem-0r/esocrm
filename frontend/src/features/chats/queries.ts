@@ -18,6 +18,7 @@ import type {
   CursorPage,
   Message,
   Template,
+  UploadResult,
 } from '@/entities/types'
 import { api } from '@/shared/api/client'
 
@@ -81,19 +82,36 @@ export function useMessages(conversationId: number | null) {
 export function useSendMessage(conversationId: number) {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: (input: {
-      text?: string
-      is_internal?: boolean
-      uploads?: {
-        upload_key: string
-        file_name: string
-        size_bytes: number
-        mime_type: string | null
-      }[]
-    }) =>
+    mutationFn: (input: { text?: string; is_internal?: boolean; uploads?: UploadResult[] }) =>
       api.post<Message>(`/conversations/${conversationId}/messages`, input),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['messages', conversationId] })
+      queryClient.invalidateQueries({ queryKey: ['conversations'] })
+      queryClient.invalidateQueries({ queryKey: ['counters'] })
+    },
+  })
+}
+
+/** Переслать сообщения из одного чата CRM в другой. */
+export function useForwardMessages() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({
+      targetId,
+      ...body
+    }: {
+      targetId: number
+      source_conversation_id: number
+      message_ids: number[]
+      hide_sender: boolean
+      comment?: string
+    }) =>
+      api.post<{ conversation_id: number; messages: Message[]; mode: 'native' | 'copy' }>(
+        `/conversations/${targetId}/forward`,
+        body,
+      ),
+    onSuccess: (_result, variables) => {
+      queryClient.invalidateQueries({ queryKey: ['messages', variables.targetId] })
       queryClient.invalidateQueries({ queryKey: ['conversations'] })
       queryClient.invalidateQueries({ queryKey: ['counters'] })
     },

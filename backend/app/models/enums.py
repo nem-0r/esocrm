@@ -60,7 +60,64 @@ class MessageKind(StrEnum):
     VIDEO = "video"
     DOCUMENT = "document"
     VOICE = "voice"
+    # Зарезервированы: база и этот код их понимают, но пока не записывают.
+    # Предыдущая версия этих значений не знает, и откат на неё (D-28) уронил бы
+    # чаты с такими сообщениями. Точный вид медиа хранится у вложения
+    # (`attachments.kind`) — по нему и подписываются «Аудио» и «Стикер».
+    # Записывать их можно не раньше следующего релиза: его откат придёт на этот
+    # код, который их уже читает.
+    AUDIO = "audio"
+    STICKER = "sticker"
     SERVICE = "service"  # служебное: клиент не видит
+
+
+class AttachmentKind(StrEnum):
+    """Вид вложения — как его показать и как отправить в Telegram.
+
+    Хранится строкой, а не типом Postgres: новые виды Telegram (а они
+    появляются) не должны требовать миграции с ALTER TYPE.
+    """
+
+    PHOTO = "photo"
+    VIDEO = "video"
+    VIDEO_NOTE = "video_note"  # «кружочек»
+    ANIMATION = "animation"  # GIF: Telegram присылает его как беззвучное mp4
+    VOICE = "voice"
+    AUDIO = "audio"
+    STICKER = "sticker"
+    DOCUMENT = "document"
+
+
+# Вид сообщения по виду его первого вложения. Вид сообщения — грубый: только
+# значения, которые читает и предыдущая версия (см. MessageKind).
+_MESSAGE_KIND_BY_ATTACHMENT: dict[str, MessageKind] = {
+    AttachmentKind.PHOTO: MessageKind.PHOTO,
+    AttachmentKind.VIDEO: MessageKind.VIDEO,
+    AttachmentKind.VIDEO_NOTE: MessageKind.VIDEO,
+    AttachmentKind.ANIMATION: MessageKind.VIDEO,
+    AttachmentKind.VOICE: MessageKind.VOICE,
+    AttachmentKind.AUDIO: MessageKind.DOCUMENT,
+    AttachmentKind.STICKER: MessageKind.DOCUMENT,
+    AttachmentKind.DOCUMENT: MessageKind.DOCUMENT,
+}
+
+
+def message_kind_for(attachment_kind: str | None) -> MessageKind:
+    return _MESSAGE_KIND_BY_ATTACHMENT.get(attachment_kind or "", MessageKind.DOCUMENT)
+
+
+class AttachmentStatus(StrEnum):
+    """Есть ли файл в нашем хранилище.
+
+    Большой файл клиента не держит сообщение: оно появляется сразу, а файл
+    докачивается в фоне. Слишком большой не качается вовсе — но и не
+    пропадает молча: менеджер видит, что файл есть и где его открыть.
+    """
+
+    READY = "ready"
+    PENDING = "pending"  # докачивается шлюзом
+    FAILED = "failed"  # попытки исчерпаны, причина в meta.error
+    TOO_LARGE = "too_large"  # больше лимита CRM — только в Telegram
 
 
 class MessageStatus(StrEnum):

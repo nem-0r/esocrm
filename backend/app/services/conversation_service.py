@@ -40,6 +40,8 @@ from app.core.deps import conversation_scope_orm, visible_account_ids
 from app.core.errors import Invalid, NotFound
 from app.models import (
     AccountManager,
+    Attachment,
+    AttachmentKind,
     Client,
     Conversation,
     Deal,
@@ -77,8 +79,18 @@ KIND_PREVIEW: dict[str, str] = {
     MessageKind.PHOTO.value: "Фото",
     MessageKind.VIDEO.value: "Видео",
     MessageKind.VOICE.value: "Голосовое сообщение",
+    MessageKind.AUDIO.value: "Аудио",
+    MessageKind.STICKER.value: "Стикер",
     MessageKind.DOCUMENT.value: "Файл",
     MessageKind.SERVICE.value: "Служебное сообщение",
+}
+# Вид сообщения грубый (музыка и стикер — «документ», см. MessageKind), точный —
+# у вложения. Где он уточняет подпись, берём его — как делает сам Telegram.
+ATTACHMENT_PREVIEW: dict[str, str] = {
+    AttachmentKind.AUDIO.value: "Аудио",
+    AttachmentKind.STICKER.value: "Стикер",
+    AttachmentKind.VIDEO_NOTE.value: "Видеосообщение",
+    AttachmentKind.ANIMATION.value: "GIF",
 }
 
 
@@ -135,15 +147,34 @@ def _scoped(stmt: Select[Any], user: User, account_ids: list[int] | None) -> Sel
 
 
 def _row_stmt() -> Select[Any]:
+    first_attachment_kind = (
+        select(Attachment.kind)
+        .where(Attachment.message_id == Message.id, Attachment.deleted_at.is_(None))
+        .order_by(Attachment.id)
+        .limit(1)
+        .scalar_subquery()
+    )
     last = (
-        select(Message.text, Message.direction, Message.kind)
+        select(
+            Message.text,
+            Message.direction,
+            Message.kind,
+            first_attachment_kind.label("attachment_kind"),
+        )
         .where(Message.conversation_id == Conversation.id, Message.deleted_at.is_(None))
         .order_by(Message.created_at.desc(), Message.id.desc())
         .limit(1)
         .lateral("last_msg")
     )
     return (
-        select(Conversation, User, last.c.text, last.c.direction, last.c.kind)
+        select(
+            Conversation,
+            User,
+            last.c.text,
+            last.c.direction,
+            last.c.kind,
+            last.c.attachment_kind,
+        )
         .join(Client, Client.id == Conversation.client_id)
         .join(TelegramAccount, TelegramAccount.id == Conversation.account_id)
         .outerjoin(User, User.id == Conversation.responsible_id)
@@ -198,10 +229,17 @@ async def _awaiting_deal_amounts(db: AsyncSession, ids: list[int]) -> dict[int, 
 # --- сборка строки ----------------------------------------------------------
 
 
-def _preview(text: str | None, direction: Direction | None, kind: MessageKind | None) -> str | None:
+def _preview(
+    text: str | None,
+    direction: Direction | None,
+    kind: MessageKind | None,
+    attachment_kind: str | None = None,
+) -> str | None:
     if direction is None:
         return None
     body = (text or "").strip()
+    if not body and attachment_kind:
+        body = ATTACHMENT_PREVIEW.get(attachment_kind, "")
     if not body and kind is not None:
         body = KIND_PREVIEW.get(str(kind), "")
     if not body:
@@ -214,7 +252,7 @@ def _preview(text: str | None, direction: Direction | None, kind: MessageKind | 
 def _row_data(
     row: Any, deal_amount: int | None, now: datetime, hours: worktime.WorkHours | None = None
 ) -> dict[str, Any]:
-    conv, responsible, text, direction, kind = row
+    conv, responsible, text, direction, kind, attachment_kind = row
     awaiting = conv.awaiting_reply_since
     # Плашку не показываем, если менеджер уже открывал чат после начала ожидания.
     seen = conv.awaiting_seen_at is not None and (
@@ -225,7 +263,7 @@ def _row_data(
         "client": ClientBrief.model_validate(conv.client),
         "account": AccountBrief.model_validate(conv.account),
         "last_message_at": conv.last_message_at,
-        "last_message_preview": _preview(text, direction, kind),
+        "last_message_preview": _preview(text, direction, kind, attachment_kind),
         "unread_count": conv.unread_count,
         "awaiting_reply_since": awaiting,
         # Менеджер уже открывал чат после начала ожидания: диалог по-прежнему

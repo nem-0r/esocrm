@@ -81,13 +81,22 @@ export interface ItemDraft {
   name: string
   /** Рубли как их набрал менеджер. В копейки переводит parseMoney. */
   amount: string
+  /** Услуга из справочника. Пусто — название вписано вручную. */
+  serviceId: number | null
 }
 
 let nextKey = 0
 
 export function newItemDraft(): ItemDraft {
   nextKey += 1
-  return { key: `item-${nextKey}`, name: '', amount: '' }
+  return { key: `item-${nextKey}`, name: '', amount: '', serviceId: null }
+}
+
+/** Копейки → текст поля: «4500» или «4500,50» — копейки не теряем. */
+export function amountInput(kopecks: number): string {
+  const whole = Math.trunc(kopecks / 100)
+  const rest = Math.abs(kopecks % 100)
+  return rest ? `${whole},${String(rest).padStart(2, '0')}` : String(whole)
 }
 
 export function draftTotal(items: ItemDraft[]): number {
@@ -107,6 +116,12 @@ export function itemsError(items: ItemDraft[]): string | null {
   return null
 }
 
-export function toItemsPayload(items: ItemDraft[]): { name: string; amount: number }[] {
-  return items.map((item) => ({ name: item.name.trim(), amount: parseMoney(item.amount) ?? 0 }))
+export function toItemsPayload(
+  items: ItemDraft[],
+): { name: string; amount: number; service_id: number | null }[] {
+  return items.map((item) => ({
+    name: item.name.trim(),
+    amount: parseMoney(item.amount) ?? 0,
+    service_id: item.serviceId,
+  }))
 }

@@ -12,6 +12,7 @@ from app.api.v1 import (
     payments,
     requisites,
     search,
+    services,
     settings,
     stats,
     templates,
@@ -29,6 +30,7 @@ api_router.include_router(clients.router, prefix="/clients", tags=["клиент
 api_router.include_router(deals.router, prefix="/deals", tags=["оплаты"])
 api_router.include_router(requisites.router, prefix="/requisites", tags=["справочники"])
 api_router.include_router(templates.router, prefix="/templates", tags=["справочники"])
+api_router.include_router(services.router, prefix="/services", tags=["справочники"])
 api_router.include_router(stats.router, prefix="/stats", tags=["статистика"])
 api_router.include_router(search.router, prefix="/search", tags=["поиск"])
 api_router.include_router(notifications.router, prefix="/notifications", tags=["уведомления"])

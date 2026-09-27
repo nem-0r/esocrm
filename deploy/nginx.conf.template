@@ -92,8 +92,9 @@ server {
     ssl_session_timeout 1d;
     ssl_session_tickets off;
 
-    # Файлы клиентов: голосовые, фото, документы из переписки.
-    client_max_body_size 50m;
+    # Файлы из CRM: голосовые, фото, видео, документы — до 200 МБ
+    # (app/services/file_service.py, MAX_UPLOAD_BYTES), с запасом на заголовки формы.
+    client_max_body_size 210m;
 
     add_header Strict-Transport-Security "max-age=31536000" always;
     add_header X-Content-Type-Options "nosniff" always;

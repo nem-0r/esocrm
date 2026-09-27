@@ -5,11 +5,12 @@ MTProto-провайдер (следующий этап). Цикл шлюза (`
 ними не знает — он вызывает только эти методы.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal, Protocol
 
 from app.core.config import settings
+from app.gateway.send_plan import OutgoingFile
 from app.models import TelegramAccount
 
 
@@ -65,9 +66,34 @@ class SessionResult:
 
 @dataclass(slots=True)
 class SentMessage:
-    """Ответ на отправку исходящего сообщения."""
+    """Ответ на отправку исходящего сообщения.
 
-    tg_message_id: int
+    Одно сообщение CRM может стать несколькими в Telegram (альбом, длинный
+    текст отдельно от файла). `tg_message_id` — последнее из них, остальные —
+    в `extra_ids`: по ним подтяжка истории узнаёт своё и не задваивает.
+    Пусто — Telegram подтвердил, что это уже было отправлено раньше, а номер
+    восстановить не удалось: сообщение у клиента есть, дубля нет.
+    """
+
+    tg_message_id: int | None
+    extra_ids: list[int] = field(default_factory=list)
+
+
+class PermanentFailure(RuntimeError):
+    """Отправка не получится ни сейчас, ни через минуту — повторять бессмысленно.
+
+    Текст уходит менеджеру под сообщением: «клиент запретил голосовые»,
+    «аккаунт клиента удалён» — то, что можно исправить только иначе.
+    """
+
+
+class ForwardImpossible(RuntimeError):
+    """Настоящая пересылка Telegram невозможна (исходное сообщение удалено,
+    пересылка запрещена) — шлюз отправит копию из файлов CRM."""
+
+
+class MediaGone(RuntimeError):
+    """Файл больше не достать из Telegram: сообщение удалено или недоступно."""
 
 
 class TelegramProvider(Protocol):
@@ -89,8 +115,27 @@ class TelegramProvider(Protocol):
         chat_id: int,
         text: str | None,
         random_id: int,
-        attachments: list[dict[str, Any]],
+        attachments: list[OutgoingFile],
     ) -> SentMessage: ...
+
+    async def forward_messages(
+        self,
+        account: TelegramAccount,
+        to_chat_id: int,
+        from_chat_id: int,
+        tg_message_ids: list[int],
+        drop_author: bool,
+        random_id: int,
+    ) -> list[int]:
+        """Настоящая пересылка Telegram внутри одного аккаунта. Номера новых
+        сообщений — в порядке исходных."""
+        ...
+
+    async def download_media(
+        self, account: TelegramAccount, chat_id: int, tg_message_id: int, path: str
+    ) -> int:
+        """Докачать файл сообщения на диск. Возвращает размер в байтах."""
+        ...
 
     async def start(self, account: TelegramAccount) -> None:
         """Поднять сессию: для MTProto — подключить клиента. Вызывается при получении аренды."""
@@ -106,9 +151,12 @@ class TelegramProvider(Protocol):
         read_sink: Any = None,
         status_sink: Any = None,
         session_sink: Any = None,
+        delete_sink: Any = None,
+        inbox_read_sink: Any = None,
     ) -> None:
-        """Куда отдавать полученное из Telegram: входящие, отметки о прочтении,
-        смену состояния сессии, а также готовую сессию после входа по QR.
+        """Куда отдавать полученное из Telegram: входящие и правки, отметки о
+        прочтении (клиентом — наших, нами с телефона — его), удаления, смену
+        состояния сессии, а также готовую сессию после входа по QR.
         Записью в базу занимается шлюз, не провайдер."""
         ...
 

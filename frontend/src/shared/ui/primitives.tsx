@@ -103,7 +103,7 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(function Input(
       {leading && <span className="shrink-0 text-ink-faint">{leading}</span>}
       <input
         ref={ref}
-        className="min-w-0 flex-1 bg-transparent text-sm text-ink placeholder:text-ink-faint focus:outline-none"
+        className="min-w-0 flex-1 bg-transparent text-sm text-ink placeholder:text-ink-faint focus:outline-none focus-visible:ring-0 focus-visible:ring-offset-0"
         {...rest}
       />
       {trailing && <span className="shrink-0">{trailing}</span>}

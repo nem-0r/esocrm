@@ -6,8 +6,14 @@ from fastapi import APIRouter, Path, Query
 
 from app.core.deps import CurrentUser, Db
 from app.schemas.common import CursorPage
-from app.schemas.message import MessageCreate, MessageEdit, MessageOut
-from app.services import message_service
+from app.schemas.message import (
+    ForwardRequest,
+    ForwardResult,
+    MessageCreate,
+    MessageEdit,
+    MessageOut,
+)
+from app.services import forward_service, message_service
 
 router = APIRouter()
 
@@ -59,3 +65,14 @@ async def edit_message(
     payload: MessageEdit,
 ) -> MessageOut:
     return await message_service.edit_message(db, user, conversation_id, message_id, payload.text)
+
+
+@router.post(
+    "/{conversation_id}/forward",
+    status_code=201,
+    summary="Переслать сообщения из другого чата в этот",
+)
+async def forward_messages(
+    db: Db, user: CurrentUser, conversation_id: ConversationId, payload: ForwardRequest
+) -> ForwardResult:
+    return await forward_service.forward(db, user, conversation_id, payload)

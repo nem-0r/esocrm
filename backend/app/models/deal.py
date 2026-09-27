@@ -178,8 +178,13 @@ class Deal(Base, PKMixin, TimestampMixin):
 
 
 class DealItem(Base, PKMixin, TimestampMixin):
-    """Позиция сделки. В MVP название и сумму менеджер вводит вручную —
-    справочника услуг нет."""
+    """Позиция сделки.
+
+    Менеджер выбирает услугу из справочника или вписывает своё название —
+    справочник помогает, а не запрещает. `name` — снимок названия на момент
+    продажи, `list_price` — снимок цены по прайсу: правка справочника потом
+    не переписывает ни счёт клиента, ни статистику прошлых месяцев.
+    """
 
     __tablename__ = "deal_items"
 
@@ -187,10 +192,17 @@ class DealItem(Base, PKMixin, TimestampMixin):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     amount: Mapped[int] = mapped_column(BigInteger, nullable=False)
     position: Mapped[int] = mapped_column(SmallInteger, nullable=False, server_default="0")
+    service_id: Mapped[int | None] = mapped_column(
+        ForeignKey("services.id", ondelete="SET NULL")
+    )
+    list_price: Mapped[int | None] = mapped_column(BigInteger)
 
     deal: Mapped[Deal] = relationship(back_populates="items")
 
-    __table_args__ = (Index("ix_deal_items_deal_id", "deal_id"),)
+    __table_args__ = (
+        Index("ix_deal_items_deal_id", "deal_id"),
+        Index("ix_deal_items_service_id", "service_id"),
+    )
 
 
 class DealEvent(Base, PKMixin, TimestampMixin):

@@ -430,6 +430,201 @@ async def check_managers(
     )
 
 
+
+# ----------------------------------------------- показатели от 27.09.2026 (§8)
+
+# Ожидания клиента в периоде: входящее, начавшее ожидание, и ближайший ответ
+# после него. Независимо от сервиса — подзапросами, а не оконными функциями.
+# Диалоги, которые ведёт руководитель, в скорость менеджеров не входят.
+WAITS_DETAIL_SQL = """
+select m.created_at, n.nxt
+from messages m
+join conversations c on c.id = m.conversation_id
+cross join lateral (
+    select min(o.created_at) as nxt from messages o
+    where o.conversation_id = m.conversation_id
+      and o.direction = 'out' and o.is_internal = false and o.deleted_at is null
+      and (o.created_at, o.id) > (m.created_at, m.id)
+) n
+where m.direction = 'in' and m.is_internal = false and m.deleted_at is null
+  and m.created_at >= :lo and m.created_at < :hi
+  and not exists (select 1 from users ru where ru.id = c.responsible_id and ru.role = 'admin')
+  and not exists (
+    select 1 from messages p
+    where p.conversation_id = m.conversation_id
+      and p.direction = 'in' and p.is_internal = false and p.deleted_at is null
+      and (p.created_at, p.id) < (m.created_at, m.id)
+      and not exists (
+        select 1 from messages q
+        where q.conversation_id = m.conversation_id
+          and q.direction = 'out' and q.is_internal = false and q.deleted_at is null
+          and (q.created_at, q.id) > (p.created_at, p.id)
+          and (q.created_at, q.id) < (m.created_at, m.id)
+      )
+  )
+"""
+
+
+async def check_new_metrics(
+    api: httpx.AsyncClient, db: Any, title: str, since: date, until: date
+) -> None:
+    """Средний чек, конверсии, «вовремя», просрочки, «ждут сейчас», разрезы."""
+    print(f"\nНовые показатели · {title} ({since} — {until})")
+    params = {"date_from": since.isoformat(), "date_to": until.isoformat()}
+    overview = (await api.get(f"{BASE}/stats/overview", params=params)).json()
+    lo, hi = bounds(since, until)
+    span = hi - lo
+
+    amount, count = await sql_sales(db, lo, hi)
+    prev_amount, prev_count = await sql_sales(db, lo - span, lo)
+    avg_check = round(amount / count) if count else None
+    prev_check = round(prev_amount / prev_count) if prev_count else None
+    check(f"{title}: средний чек", avg_check, overview["avg_check"])
+    close_enough(
+        f"{title}: прирост среднего чека, %",
+        round((avg_check - prev_check) / prev_check * 100, 1)
+        if avg_check is not None and prev_check
+        else None,
+        overview["avg_check_delta_pct"],
+        0.11,
+    )
+
+    inv = (
+        await db.execute(
+            text(
+                "select count(*) sent, count(*) filter (where status='paid') paid, "
+                "count(*) filter (where status='cancelled') cancelled, "
+                "count(*) filter (where status='expired') expired "
+                "from deals where sent_at >= :lo and sent_at < :hi"
+            ),
+            {"lo": lo, "hi": hi},
+        )
+    ).one()
+    check(f"{title}: выставлено счетов", int(inv.sent), overview["invoices_sent"])
+    check(f"{title}: из них оплачено", int(inv.paid), overview["invoices_paid"])
+    check(f"{title}: из них отменено", int(inv.cancelled), overview["invoices_cancelled"])
+    check(f"{title}: из них истекло", int(inv.expired), overview["invoices_expired"])
+    close_enough(
+        f"{title}: конверсия счетов, %",
+        round(int(inv.paid) / int(inv.sent) * 100, 1) if inv.sent else None,
+        overview["invoice_conversion_pct"],
+        0.11,
+    )
+
+    fresh = (
+        await db.execute(
+            text(
+                "select count(*) total, count(*) filter (where exists ("
+                "  select 1 from deals d where d.client_id = cl.id and d.status = 'paid')) paying "
+                "from clients cl where cl.deleted_at is null "
+                "and cl.first_contact_at >= :lo and cl.first_contact_at < :hi"
+            ),
+            {"lo": lo, "hi": hi},
+        )
+    ).one()
+    check(f"{title}: новых клиентов купили", int(fresh.paying), overview["new_clients_paying"])
+
+    goal = overview["response_goal_minutes"] * 60
+    late = overview["late_threshold_minutes"] * 60
+    now = datetime.now(UTC)
+    waits = (await db.execute(text(WAITS_DETAIL_SQL), {"lo": lo, "hi": hi})).all()
+    elapsed = [((row.nxt or now) - row.created_at).total_seconds() for row in waits]
+    answered = [row.nxt is not None for row in waits]
+    in_goal = sum(1 for e, a in zip(elapsed, answered, strict=True) if a and e <= goal)
+    decided = sum(1 for e, a in zip(elapsed, answered, strict=True) if a or e > goal)
+    late_count = sum(1 for e in elapsed if e > late)
+    check(f"{title}: ожиданий клиента", len(waits), overview["waits_total"])
+    check(f"{title}: ответили вовремя", in_goal, overview["waits_in_goal"])
+    check(f"{title}: ожиданий с известным итогом", decided, overview["waits_decided"])
+    check(f"{title}: просрочек", late_count, overview["late_count"])
+
+    now_row = (
+        await db.execute(
+            text(
+                "select count(*) as total, count(*) filter ("
+                "  where awaiting_reply_since < now() - make_interval(secs => :late)) as over_count "
+                "from conversations where awaiting_reply_since is not null"
+            ),
+            {"late": float(late)},
+        )
+    ).one()
+    check(f"{title}: ждут ответа сейчас", int(now_row.total), overview["awaiting_reply_now"])
+    check(
+        f"{title}: из них дольше порога",
+        int(now_row.over_count),
+        overview["awaiting_reply_over_threshold"],
+    )
+
+    services = (await api.get(f"{BASE}/stats/services", params=params)).json()
+    numbers_are_sane(f"услуги · {title}", services)
+    check(
+        f"{title}: выручка по услугам = сумме продаж",
+        amount,
+        sum(row["revenue"] for row in services["rows"]),
+    )
+    for row in services["rows"][:5]:
+        if row["key"] == "other":
+            continue
+        if row["service_id"]:
+            clause, value = "i.service_id = :v", row["service_id"]
+        else:
+            clause = "i.service_id is null and regexp_replace(lower(trim(i.name)), '\\s+', ' ', 'g') = :v"
+            value = row["key"][1:]
+        expected = (
+            await db.execute(
+                text(
+                    "select coalesce(sum(i.amount),0) s, count(*) c from deal_items i "
+                    "join deals d on d.id = i.deal_id where d.status='paid' "
+                    "and d.paid_at >= :lo and d.paid_at < :hi and " + clause
+                ),
+                {"lo": lo, "hi": hi, "v": value},
+            )
+        ).one()
+        check(f"{title}: услуга «{row['name']}» · выручка", int(expected.s), row["revenue"])
+        check(f"{title}: услуга «{row['name']}» · продано", int(expected.c), row["sold_count"])
+
+    accounts = (await api.get(f"{BASE}/stats/accounts", params=params)).json()
+    numbers_are_sane(f"аккаунты · {title}", accounts)
+    check(
+        f"{title}: продажи по аккаунтам = сумме продаж",
+        amount,
+        sum(row["sales_amount"] for row in accounts),
+    )
+    for row in accounts:
+        expected = (
+            await db.execute(
+                text(
+                    "select (select count(*) from conversations c where c.account_id = :a "
+                    "        and c.started_at >= :lo and c.started_at < :hi) fresh, "
+                    "       (select coalesce(sum(d.total_amount),0) from deals d "
+                    "        join conversations c on c.id = d.conversation_id "
+                    "        where c.account_id = :a and d.status='paid' "
+                    "        and d.paid_at >= :lo and d.paid_at < :hi) sales"
+                ),
+                {"a": row["account"]["id"], "lo": lo, "hi": hi},
+            )
+        ).one()
+        check(f"{title}: {row['account']['title']} · продажи", int(expected.sales), row["sales_amount"])
+        check(f"{title}: {row['account']['title']} · новых чатов", int(expected.fresh), row["new_conversations"])
+
+    managers = (await api.get(f"{BASE}/stats/managers", params=params)).json()
+    for row in managers:
+        name = row["user"]["full_name"]
+        expected_check = round(row["sales_amount"] / row["sales_count"]) if row["sales_count"] else None
+        check(f"{title}: {name} · средний чек", expected_check, row["avg_check"])
+        inv_row = (
+            await db.execute(
+                text(
+                    "select count(*) sent, count(*) filter (where status='paid') paid from deals "
+                    "where sold_by_id = :u and sent_at >= :lo and sent_at < :hi"
+                ),
+                {"u": row["user"]["id"], "lo": lo, "hi": hi},
+            )
+        ).one()
+        check(f"{title}: {name} · выставил счетов", int(inv_row.sent), row["invoices_sent"])
+        check(f"{title}: {name} · оплачено из них", int(inv_row.paid), row["invoices_paid"])
+
+
 async def check_deals_tiles(
     api: httpx.AsyncClient, db: Any, title: str, since: date, until: date
 ) -> None:
@@ -831,6 +1026,8 @@ async def main() -> int:  # noqa: PLR0915
         ]
         for title, since, until in periods:
             await check_period(api, db, title, since, until)
+        for title, since, until in periods[:5]:
+            await check_new_metrics(api, db, title, since, until)
 
         print("\nПериод по умолчанию — текущий месяц")
         default = (await api.get(f"{BASE}/stats/overview")).json()

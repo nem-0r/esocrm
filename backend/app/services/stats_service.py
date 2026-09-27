@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.deps import visible_account_ids
 from app.core.errors import Invalid, NotFound
 from app.models import DealStatus, User, UserRole
-from app.services import settings_service, worktime
+from app.services import settings_service, stats_extra, worktime
 from app.services.worktime import day_bounds
 
 # Ниже несколько запросов собираются склейкой строк. Это безопасно и помечено
@@ -102,27 +102,6 @@ def _account_clause(scope: Scope, prefix: str = "c") -> str:
     return f" and {prefix}.account_id = any(:account_ids)" + own
 
 
-def _exclude_admin_clause(scope: Scope, prefix: str = "c") -> str:
-    """Свой ответ руководителя не должен красить среднюю скорость менеджеров.
-
-    Руководитель иногда подстраховывает менеджера и отвечает клиенту сам — тогда
-    диалог достаётся ему («кто первый ответил, тот и ведёт»). Раньше такой ответ
-    попадал в общее среднее время ответа наравне с ответами менеджеров. Правило
-    зафиксировано docs/03-business-rules.md §10 (2026-09-17): среднее время ответа —
-    показатель скорости менеджеров, руководитель в него не входит.
-
-    Действует только на агрегате «по всем» (scope.account_ids is None) — общий
-    показатель и разбивка по менеджерам. У личного отчёта конкретного человека
-    (свой профиль, карточка сотрудника) диалоги и так уже отфильтрованы по его id.
-    """
-    if scope.account_ids is not None:
-        return ""
-    return (
-        f" and not exists (select 1 from users ru where ru.id = {prefix}.responsible_id"
-        " and ru.role = 'admin')"
-    )
-
-
 def _params(scope: Scope, start: datetime, end: datetime) -> dict[str, Any]:
     params: dict[str, Any] = {"start": start, "end": end, "paid": DealStatus.PAID.value}
     if scope.seller_ids is not None:
@@ -164,51 +143,6 @@ async def _elapsed_sql(db: AsyncSession) -> tuple[str, dict[str, Any]]:
     )
 
 
-async def _avg_response_seconds(
-    db: AsyncSession, scope: Scope, start: datetime, end: datetime
-) -> int | None:
-    """Среднее время ответа.
-
-    В расчёт идут только входящие, которые начали ожидание: если клиент написал
-    подряд три сообщения, это одно ожидание, а не три. Служебные заметки
-    исключены — они клиенту не уходят и ответом не являются.
-    """
-    sql = text(
-        """
-        with base as (
-            select m.conversation_id, m.direction, m.created_at,
-                   lag(m.direction) over (
-                       partition by m.conversation_id order by m.created_at, m.id
-                   ) as prev_direction,
-                   min(m.created_at) filter (where m.direction = 'out') over (
-                       partition by m.conversation_id order by m.created_at, m.id
-                       rows between 1 following and unbounded following
-                   ) as next_out
-            from messages m
-            join conversations c on c.id = m.conversation_id
-            where m.deleted_at is null and m.is_internal = false
-        """
-        + _account_clause(scope)
-        + _exclude_admin_clause(scope)
-        + """
-        )
-        select avg(ELAPSED)::numeric as avg_seconds
-        from base
-        where direction = 'in'
-          and next_out is not null
-          and (prev_direction is null or prev_direction = 'out')
-          and created_at >= :start and created_at < :end
-        """
-    )
-    elapsed, extra = await _elapsed_sql(db)
-    value = (
-        await db.execute(
-            text(str(sql).replace("ELAPSED", elapsed)), {**_params(scope, start, end), **extra}
-        )
-    ).scalar_one_or_none()
-    return None if value is None else int(round(float(value)))
-
-
 async def _active_conversations(
     db: AsyncSession, scope: Scope, start: datetime, end: datetime
 ) -> int:
@@ -218,23 +152,6 @@ async def _active_conversations(
         "where m.deleted_at is null and m.created_at >= :start and m.created_at < :end"
         + _account_clause(scope)
     )
-    return int((await db.execute(sql, _params(scope, start, end))).scalar_one())
-
-
-async def _new_clients(db: AsyncSession, scope: Scope, start: datetime, end: datetime) -> int:
-    if scope.account_ids is None:
-        sql = text(
-            "select count(*) from clients "
-            "where deleted_at is null and first_contact_at >= :start and first_contact_at < :end"
-        )
-    else:
-        sql = text(
-            "select count(distinct cl.id) from clients cl "
-            "join conversations c on c.client_id = cl.id "
-            "where cl.deleted_at is null "
-            "and cl.first_contact_at >= :start and cl.first_contact_at < :end"
-            + _account_clause(scope)
-        )
     return int((await db.execute(sql, _params(scope, start, end))).scalar_one())
 
 
@@ -257,16 +174,37 @@ async def overview(
     scope = await build_scope(db, user, user_id)
     goal = int(await settings_service.get_value(db, "response_time_goal_minutes"))
 
+    banner = int(await settings_service.get_value(db, "awaiting_banner_minutes") or 30)
     if scope.empty:
         return {
             "sales_amount": 0,
             "sales_count": 0,
             "sales_amount_delta_pct": None,
             "sales_count_delta": None,
+            "avg_check": None,
+            "avg_check_delta_pct": None,
             "avg_response_seconds": None,
             "response_goal_minutes": goal,
+            "late_threshold_minutes": banner,
+            "waits_total": 0,
+            "waits_in_goal": 0,
+            "waits_decided": 0,
+            "in_goal_pct": None,
+            "late_count": 0,
+            "awaiting_reply_now": 0,
+            "awaiting_reply_over_threshold": 0,
             "active_conversations": 0,
             "new_clients": 0,
+            "new_clients_paying": 0,
+            "new_clients_conversion_pct": None,
+            "invoices_sent": 0,
+            "invoices_paid": 0,
+            "invoices_awaiting": 0,
+            "invoices_cancelled": 0,
+            "invoices_expired": 0,
+            "invoices_sent_amount": 0,
+            "invoices_paid_amount": 0,
+            "invoice_conversion_pct": None,
             "awaiting_amount": 0,
             "awaiting_count": 0,
         }
@@ -278,6 +216,14 @@ async def overview(
     amount, count = await _sales(db, scope, start, end)
     prev_amount, prev_count = await _sales(db, scope, prev_start, prev_end)
     awaiting_amount, awaiting_count = await _awaiting(db, scope)
+    speed = (await stats_extra.response_stats(db, scope, start, end)).get(0) or (
+        stats_extra.ResponseStats()
+    )
+    invoices = await stats_extra.invoice_conversion(db, scope, start, end)
+    new_total, new_paying = await stats_extra.new_client_conversion(db, scope, start, end)
+    waiting_now, waiting_over = await stats_extra.awaiting_now(db, scope)
+    avg_check = round(amount / count) if count else None
+    prev_avg_check = round(prev_amount / prev_count) if prev_count else None
 
     return {
         "sales_amount": amount,
@@ -287,13 +233,67 @@ async def overview(
             round((amount - prev_amount) / prev_amount * 100, 1) if prev_amount else None
         ),
         "sales_count_delta": count - prev_count if prev_count else None,
-        "avg_response_seconds": await _avg_response_seconds(db, scope, start, end),
+        "avg_check": avg_check,
+        "avg_check_delta_pct": (
+            round((avg_check - prev_avg_check) / prev_avg_check * 100, 1)
+            if avg_check is not None and prev_avg_check
+            else None
+        ),
+        "avg_response_seconds": speed.avg_seconds,
         "response_goal_minutes": goal,
+        "late_threshold_minutes": banner,
+        "waits_total": speed.waits,
+        "waits_in_goal": speed.in_goal,
+        "waits_decided": speed.decided,
+        "in_goal_pct": speed.in_goal_pct,
+        "late_count": speed.late,
+        "awaiting_reply_now": waiting_now,
+        "awaiting_reply_over_threshold": waiting_over,
         "active_conversations": await _active_conversations(db, scope, start, end),
-        "new_clients": await _new_clients(db, scope, start, end),
+        "new_clients": new_total,
+        "new_clients_paying": new_paying,
+        "new_clients_conversion_pct": (
+            round(new_paying / new_total * 100, 1) if new_total else None
+        ),
+        "invoices_sent": invoices["sent"],
+        "invoices_paid": invoices["paid"],
+        "invoices_awaiting": invoices["awaiting"],
+        "invoices_cancelled": invoices["cancelled"],
+        "invoices_expired": invoices["expired"],
+        "invoices_sent_amount": invoices["sent_amount"],
+        "invoices_paid_amount": invoices["paid_amount"],
+        "invoice_conversion_pct": (
+            round(invoices["paid"] / invoices["sent"] * 100, 1) if invoices["sent"] else None
+        ),
         "awaiting_amount": awaiting_amount,
         "awaiting_count": awaiting_count,
     }
+
+
+async def services(
+    db: AsyncSession, user: User, date_from: date, date_to: date, user_id: int | None
+) -> dict[str, Any]:
+    """Продажи в разрезе услуг — у менеджера свои, у руководителя все."""
+    if date_from > date_to:
+        raise Invalid("Начало периода позже его конца")
+    scope = await build_scope(db, user, user_id)
+    if scope.empty:
+        return {"rows": [], "total_revenue": 0}
+    start, end = await day_bounds(db, date_from, date_to)
+    return await stats_extra.by_service(db, scope, start, end)
+
+
+async def accounts(
+    db: AsyncSession, user: User, date_from: date, date_to: date, user_id: int | None
+) -> list[dict[str, Any]]:
+    """Разрез по аккаунтам (направлениям воронки) — ТЗ 01.09, «расширенная аналитика»."""
+    if date_from > date_to:
+        raise Invalid("Начало периода позже его конца")
+    scope = await build_scope(db, user, user_id)
+    if scope.empty:
+        return []
+    start, end = await day_bounds(db, date_from, date_to)
+    return await stats_extra.by_account(db, scope, start, end)
 
 
 async def series(
@@ -388,7 +388,10 @@ async def managers(
                coalesce(sales.amount, 0) as sales_amount,
                coalesce(sales.cnt, 0) as sales_count,
                coalesce(awaiting.cnt, 0) as awaiting_count,
-               coalesce(active.cnt, 0) as active_conversations
+               coalesce(active.cnt, 0) as active_conversations,
+               coalesce(invoices.sent, 0) as invoices_sent,
+               coalesce(invoices.paid, 0) as invoices_paid,
+               coalesce(waiting.cnt, 0) as awaiting_reply_now
         from users u
         left join (
             select d.sold_by_id as uid, sum(d.total_amount) as amount, count(*) as cnt
@@ -407,6 +410,19 @@ async def managers(
             where m.created_at >= :start and m.created_at < :end and m.deleted_at is null
             group by 1
         ) active on active.uid = u.id
+        left join (
+            select d.sold_by_id as uid, count(*) as sent,
+                   count(*) filter (where d.status = 'paid') as paid
+            from deals d
+            where d.sent_at >= :start and d.sent_at < :end
+            group by 1
+        ) invoices on invoices.uid = u.id
+        left join (
+            select c.responsible_id as uid, count(*) as cnt
+            from conversations c
+            where c.awaiting_reply_since is not null
+            group by 1
+        ) waiting on waiting.uid = u.id
         -- Только менеджеры: это таблица их скорости и нагрузки, а не общей кассы.
         -- Руководитель сюда не входит, даже если сам закрыл продажу или подстраховал
         -- чат (docs/03-business-rules.md §10, 2026-09-17) — его деньги по-прежнему
@@ -418,64 +434,39 @@ async def managers(
         """
     )
     rows = (await db.execute(sql, {"start": start, "end": end})).all()
-    response_by_user = await _avg_response_by_manager(db, start, end)
-
-    return [
-        {
-            "user": {
-                "id": row.id,
-                "full_name": row.full_name,
-                "avatar_color": row.avatar_color,
-            },
-            "sales_amount": int(row.sales_amount),
-            "sales_count": int(row.sales_count),
-            "avg_response_seconds": response_by_user.get(row.id),
-            "active_conversations": int(row.active_conversations),
-            "awaiting_count": int(row.awaiting_count),
-        }
-        for row in rows
-    ]
-
-
-async def _avg_response_by_manager(
-    db: AsyncSession, start: datetime, end: datetime
-) -> dict[int, int]:
-    """Время ответа в разрезе менеджеров — одним запросом, без обращения на строку.
-
-    Ожидание относится к тому, кто ведёт диалог: сделку мог создать один менеджер,
-    а отвечать в чате — другой.
-    """
-    sql = text(
-        """
-        with base as (
-            select c.responsible_id as uid, m.direction, m.created_at,
-                   lag(m.direction) over (
-                       partition by m.conversation_id order by m.created_at, m.id
-                   ) as prev_direction,
-                   min(m.created_at) filter (where m.direction = 'out') over (
-                       partition by m.conversation_id order by m.created_at, m.id
-                       rows between 1 following and unbounded following
-                   ) as next_out
-            from messages m
-            join conversations c on c.id = m.conversation_id
-            where m.deleted_at is null and m.is_internal = false and c.responsible_id is not null
-        )
-        select uid, avg(ELAPSED)::numeric as avg_seconds
-        from base
-        where direction = 'in'
-          and next_out is not null
-          and (prev_direction is null or prev_direction = 'out')
-          and created_at >= :start and created_at < :end
-        group by uid
-        """
+    speed = await stats_extra.response_stats(
+        db, Scope(None, None), start, end, group_by="responsible"
     )
-    elapsed, extra = await _elapsed_sql(db)
-    rows = (
-        await db.execute(
-            text(str(sql).replace("ELAPSED", elapsed)), {"start": start, "end": end, **extra}
+
+    result = []
+    for row in rows:
+        stats = speed.get(int(row.id))
+        count = int(row.sales_count)
+        sent = int(row.invoices_sent)
+        result.append(
+            {
+                "user": {
+                    "id": row.id,
+                    "full_name": row.full_name,
+                    "avatar_color": row.avatar_color,
+                },
+                "sales_amount": int(row.sales_amount),
+                "sales_count": count,
+                "avg_check": round(int(row.sales_amount) / count) if count else None,
+                "avg_response_seconds": stats.avg_seconds if stats else None,
+                "in_goal_pct": stats.in_goal_pct if stats else None,
+                "late_count": stats.late if stats else 0,
+                "active_conversations": int(row.active_conversations),
+                "awaiting_count": int(row.awaiting_count),
+                "awaiting_reply_now": int(row.awaiting_reply_now),
+                "invoices_sent": sent,
+                "invoices_paid": int(row.invoices_paid),
+                "invoice_conversion_pct": (
+                    round(int(row.invoices_paid) / sent * 100, 1) if sent else None
+                ),
+            }
         )
-    ).all()
-    return {int(row.uid): int(round(float(row.avg_seconds))) for row in rows if row.avg_seconds}
+    return result
 
 
 async def personal_avg_response_seconds(db: AsyncSession, user_id: int) -> int | None:

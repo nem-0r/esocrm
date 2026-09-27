@@ -7,9 +7,7 @@ import {
   Info,
   Paperclip,
   Pencil,
-  Plus,
   Send,
-  Trash2,
   X,
 } from 'lucide-react'
 import { useRef, useState } from 'react'
@@ -27,7 +25,6 @@ import {
   ErrorState,
   Field,
   InlineError,
-  Input,
   ListSkeleton,
   SectionTitle,
   Select,
@@ -35,12 +32,14 @@ import {
   Textarea,
 } from '@/shared/ui'
 import { ImagePreview } from '@/features/chats/components/MediaAttachment'
+import { ItemsEditor } from '@/features/deals/components/ItemsEditor'
 import { PaymentsLayout } from '@/features/deals/components/PaymentsLayout'
 import {
   DEAL_EVENT_LABEL,
   DEAL_STATUS_LABEL,
   DEAL_STATUS_TONE,
   PAYMENT_METHOD_LABEL,
+  amountInput,
   canCancel,
   canEdit,
   canPay,
@@ -354,7 +353,8 @@ function DealPane({ dealId }: { dealId: number }) {
                       ? deal.items.map((item) => ({
                           key: `edit-${item.id}`,
                           name: item.name,
-                          amount: (item.amount / 100).toFixed(2),
+                          amount: amountInput(item.amount),
+                          serviceId: item.service_id ?? null,
                         }))
                       : [newItemDraft()],
                   )
@@ -525,60 +525,7 @@ function DealPane({ dealId }: { dealId: number }) {
             </p>
           )}
 
-          <section className="flex flex-col gap-2">
-            <span className="text-label uppercase tracking-wide text-ink-faint">
-              Услуги · {editItems.length}
-            </span>
-            {editItems.map((item, index) => (
-              <div key={item.key} className="flex flex-col gap-2 rounded-md bg-surface-raised p-3">
-                <div className="flex items-center gap-2">
-                  <Input
-                    className="flex-1 bg-surface"
-                    value={item.name}
-                    placeholder="Название услуги"
-                    onChange={(event) =>
-                      setEditItems((prev) =>
-                        prev.map((row, i) =>
-                          i === index ? { ...row, name: event.target.value } : row,
-                        ),
-                      )
-                    }
-                  />
-                  {editItems.length > 1 && (
-                    <button
-                      aria-label="Убрать услугу"
-                      onClick={() => setEditItems((prev) => prev.filter((_, i) => i !== index))}
-                      className="flex size-9 shrink-0 items-center justify-center rounded text-ink-faint transition-colors hover:bg-surface hover:text-danger"
-                    >
-                      <Trash2 className="size-4" aria-hidden />
-                    </button>
-                  )}
-                </div>
-                <Input
-                  className="bg-surface"
-                  inputMode="numeric"
-                  value={item.amount}
-                  placeholder="Стоимость, ₽"
-                  onChange={(event) =>
-                    setEditItems((prev) =>
-                      prev.map((row, i) =>
-                        i === index ? { ...row, amount: event.target.value } : row,
-                      ),
-                    )
-                  }
-                />
-              </div>
-            ))}
-            <Button
-              variant="secondary"
-              size="sm"
-              className="self-start"
-              onClick={() => setEditItems((prev) => [...prev, newItemDraft()])}
-            >
-              <Plus className="size-4" aria-hidden />
-              Добавить услугу
-            </Button>
-          </section>
+          <ItemsEditor items={editItems} onChange={setEditItems} />
 
           {editNeedsRequisite && (
             <Field label="Счёт получателя" required>

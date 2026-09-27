@@ -48,6 +48,12 @@ export function money(kopecks: number | null | undefined): string {
     : `${sign}${grouped},${String(cents).padStart(2, '0')} ₽`
 }
 
+/** Средние (средний чек) — до рубля: копейки в среднем значении только шумят. */
+export function moneyWhole(kopecks: number | null | undefined): string {
+  if (kopecks === null || kopecks === undefined) return '—'
+  return money(Math.round(kopecks / 100) * 100)
+}
+
 /** Без знака валюты — для полей ввода. */
 export function moneyPlain(kopecks: number): string {
   return String(Math.round(kopecks / 100))

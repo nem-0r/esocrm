@@ -28,6 +28,9 @@ dependencies = [
   # Invoice API Робокассы (app/services/robokassa.py) — единственный способ,
   # которым магазин esoterra-pay принимает чек 54-ФЗ, требует HTTP-запроса.
   "httpx>=0.27",
+  # Telethon сам уменьшает фото больше 2560 px / 10 МБ, если Pillow установлен —
+  # иначе Telegram такое фото отклоняет. Заодно размеры картинок при загрузке.
+  "pillow>=10.4",
 ]
 
 [project.optional-dependencies]
@@ -57,10 +60,17 @@ ignore = ["S101", "B008"]
 # внутренние константы (_seller_clause/_account_clause) и гранулярность,
 # проверенная по белому списку. Всё пользовательское идёт параметрами.
 "app/services/stats_service.py" = ["S608"]
+"app/services/stats_extra.py" = ["S608"]
+"app/services/service_catalog.py" = ["S608"]
 "app/services/search_service.py" = ["S608"]
 # Тот же паттерн: склейка с фиксированной внутренней строкой (`clause`),
 # без подстановки пользовательского ввода — он идёт параметром `:uid`.
 "tests/verify_analytics.py" = ["S608"]
+# В тестах запускаются ffmpeg и вспомогательные процессы, пишутся временные
+# файлы и генерируются случайные тестовые номера — правила безопасности для
+# рабочего кода здесь только шумят.
+"tests/unit/**" = ["S603", "S607", "S108", "S311"]
+"tests/e2e_telegram_testdc.py" = ["S603", "S607", "S108", "S311", "E501", "ASYNC240"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

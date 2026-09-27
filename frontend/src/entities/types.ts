@@ -8,7 +8,27 @@ export type FunnelStage = 'warmup' | 'diagnostic' | 'sales'
 export type AccountStatus = 'pending' | 'connected' | 'error' | 'disconnected'
 export type Direction = 'in' | 'out'
 export type AuthorKind = 'client' | 'manager' | 'userbot' | 'system'
-export type MessageKind = 'text' | 'photo' | 'video' | 'document' | 'voice' | 'service'
+export type MessageKind =
+  | 'text'
+  | 'photo'
+  | 'video'
+  | 'document'
+  | 'voice'
+  | 'audio'
+  | 'sticker'
+  | 'service'
+/** Вид вложения: как показать и как отправить в Telegram. */
+export type AttachmentKind =
+  | 'photo'
+  | 'video'
+  | 'video_note'
+  | 'animation'
+  | 'voice'
+  | 'audio'
+  | 'sticker'
+  | 'document'
+/** ready — файл в CRM; pending — докачивается из Telegram; failed/too_large — только в Telegram. */
+export type AttachmentStatus = 'ready' | 'pending' | 'failed' | 'too_large'
 /** Статуса «доставлено» нет намеренно: MTProto его не отдаёт. */
 export type MessageStatus = 'queued' | 'sent' | 'read' | 'failed'
 export type BirthTimeApprox = 'morning' | 'day' | 'evening' | 'night'
@@ -203,10 +223,56 @@ export interface AttachmentRef {
   width?: number | null
   height?: number | null
   duration_sec?: number | null
+  kind?: AttachmentKind
+  status?: AttachmentStatus
+  /** Волна голосового: значения 0..31, как рисует Telegram. */
+  waveform?: number[] | null
+  thumb_url?: string | null
+  title?: string | null
+  performer?: string | null
+  emoji?: string | null
+  error?: string | null
+}
+
+/** Всё нетекстовое о сообщении. */
+export interface MessageMeta {
+  /** Переслано из Telegram (клиент переслал чужое). */
+  forwarded_from?: { name: string | null; date: string | null } | null
+  /** Менеджер переслал из другого чата CRM — видно только в CRM. */
+  forwarded?: {
+    conversation_id: number
+    message_id: number
+    client_name: string | null
+    hide_sender: boolean
+  } | null
+  contact?: {
+    first_name: string | null
+    last_name: string | null
+    phone: string | null
+    tg_user_id: number | null
+  } | null
+  location?: { lat: number; lon: number; title: string | null; address: string | null } | null
+  poll?: { question: string; options: string[] } | null
+  deleted_in_telegram_at?: string | null
+  unsupported?: string | null
+}
+
+/** Ответ загрузки файла: ключ для отправки и то, что сервер узнал о файле. */
+export interface UploadResult {
+  upload_key: string
+  file_name: string
+  size_bytes: number
+  mime_type: string
+  kind: AttachmentKind
+  width?: number | null
+  height?: number | null
+  duration_sec?: number | null
+  waveform?: number[] | null
 }
 
 export interface Message {
   id: number
+  conversation_id?: number
   direction: Direction
   author_kind: AuthorKind
   author: UserRef | null
@@ -221,6 +287,7 @@ export interface Message {
   edited_at: string | null
   reply_to_tg_id: number | null
   attachments: AttachmentRef[]
+  meta?: MessageMeta | null
 }
 
 export interface DealItem {
@@ -228,6 +295,30 @@ export interface DealItem {
   name: string
   amount: number
   position: number
+  /** Услуга из справочника. Пусто — название вписано вручную. */
+  service_id?: number | null
+  /** Цена по прайсу на момент продажи. */
+  list_price?: number | null
+}
+
+/** Услуга из справочника: то, что менеджер выбирает в окне оплаты. */
+export interface Service {
+  id: number
+  name: string
+  /** Копейки. Пусто — «цена по договорённости». */
+  price: number | null
+  description: string | null
+  is_active: boolean
+  sort_order: number
+  updated_at: string
+}
+
+/** Название из прошлых сделок, которого нет в справочнике. */
+export interface ServiceSuggestion {
+  name: string
+  uses: number
+  typical_price: number | null
+  last_used_at: string
 }
 
 export interface DealEvent {
@@ -319,12 +410,65 @@ export interface StatsOverview {
   sales_count: number
   sales_amount_delta_pct: number | null
   sales_count_delta: number | null
+  /** Сумма продаж / число продаж. */
+  avg_check: number | null
+  avg_check_delta_pct: number | null
   avg_response_seconds: number | null
   response_goal_minutes: number
+  /** Порог плашки «ждёт ответа» — после него ответ считается просрочкой. */
+  late_threshold_minutes: number
+  waits_total: number
+  waits_in_goal: number
+  waits_decided: number
+  /** Доля ответов не позже цели среди ожиданий, по которым уже всё ясно. */
+  in_goal_pct: number | null
+  late_count: number
+  awaiting_reply_now: number
+  awaiting_reply_over_threshold: number
   active_conversations: number
   new_clients: number
+  new_clients_paying: number
+  new_clients_conversion_pct: number | null
+  /** Сделки, отправленные клиенту в периоде, и что с ними стало на сегодня. */
+  invoices_sent: number
+  invoices_paid: number
+  invoices_awaiting: number
+  invoices_cancelled: number
+  invoices_expired: number
+  invoices_sent_amount: number
+  invoices_paid_amount: number
+  invoice_conversion_pct: number | null
   awaiting_amount: number
   awaiting_count: number
+}
+
+export interface ServiceStatsRow {
+  key: string
+  name: string
+  service_id: number | null
+  sold_count: number
+  revenue: number
+  share_pct: number | null
+  avg_price: number | null
+  offered: number
+  offered_paid: number
+  conversion_pct: number | null
+}
+
+export interface ServiceStats {
+  rows: ServiceStatsRow[]
+  total_revenue: number
+}
+
+export interface AccountStatsRow {
+  account: AccountRef
+  sales_amount: number
+  sales_count: number
+  avg_check: number | null
+  new_conversations: number
+  active_conversations: number
+  avg_response_seconds: number | null
+  in_goal_pct: number | null
 }
 
 export type Granularity = 'day' | 'week' | 'month'
@@ -348,9 +492,16 @@ export interface ManagerStats {
   user: UserRef
   sales_amount: number
   sales_count: number
+  avg_check: number | null
   avg_response_seconds: number | null
+  in_goal_pct: number | null
+  late_count: number
   active_conversations: number
   awaiting_count: number
+  awaiting_reply_now: number
+  invoices_sent: number
+  invoices_paid: number
+  invoice_conversion_pct: number | null
 }
 
 export interface SearchResults {

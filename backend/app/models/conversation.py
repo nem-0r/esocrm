@@ -9,6 +9,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     SmallInteger,
     String,
     Text,
@@ -16,7 +17,7 @@ from sqlalchemy import (
     func,
 )
 from sqlalchemy import text as sa_text
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.db import Base, PKMixin, TimestampMixin
@@ -141,6 +142,16 @@ class Message(Base, PKMixin, TimestampMixin):
     error_text: Mapped[str | None] = mapped_column(Text)
     random_id: Mapped[int | None] = mapped_column(BigInteger, unique=True)
     reply_to_tg_id: Mapped[int | None] = mapped_column(BigInteger)
+    # Остальные номера в Telegram, в которые превратилось это сообщение CRM:
+    # альбом из пяти фото — пять сообщений Telegram, длинный текст с файлом —
+    # текст отдельно. Главный номер (`tg_message_id`) — последний из них: по
+    # нему «прочитано» наступает, только когда клиент дочитал до конца.
+    # Без остальных подтяжка истории принимала бы их за новые и задваивала.
+    tg_extra_ids: Mapped[list[int] | None] = mapped_column(ARRAY(BigInteger))
+    # Всё, что относится к сообщению, но не является текстом: «переслано от»,
+    # контакт, геопозиция, опрос, отметка «удалено в Telegram». Структура —
+    # app/schemas/message.py (MessageMeta).
+    meta: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
 
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -164,6 +175,19 @@ class Message(Base, PKMixin, TimestampMixin):
         ),
         Index("ix_messages_conversation_created", "conversation_id", sa_text("created_at DESC")),
         Index("ix_messages_author_created", "author_id", "created_at"),
+        # Удаление в Telegram приходит без чата, только номерами сообщений:
+        # найти их нужно по номеру, не перебирая всю переписку аккаунта.
+        Index(
+            "ix_messages_tg_message_id",
+            "tg_message_id",
+            postgresql_where=sa_text("tg_message_id IS NOT NULL"),
+        ),
+        Index(
+            "ix_messages_tg_extra_ids",
+            "tg_extra_ids",
+            postgresql_using="gin",
+            postgresql_where=sa_text("tg_extra_ids IS NOT NULL"),
+        ),
         Index(
             "ix_messages_text_fts",
             sa_text("to_tsvector('russian', coalesce(text, ''))"),
@@ -192,13 +216,27 @@ class Attachment(Base, PKMixin, TimestampMixin):
     file_name: Mapped[str] = mapped_column(String(255), nullable=False)
     mime_type: Mapped[str | None] = mapped_column(String(120))
     size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
-    storage_key: Mapped[str] = mapped_column(String(500), nullable=False)
+    # Пусто, пока файл докачивается или если он больше лимита CRM (см. status).
+    storage_key: Mapped[str | None] = mapped_column(String(500))
     # Позволяет переслать файл повторно, не выгружая его заново. Бессрочного
     # доступа не даёт, поэтому сам файл всё равно лежит в нашем хранилище.
     telegram_file_id: Mapped[str | None] = mapped_column(String(255))
     width: Mapped[int | None] = mapped_column(Integer)
     height: Mapped[int | None] = mapped_column(Integer)
     duration_sec: Mapped[int | None] = mapped_column(Integer)
+    # Вид вложения (AttachmentKind): как показывать и как отправлять. У старых
+    # строк заполнен миграцией по типу файла.
+    kind: Mapped[str | None] = mapped_column(String(20))
+    # Волна голосового: 100 значений 0..31, по байту на значение — ровно столько,
+    # сколько рисует Telegram. Приходит от Telegram или считается при записи.
+    waveform: Mapped[bytes | None] = mapped_column(LargeBinary)
+    # Кадр-превью видео (JPEG) в хранилище: уходит в Telegram вместе с видео,
+    # иначе клиент видит серый прямоугольник вместо первого кадра.
+    thumb_key: Mapped[str | None] = mapped_column(String(500))
+    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="ready")
+    # Название и исполнитель музыки, эмодзи стикера, откуда докачивать, причина
+    # неудачи — то, что нужно редко и не заслуживает своей колонки.
+    meta: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     message: Mapped[Message] = relationship(back_populates="attachments")
@@ -206,6 +244,13 @@ class Attachment(Base, PKMixin, TimestampMixin):
     __table_args__ = (
         Index("ix_attachments_client_created", "client_id", sa_text("created_at DESC")),
         Index("ix_attachments_message_id", "message_id"),
+        # Шлюз ищет, что докачать, — частичный индекс держит поиск мгновенным
+        # при любом числе готовых вложений.
+        Index(
+            "ix_attachments_pending",
+            "status",
+            postgresql_where=sa_text("status = 'pending'"),
+        ),
     )
 
 

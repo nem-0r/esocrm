@@ -12,6 +12,9 @@ from app.models.enums import AuthorKind, Direction, MessageKind, MessageStatus
 from app.schemas.common import ApiModel
 
 MAX_TEXT_LENGTH = 4096
+# Столько сообщений Telegram разрешает переслать одним запросом (100) — берём
+# с запасом меньше: пересылка сотни сообщений разом из CRM — скорее ошибка.
+MAX_FORWARD_MESSAGES = 50
 
 
 def attachment_url(attachment_id: int) -> str:
@@ -28,6 +31,17 @@ class AttachmentOut(ApiModel):
     width: int | None = None
     height: int | None = None
     duration_sec: int | None = None
+    # photo · video · video_note · animation · voice · audio · sticker · document
+    kind: str = "document"
+    # ready — файл в CRM; pending — докачивается; failed/too_large — только в Telegram
+    status: str = "ready"
+    # Волна голосового: значения 0..31, как рисует Telegram.
+    waveform: list[int] | None = None
+    thumb_url: str | None = None
+    title: str | None = None
+    performer: str | None = None
+    emoji: str | None = None
+    error: str | None = None
 
 
 class MessageAuthor(ApiModel):
@@ -36,6 +50,56 @@ class MessageAuthor(ApiModel):
     id: int
     full_name: str
     avatar_color: str
+
+
+class ForwardedFrom(ApiModel):
+    """Сообщение пришло пересланным (клиент переслал чужое или менеджер — с телефона)."""
+
+    name: str | None = None
+    date: datetime | None = None
+
+
+class ForwardedInCrm(ApiModel):
+    """Менеджер переслал это сообщение из другого чата CRM. Видно только в CRM."""
+
+    conversation_id: int
+    message_id: int
+    client_name: str | None = None
+    hide_sender: bool = True
+
+
+class ContactMeta(ApiModel):
+    first_name: str | None = None
+    last_name: str | None = None
+    phone: str | None = None
+    tg_user_id: int | None = None
+
+
+class LocationMeta(ApiModel):
+    lat: float
+    lon: float
+    title: str | None = None
+    address: str | None = None
+
+
+class PollMeta(ApiModel):
+    question: str
+    options: list[str] = []
+
+
+class MessageMeta(ApiModel):
+    """Всё нетекстовое о сообщении. Хранится JSON-ом в `messages.meta`."""
+
+    forwarded_from: ForwardedFrom | None = None
+    forwarded: ForwardedInCrm | None = None
+    contact: ContactMeta | None = None
+    location: LocationMeta | None = None
+    poll: PollMeta | None = None
+    # Клиент (или менеджер с телефона) удалил сообщение в Telegram. В CRM оно
+    # остаётся: переписка — история работы с клиентом.
+    deleted_in_telegram_at: datetime | None = None
+    # Тип сообщения Telegram, который CRM не показывает (игра, счёт и т. п.).
+    unsupported: str | None = None
 
 
 class MessageOut(ApiModel):
@@ -55,13 +119,15 @@ class MessageOut(ApiModel):
     edited_at: datetime | None = None
     reply_to_tg_id: int | None = None
     attachments: list[AttachmentOut] = []
+    meta: MessageMeta | None = None
 
 
 class UploadRef(BaseModel):
-    """То, что вернул `POST /files/upload`.
+    """То, что вернул `POST /files/upload` или `POST /files/voice`.
 
     Файл уже лежит в хранилище, но строки в базе ещё нет: она создаётся
     вместе с сообщением, иначе в базе копились бы вложения без владельца.
+    Размеры, длительность и вид берутся из хранилища, а не из этого запроса.
     """
 
     upload_key: str
@@ -77,7 +143,7 @@ class MessageCreate(BaseModel):
     # Служебное сообщение видно только внутри CRM и в Telegram не уходит.
     is_internal: bool = False
     uploads: list[UploadRef] | None = None
-    # Для случаев, когда вложение уже существует в базе (пересылка, повтор отправки).
+    # Для случаев, когда вложение уже существует в базе (повтор отправки).
     attachment_ids: list[int] | None = None
 
 
@@ -85,3 +151,21 @@ class MessageEdit(BaseModel):
     """Правка текста уже отправленного сообщения."""
 
     text: str = Field(min_length=1, max_length=MAX_TEXT_LENGTH)
+
+
+class ForwardRequest(BaseModel):
+    """Переслать сообщения из одного чата CRM в другой."""
+
+    source_conversation_id: int = Field(gt=0)
+    message_ids: list[int] = Field(min_length=1, max_length=MAX_FORWARD_MESSAGES)
+    # Клиент Б не должен видеть имя клиента А — поэтому по умолчанию скрываем.
+    hide_sender: bool = True
+    # Необязательный текст — уходит отдельным сообщением перед пересланными.
+    comment: str | None = Field(default=None, max_length=MAX_TEXT_LENGTH)
+
+
+class ForwardResult(BaseModel):
+    conversation_id: int
+    messages: list[MessageOut]
+    # native — настоящая пересылка Telegram; copy — отправка копией
+    mode: str

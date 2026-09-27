@@ -15,6 +15,12 @@
 #
 # Имя проекта отличается от контура разработки намеренно: тома не пересекаются,
 # случайный `down -v` в одном контуре не сносит данные другого.
+#
+# Образы: CI собирает их один раз, проверяет и кладёт в реестр под номером
+# коммита, а выкатка (deploy/deploy.sh) скачивает ровно их — на сервер едет
+# то, что прошло проверки. IMAGE_TAG/BACKEND_IMAGE/WEB_IMAGE выкатка сама
+# записывает в .env. Без них (первый запуск, ручная сборка) образы собираются
+# здесь же из исходников, как раньше: `up -d --build`.
 name: astra-crm-prod
 
 x-logging: &default-logging
@@ -27,6 +33,8 @@ x-backend-build: &backend-build
   context: ./backend
   dockerfile: Dockerfile
   target: prod
+
+x-backend-image: &backend-image ${BACKEND_IMAGE:-astra-backend}:${IMAGE_TAG:-local}
 
 services:
   db:
@@ -101,6 +109,7 @@ services:
   # Так схема базы обновляется ровно один раз, а не в каждом контейнере,
   # который умеет запускать alembic.
   migrate:
+    image: *backend-image
     build: *backend-build
     restart: "no"
     env_file: [.env]
@@ -115,6 +124,7 @@ services:
         limits: {cpus: "1.0", memory: 512M}
 
   api:
+    image: *backend-image
     build: *backend-build
     restart: unless-stopped
     env_file: [.env]
@@ -144,8 +154,13 @@ services:
         limits: {cpus: "2.0", memory: 1536M}
 
   gateway:
+    image: *backend-image
     build: *backend-build
     restart: unless-stopped
+    # При выкатке шлюзу дают дописать начатую отправку: большой файл уходит в
+    # Telegram десятки секунд, и обрыв на 10-й (умолчание Docker) означал бы
+    # недоотправленное сообщение, которое очередь потом повторит.
+    stop_grace_period: 60s
     env_file: [.env]
     environment:
       SERVICE_ROLE: gateway
@@ -174,6 +189,7 @@ services:
         limits: {memory: 1536M}
 
   scheduler:
+    image: *backend-image
     build: *backend-build
     restart: unless-stopped
     env_file: [.env]
@@ -190,6 +206,7 @@ services:
   # Собранная статика фронтенда. Сборка идёт ВНУТРИ образа (стадия build),
   # готовый dist с машины разработчика в продакшен не попадает.
   web:
+    image: ${WEB_IMAGE:-astra-web}:${IMAGE_TAG:-local}
     build:
       context: ./frontend
       dockerfile: Dockerfile

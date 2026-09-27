@@ -51,7 +51,10 @@ def _digest(raw: str, hash_alg: str) -> str:
     (он настроен на SHA256) — искать причину пришлось бы вслепую, вместо
     явной ошибки прямо здесь."""
     if hash_alg not in SUPPORTED_HASH_ALGS:
-        raise ValueError(f"Робокасса не поддерживает алгоритм {hash_alg!r} (у неё есть: {sorted(SUPPORTED_HASH_ALGS)})")
+        raise ValueError(
+            f"Робокасса не поддерживает алгоритм {hash_alg!r} "
+            f"(у неё есть: {sorted(SUPPORTED_HASH_ALGS)})"
+        )
     return hashlib.new(hash_alg, raw.encode("utf-8")).hexdigest()  # noqa: S324 — формат Робокассы, не наш выбор
 
 
@@ -82,17 +85,22 @@ def _b64url(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
 
 
-def _jwt_token(payload: dict[str, Any], *, merchant_login: str, password1: str, hash_alg: str) -> str:
+def _jwt_token(
+    payload: dict[str, Any], *, merchant_login: str, password1: str, hash_alg: str
+) -> str:
     """JWT для Invoice API — свой формат Робокассы, не стандартный RFC 7519:
     `alg` в заголовке — буквально название алгоритма («SHA256»), не «HS256»;
     секрет — `MerchantLogin:Пароль#1` целиком, не сам пароль (docs.robokassa.ru/
     ru/invoice-api). Не переиспользует `_digest`: тут HMAC, а не голый хеш."""
     if hash_alg not in SUPPORTED_HASH_ALGS:
-        raise ValueError(f"Робокасса не поддерживает алгоритм {hash_alg!r} (у неё есть: {sorted(SUPPORTED_HASH_ALGS)})")
+        raise ValueError(
+            f"Робокасса не поддерживает алгоритм {hash_alg!r} "
+            f"(у неё есть: {sorted(SUPPORTED_HASH_ALGS)})"
+        )
     header_part = _b64url(orjson.dumps({"typ": "JWT", "alg": hash_alg.upper()}))
     payload_part = _b64url(orjson.dumps(payload))
-    signing_input = f"{header_part}.{payload_part}".encode("utf-8")
-    secret = f"{merchant_login}:{password1}".encode("utf-8")
+    signing_input = f"{header_part}.{payload_part}".encode()
+    secret = f"{merchant_login}:{password1}".encode()
     signature = hmac.new(secret, signing_input, hash_alg).digest()
     return f"{header_part}.{payload_part}.{_b64url(signature)}"
 
@@ -113,7 +121,7 @@ async def create_invoice(
     tax: str,
     expires_at: datetime | None = None,
     shp_deal_id: int | None = None,
-    timeout: float = 20.0,
+    timeout: float = 20.0,  # noqa: ASYNC109 — таймаут HTTP-запроса к Робокассе, не asyncio
 ) -> str:
     """Создаёт счёт через Invoice API, возвращает ссылку на оплату.
 
@@ -154,9 +162,14 @@ async def create_invoice(
     if expires_at is not None:
         payload["ExpirationDate"] = expires_at.isoformat(timespec="seconds")
     if shp_deal_id is not None:
-        payload["UserFields"] = {SHP_SOURCE_PARAM: SHP_SOURCE_VALUE, SHP_DEAL_ID_PARAM: str(shp_deal_id)}
+        payload["UserFields"] = {
+            SHP_SOURCE_PARAM: SHP_SOURCE_VALUE,
+            SHP_DEAL_ID_PARAM: str(shp_deal_id),
+        }
 
-    token = _jwt_token(payload, merchant_login=merchant_login, password1=password1, hash_alg=hash_alg)
+    token = _jwt_token(
+        payload, merchant_login=merchant_login, password1=password1, hash_alg=hash_alg
+    )
 
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -171,7 +184,9 @@ async def create_invoice(
     try:
         data = resp.json()
     except ValueError as exc:
-        raise InvoiceApiError(f"Робокасса вернула не-JSON ответ [{resp.status_code}]: {resp.text[:300]}") from exc
+        raise InvoiceApiError(
+            f"Робокасса вернула не-JSON ответ [{resp.status_code}]: {resp.text[:300]}"
+        ) from exc
 
     if not isinstance(data, dict) or not data.get("isSuccess"):
         raise InvoiceApiError(f"Робокасса отклонила счёт [{resp.status_code}]: {data}")
@@ -214,7 +229,11 @@ def verify_result_signature(
     if not provided_signature:
         return False
     expected = sign_result(
-        out_sum=out_sum, inv_id=inv_id, password2=password2, shp_params=shp_params, hash_alg=hash_alg
+        out_sum=out_sum,
+        inv_id=inv_id,
+        password2=password2,
+        shp_params=shp_params,
+        hash_alg=hash_alg,
     )
     return hmac.compare_digest(expected.lower(), provided_signature.strip().lower())
 

@@ -11,7 +11,7 @@ import logging
 import time
 import uuid
 from datetime import UTC, date, datetime, timedelta
-from typing import Any
+from typing import Any, NamedTuple
 
 from sqlalchemy import Select, case, distinct, exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -40,7 +40,7 @@ from app.models.enums import ALLOWED_DEAL_TRANSITIONS
 from app.realtime.events import emit, emit_to_conversation
 from app.schemas.common import decode_cursor, encode_cursor
 from app.schemas.deal import DealCreate, DealItemIn, DealUpdate, detail_payload, row_payload
-from app.services import robokassa
+from app.services import robokassa, service_catalog
 from app.services.audit import log_event
 from app.services.message_service import send_outgoing
 from app.services.money import MoneyError, format_rubles, validate_amount
@@ -67,10 +67,18 @@ def _ensure_transition(deal: Deal, target: DealStatus) -> None:
         raise Conflict(TRANSITION_ERRORS[target], current_status=deal.status.value)
 
 
-def _validated_items(items: list[DealItemIn]) -> list[tuple[str, int]]:
+class _Item(NamedTuple):
+    name: str
+    amount: int
+    service_id: int | None = None
+    list_price: int | None = None
+
+
+async def _validated_items(db: AsyncSession, items: list[DealItemIn]) -> list[_Item]:
+    """Проверить позиции и снять цену по прайсу у выбранных из справочника услуг."""
     if not items:
         raise Invalid("Добавьте хотя бы одну позицию")
-    result: list[tuple[str, int]] = []
+    result: list[_Item] = []
     for item in items:
         name = (item.name or "").strip()
         if not name or len(name) > 255:
@@ -79,17 +87,28 @@ def _validated_items(items: list[DealItemIn]) -> list[tuple[str, int]]:
             amount = validate_amount(item.amount)
         except MoneyError as exc:
             raise Invalid(str(exc)) from exc
-        result.append((name, amount))
+        service_id: int | None = None
+        list_price: int | None = None
+        if item.service_id is not None:
+            service = await service_catalog.get_active(db, item.service_id)
+            service_id, list_price = service.id, service.price
+        result.append(_Item(name, amount, service_id, list_price))
     return result
 
 
-def _replace_items(deal: Deal, items: list[tuple[str, int]]) -> None:
+def _replace_items(deal: Deal, items: list[_Item]) -> None:
     """Состав сделки заменяется целиком, сумма пересчитывается из позиций."""
     deal.items = [
-        DealItem(name=name, amount=amount, position=position)
-        for position, (name, amount) in enumerate(items)
+        DealItem(
+            name=item.name,
+            amount=item.amount,
+            position=position,
+            service_id=item.service_id,
+            list_price=item.list_price,
+        )
+        for position, item in enumerate(items)
     ]
-    deal.total_amount = sum(amount for _, amount in items)
+    deal.total_amount = sum(item.amount for item in items)
 
 
 async def _record(
@@ -348,7 +367,7 @@ async def get_deal(db: AsyncSession, user: User, deal_id: int) -> dict[str, Any]
 async def create_deal(db: AsyncSession, user: User, data: DealCreate) -> dict[str, Any]:
     if data.payment_method == PaymentMethod.LINK and not settings.robokassa_enabled:
         raise Invalid(LINK_NOT_READY)
-    items = _validated_items(data.items)
+    items = await _validated_items(db, data.items)
     # Реквизит нужен только для оплаты по реквизитам: у ссылки его нет и не будет —
     # деньги идут на счёт магазина в Робокассе, а не на конкретный счёт из справочника.
     # «Другое» — реквизитов из справочника нет, менеджер вписал их сам: тогда
@@ -403,7 +422,7 @@ async def update_deal(
 
     before = {"total_amount": deal.total_amount, "requisite_id": deal.requisite_id}
     if data.items is not None:
-        _replace_items(deal, _validated_items(data.items))
+        _replace_items(deal, await _validated_items(db, data.items))
     if data.requisite_id is not None:
         deal.requisite_id = (await _active_requisite(db, data.requisite_id)).id
     deal.edit_count += 1
@@ -535,7 +554,8 @@ async def _build_payment_link(db: AsyncSession, deal: Deal) -> str:
             out_sum_kopecks=deal.total_amount,
             description=deal.title,
             receipt_items=[
-                robokassa.ReceiptItem(name=item.name, amount_kopecks=item.amount) for item in deal.items
+                robokassa.ReceiptItem(name=item.name, amount_kopecks=item.amount)
+                for item in deal.items
             ],
             # Без явной ставки НДС ссылку создать нельзя (обязательное поле
             # каждой позиции чека) — "none" совпадает с тем, что уже реально
@@ -631,6 +651,10 @@ async def pay_deal(
         raise Invalid(
             "Чек принимается только как изображение или PDF", field="receipt_upload_key"
         )
+    # Только то, что загрузили через /files/upload: ключ входящего файла из
+    # чужого диалога не должен становиться «чеком» этой сделки.
+    if not receipt_upload_key.startswith("uploads/"):
+        raise Invalid("Файл чека не найден — загрузите его ещё раз", field="receipt_upload_key")
     # Оплата необратима (PAID — конечный статус), поэтому чек обязан реально
     # лежать в хранилище прямо сейчас — иначе сделка навсегда осталась бы
     # «оплаченной» без единого доказательства этого.

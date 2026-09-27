@@ -54,6 +54,30 @@ async def series(
     return await stats_service.series(db, user, start, end, granularity, user_id)
 
 
+@router.get("/services", summary="Продажи в разрезе услуг")
+async def services(
+    db: Db,
+    user: CurrentUser,
+    date_from: DateFrom = None,
+    date_to: DateTo = None,
+    user_id: UserId = None,
+) -> dict[str, Any]:
+    start, end = await _period(db, date_from, date_to)
+    return await stats_service.services(db, user, start, end, user_id)
+
+
+@router.get("/accounts", summary="Разрез по аккаунтам и направлениям воронки")
+async def accounts(
+    db: Db,
+    user: CurrentUser,
+    date_from: DateFrom = None,
+    date_to: DateTo = None,
+    user_id: UserId = None,
+) -> list[dict[str, Any]]:
+    start, end = await _period(db, date_from, date_to)
+    return await stats_service.accounts(db, user, start, end, user_id)
+
+
 @router.get("/managers", summary="Разрез по менеджерам")
 async def managers(
     db: Db,

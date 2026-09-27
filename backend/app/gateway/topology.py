@@ -36,5 +36,14 @@ def detected_cores() -> int:
 
 
 def worker_count() -> int:
-    """Сколько процессов шлюза поднять в этом контейнере."""
+    """Сколько процессов шлюза поднять в этом контейнере.
+
+    `GATEWAY_WORKERS` — явное число для стендов, где шлюзу нечего делать, а
+    память на счету (тестовый стенд CI, ноутбук разработчика): по процессу на
+    ядро там — это сотни мегабайт впустую. На сервере переменная не задаётся,
+    и число, как и прежде, считается по ядрам.
+    """
+    raw = os.environ.get("GATEWAY_WORKERS", "").strip()
+    if raw.isdigit() and int(raw) >= MIN_WORKERS:
+        return int(raw)
     return max(MIN_WORKERS, detected_cores() - RESERVED_CORES)

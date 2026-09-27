@@ -141,7 +141,11 @@ async def robokassa_result(request: Request) -> PlainTextResponse:
         # Одинаковые значения под разным регистром имени (Shp_deal_id и
         # SHP_DEAL_ID с одним и тем же числом) сюда не попадают — множество
         # схлопывает равные значения, это не тот случай, что выше.
-        log.warning("Робокасса: не ровно один Shp_deal_id (InvId=%s, получено %s)", inv_id, len(shp_deal_id_values))
+        log.warning(
+            "Робокасса: не ровно один Shp_deal_id (InvId=%s, получено %s)",
+            inv_id,
+            len(shp_deal_id_values),
+        )
         return PlainTextResponse("bad request", status_code=400)
     deal_id = _parse_ascii_id(next(iter(shp_deal_id_values)))
     if deal_id is None:
@@ -190,7 +194,11 @@ async def robokassa_result(request: Request) -> PlainTextResponse:
             # неожиданно, и молчать нельзя: раньше этот случай ловился вместе
             # с IntegrityError и терялся без единой строки в логе, хотя именно
             # тут аудит-запись о попытке не создалась.
-            log.exception("Робокасса: не удалось записать PaymentEvent (InvId=%s, deal_id=%s)", inv_id, deal_id)
+            log.exception(
+                "Робокасса: не удалось записать PaymentEvent (InvId=%s, deal_id=%s)",
+                inv_id,
+                deal_id,
+            )
             await db.rollback()
 
     if not valid:
@@ -213,10 +221,19 @@ async def robokassa_result(request: Request) -> PlainTextResponse:
         await db.commit()
 
     if result.outcome == "amount_mismatch":
-        log.error("Робокасса: сумма не сошлась для deal_id=%s (InvId=%s, OutSum=%s)", deal_id, inv_id, out_sum)
+        log.error(
+            "Робокасса: сумма не сошлась для deal_id=%s (InvId=%s, OutSum=%s)",
+            deal_id,
+            inv_id,
+            out_sum,
+        )
         return PlainTextResponse("sum mismatch", status_code=409)
     if result.outcome == "wrong_status":
-        log.warning("Робокасса: сделка deal_id=%s (InvId=%s) не в статусе, допускающем оплату", deal_id, inv_id)
+        log.warning(
+            "Робокасса: сделка deal_id=%s (InvId=%s) не в статусе, допускающем оплату",
+            deal_id,
+            inv_id,
+        )
         return PlainTextResponse("wrong status", status_code=409)
 
     # "paid" и "already_paid" отвечают одинаково: провайдеру не нужно знать,

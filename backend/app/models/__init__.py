@@ -10,6 +10,8 @@ from app.models.deal import Deal, DealEvent, DealItem, PaymentEvent, PaymentRequ
 from app.models.enums import (
     AccountStatus,
     ActorKind,
+    AttachmentKind,
+    AttachmentStatus,
     AuthorKind,
     BirthTimeApprox,
     DealEventKind,
@@ -25,6 +27,7 @@ from app.models.enums import (
     UserRole,
 )
 from app.models.misc import DailyStat, EventLog, Notification, SearchHistory, Setting, Template
+from app.models.service import Service
 from app.models.user import AuthSession, LoginAttempt, User
 
 __all__ = [
@@ -32,6 +35,8 @@ __all__ = [
     "AccountStatus",
     "ActorKind",
     "Attachment",
+    "AttachmentKind",
+    "AttachmentStatus",
     "AuthSession",
     "AuthorKind",
     "Client",
@@ -61,6 +66,7 @@ __all__ = [
     "PaymentMethod",
     "PaymentRequisite",
     "SearchHistory",
+    "Service",
     "Setting",
     "TelegramAccount",
     "TelegramPeer",

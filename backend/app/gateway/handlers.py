@@ -106,6 +106,30 @@ async def write_read_receipt(account_id: int, chat_id: int, max_id: int) -> None
             log.exception("Не отметил прочтение в аккаунте %s", account_id)
 
 
+async def write_inbox_read(account_id: int, chat_id: int, max_id: int) -> None:
+    """Сообщения клиента прочитали на телефоне — гасим непрочитанное в CRM."""
+    async with SessionLocal() as db:
+        try:
+            account = await _account(db, account_id)
+            if await inbound_service.mark_incoming_read(db, account, chat_id, max_id):
+                await db.commit()
+        except Exception:
+            await db.rollback()
+            log.exception("Не отметил прочтение входящих в аккаунте %s", account_id)
+
+
+async def write_deleted(account_id: int, chat_id: int | None, tg_ids: list[int]) -> None:
+    """Сообщения удалили в Telegram — в CRM пометка «удалено в Telegram»."""
+    async with SessionLocal() as db:
+        try:
+            account = await _account(db, account_id)
+            if await inbound_service.mark_deleted(db, account, chat_id, tg_ids):
+                await db.commit()
+        except Exception:
+            await db.rollback()
+            log.exception("Не отметил удаление сообщений в аккаунте %s", account_id)
+
+
 async def write_status(account_id: int, status: str, reason: str | None) -> None:
     """Сессия отвалилась — состояние аккаунта должно измениться в интерфейсе сразу,
     а не тогда, когда менеджер не сможет отправить сообщение."""
@@ -316,14 +340,64 @@ async def handle(account_id: int, command: str, args: dict[str, Any]) -> dict[st
                 outgoing=bool(args.get("outgoing")),
                 random_id=args.get("random_id"),
                 live=bool(args.get("live", True)),
+                media_kind=args.get("media_kind"),
+                attachments=_demo_attachments(args.get("attachments") or []),
+                meta=args.get("meta"),
+                is_edit=bool(args.get("is_edit")),
+                edit_date=(
+                    datetime.fromisoformat(args["edit_date"]) if args.get("edit_date") else None
+                ),
             )
             await write_inbound(account_id, event)
+            return {"delivered": True}
+
+        if command == "demo_flood":
+            # Только демо: Telegram «просит подождать» — проверка того, что шлюз
+            # на время запрета не трогает аккаунт (verify_outbox).
+            from app.core.config import settings
+
+            flood = getattr(provider, "flood", None)
+            if not settings.demo_mode or flood is None:
+                raise ValueError("Команда доступна только в демо-режиме")
+            flood(account_id, int(args["seconds"]))
+            return {"ok": True}
+
+        if command in ("demo_delete", "demo_read_inbox"):
+            # Удаление и прочтение с телефона — так же, как их прислал бы Telegram.
+            from app.core.config import settings
+
+            if not settings.demo_mode:
+                raise ValueError("Команда доступна только в демо-режиме")
+            if command == "demo_delete":
+                await write_deleted(
+                    account_id,
+                    int(args["chat_id"]) if args.get("chat_id") else None,
+                    [int(value) for value in args.get("tg_message_ids") or []],
+                )
+            else:
+                await write_inbox_read(account_id, int(args["chat_id"]), int(args["max_id"]))
             return {"delivered": True}
 
         raise ValueError(f"Шлюз не знает команду «{command}»")
 
 
 _tasks: set[asyncio.Task[None]] = set()
+
+
+def _demo_attachments(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Вложения демо-события: тело приходит строкой base64 — по проводу команд
+    (JSON через Redis) байты иначе не передать."""
+    import base64
+
+    result: list[dict[str, Any]] = []
+    for item in items:
+        prepared = dict(item)
+        if prepared.get("body_b64"):
+            prepared["body"] = base64.b64decode(prepared.pop("body_b64"))
+        if prepared.get("waveform"):
+            prepared["waveform"] = bytes(prepared["waveform"])
+        result.append(prepared)
+    return result
 
 
 async def _history_since(db, raw: str | None) -> datetime:

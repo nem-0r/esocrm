@@ -11,6 +11,7 @@ secrets/
 # python
 __pycache__/
 **/__pycache__/
+*.egg-info/
 *.py[cod]
 .venv/
 venv/
@@ -49,3 +50,4 @@ deploy/certbot/
 console-after-login.log
 desktop-chats.jpeg
 *.log
+deploy/.releases

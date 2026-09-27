@@ -20,7 +20,7 @@ import type { Counters } from '@/entities/types'
 import { useAuth } from '@/shared/hooks/useAuth'
 import { useRealtimeSync } from '@/shared/hooks/useRealtime'
 import { cn } from '@/shared/lib/cn'
-import { Avatar } from '@/shared/ui'
+import { Avatar, Toaster } from '@/shared/ui'
 import { useCounters } from '@/features/chats/queries'
 
 interface NavItem {
@@ -101,6 +101,8 @@ export function AppShell() {
       <main className="flex min-h-0 min-w-0 flex-1 flex-col">
         <Outlet />
       </main>
+
+      <Toaster />
 
       {/* Мобильная нижняя навигация */}
       {!hideMobileNav && (

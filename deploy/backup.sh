@@ -6,6 +6,11 @@
 #   COMPOSE_FILE=docker-compose.yml ./deploy/backup.sh   # контур разработки
 #   BACKUP_DIR=/mnt/backups ./deploy/backup.sh
 #   KEEP_DAYS=90 ./deploy/backup.sh
+#   ./deploy/backup.sh --db-only          # только база: страховка перед миграцией
+#
+# --db-only нужен выкатке (deploy/deploy.sh): миграция меняет только базу, а
+# архив вложений весит гигабайты и на маленьком диске сервера лишний. Путь
+# к дампу печатается последней строкой вывода — его забирает deploy.sh.
 #
 # По cron раз в сутки в 03:20 (crontab -e):
 #   20 3 * * * cd /opt/astra && ./deploy/backup.sh >> /var/log/astra-backup.log 2>&1
@@ -15,6 +20,11 @@
 # что о нём узнают в день, когда бэкап понадобился.
 
 set -Eeuo pipefail
+
+DB_ONLY=false
+if [[ "${1:-}" == "--db-only" ]]; then
+    DB_ONLY=true
+fi
 
 PROJECT_DIR="${PROJECT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.prod.yml}"
@@ -78,6 +88,12 @@ COPIES=$(gzip -cd "$DB_FILE" | grep -c '^COPY ' || true)
 [[ "$TABLES" -gt 0 ]] || fail "в дампе нет ни одной команды CREATE TABLE — база снялась пустой"
 
 log "база: $DB_BYTES байт, таблиц $TABLES, блоков данных $COPIES"
+
+if [[ "$DB_ONLY" == true ]]; then
+    log "готово (только база):"
+    printf '%s\n' "$DB_FILE"
+    exit 0
+fi
 
 # --------------------------------------------------------------- файлы -----
 log "выгрузка бакета $S3_BUCKET → $(basename "$FILES_FILE")"

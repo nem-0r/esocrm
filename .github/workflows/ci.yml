@@ -1,0 +1,177 @@
+# Проверки на каждый пуш и пул-реквест; на ветке main после зелёных проверок —
+# выкатка на сервер (deploy.yml). Схема и настройка — docs/16-ci-cd.md.
+#
+#   линт бэкенда ─┐
+#   модульные ────┼─► сборка прод-образов ─► тестовый стенд из ЭТИХ образов:
+#   фронтенд ─────┘   (один раз)              миграции, демо-данные, все verify_*
+#                                                     │
+#                           main и всё зелёное ◄──────┘
+#                                   │
+#                   образы в GHCR под номером коммита ─► выкатка (deploy.yml)
+
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  # Новый пуш в ту же ветку отменяет недоделанную проверку прошлого — кроме
+  # main: там каждый коммит проходит путь до конца, выкатки идут по очереди.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.12"
+  NODE_VERSION: "22"
+  RUFF_VERSION: "0.16.9"
+
+jobs:
+  backend-lint:
+    name: Бэкенд · линт
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: pip install "ruff==${RUFF_VERSION}"
+      - name: ruff
+        working-directory: backend
+        run: ruff check app tests/unit tests/e2e_telegram_testdc.py
+
+  backend-unit:
+    name: Бэкенд · модульные тесты
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: ffmpeg (голосовые, видео)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+      - name: зависимости
+        working-directory: backend
+        run: pip install -e ".[dev]"
+      - name: pytest
+        working-directory: backend
+        run: python -m pytest tests/unit -q -p no:cacheprovider
+
+  frontend:
+    name: Фронтенд · линт, типы, тесты, сборка
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm run lint
+      - run: npx tsc --noEmit -p .
+      - run: npx vitest run
+      - run: npm run build
+
+  integration:
+    name: Интеграция · прод-образы на тестовом стенде
+    needs: [backend-lint, backend-unit, frontend]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      backend_image: ${{ steps.names.outputs.backend }}
+      web_image: ${{ steps.names.outputs.web }}
+      tag: ${{ steps.names.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: имена образов
+        id: names
+        run: |
+          repo="$(echo "ghcr.io/${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')"
+          echo "backend=${repo}-backend" >> "$GITHUB_OUTPUT"
+          echo "web=${repo}-web" >> "$GITHUB_OUTPUT"
+          echo "tag=sha-${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: сборка образа бэкенда
+        uses: docker/build-push-action@v7
+        with:
+          context: backend
+          target: prod
+          load: true
+          tags: ${{ steps.names.outputs.backend }}:${{ steps.names.outputs.tag }}
+          labels: org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,scope=backend,mode=max
+
+      - name: сборка образа фронтенда
+        uses: docker/build-push-action@v7
+        with:
+          context: frontend
+          target: prod
+          load: true
+          tags: ${{ steps.names.outputs.web }}:${{ steps.names.outputs.tag }}
+          labels: org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          cache-from: type=gha,scope=web
+          cache-to: type=gha,scope=web,mode=max
+
+      - name: тестовый стенд
+        env:
+          BACKEND_IMAGE: ${{ steps.names.outputs.backend }}
+          WEB_IMAGE: ${{ steps.names.outputs.web }}
+          IMAGE_TAG: ${{ steps.names.outputs.tag }}
+        run: docker compose -f docker-compose.ci.yml up -d --no-build --wait --wait-timeout 300
+
+      - name: все проверки (как make ci-verify)
+        env:
+          BACKEND_IMAGE: ${{ steps.names.outputs.backend }}
+          WEB_IMAGE: ${{ steps.names.outputs.web }}
+          IMAGE_TAG: ${{ steps.names.outputs.tag }}
+        run: ./deploy/ci-verify.sh
+
+      - name: логи стенда при падении
+        if: failure()
+        env:
+          BACKEND_IMAGE: ${{ steps.names.outputs.backend }}
+          WEB_IMAGE: ${{ steps.names.outputs.web }}
+          IMAGE_TAG: ${{ steps.names.outputs.tag }}
+        run: docker compose -f docker-compose.ci.yml logs --no-color --tail=300
+
+      - name: образы в реестр (только main)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker push "${{ steps.names.outputs.backend }}:${{ steps.names.outputs.tag }}"
+          docker push "${{ steps.names.outputs.web }}:${{ steps.names.outputs.tag }}"
+          docker logout ghcr.io
+
+  deploy:
+    name: Выкатка на сервер
+    needs: [integration]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/deploy.yml
+    with:
+      sha: ${{ github.sha }}
+    secrets: inherit
+    permissions:
+      contents: read
+      packages: read

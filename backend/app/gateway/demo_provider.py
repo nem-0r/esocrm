@@ -9,12 +9,14 @@
 import asyncio
 import hashlib
 import itertools
+import math
 import secrets
 import time
 from typing import Any
 
 from app.core.errors import Invalid
-from app.gateway.provider import CodeRequest, SentMessage, SessionResult
+from app.gateway.provider import CodeRequest, MediaGone, SentMessage, SessionResult
+from app.gateway.send_plan import OutgoingFile, plan
 from app.models import TelegramAccount
 
 _SEND_DELAY_SECONDS = 0.4
@@ -29,6 +31,11 @@ def _phone_code_hash(account: TelegramAccount) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()[:32]
 
 
+def _write(path: str, body: bytes) -> None:
+    with open(path, "wb") as target:
+        target.write(body)
+
+
 def _fake_tg_user_id(account: TelegramAccount) -> int:
     return 900_000_000 + account.id
 
@@ -40,6 +47,21 @@ class DemoProvider:
     требует облачный пароль (любое непустое значение) — так проверяется
     двухшаговый сценарий входа на макете.
     """
+
+    def __init__(self) -> None:
+        # Имитация FloodWait (команда demo_flood): до срока любая отправка
+        # аккаунта получает отказ «подождите» — как у настоящего Telegram.
+        self._flood_until: dict[int, float] = {}
+
+    def flood(self, account_id: int, seconds: int) -> None:
+        self._flood_until[account_id] = time.monotonic() + seconds
+
+    def _check_flood(self, account: TelegramAccount) -> None:
+        from app.gateway.mtproto_provider import RetryAfter
+
+        left = self._flood_until.get(account.id, 0.0) - time.monotonic()
+        if left > 0:
+            raise RetryAfter(math.ceil(left))
 
     async def start(self, account: TelegramAccount) -> None:
         # Демо-сессии не держат соединений — поднимать нечего.
@@ -87,14 +109,53 @@ class DemoProvider:
         chat_id: int,
         text: str | None,
         random_id: int,
-        attachments: list[dict[str, Any]],
+        attachments: list[OutgoingFile],
     ) -> SentMessage:
+        """Столько номеров Telegram, сколько сообщений получилось бы на самом
+        деле: альбом из пяти фото — пять номеров. Так путь «запомнить все номера
+        и не задвоить при подтяжке истории» проверяется и без Telegram."""
+        self._check_flood(account)
         await asyncio.sleep(_SEND_DELAY_SECONDS)
-        return SentMessage(tg_message_id=next(_tg_message_ids))
+        count = max(1, plan(text, attachments).message_count)
+        ids = [next(_tg_message_ids) for _ in range(count)]
+        return SentMessage(tg_message_id=ids[-1], extra_ids=ids[:-1])
+
+    async def forward_messages(
+        self,
+        account: TelegramAccount,
+        to_chat_id: int,
+        from_chat_id: int,
+        tg_message_ids: list[int],
+        drop_author: bool,
+        random_id: int,
+    ) -> list[int]:
+        self._check_flood(account)
+        await asyncio.sleep(_SEND_DELAY_SECONDS)
+        return [next(_tg_message_ids) for _ in tg_message_ids]
+
+    async def download_media(
+        self, account: TelegramAccount, chat_id: int, tg_message_id: int, path: str
+    ) -> int:
+        """Демо не хранит файлов Telegram: «докачанный» файл — короткая заглушка.
+        Номер сообщения 0 изображает удалённое — для проверки неудачной докачки."""
+        await asyncio.sleep(0)
+        if tg_message_id == 0:
+            raise MediaGone("Сообщение удалено в Telegram — файла больше нет")
+        body = b"demo file " + str(tg_message_id).encode()
+        await asyncio.to_thread(_write, path, body)
+        return len(body)
 
     # --------------------------------------------------- приём и история
 
-    def set_sinks(self, sink, read_sink=None, status_sink=None, session_sink=None) -> None:  # noqa: ANN001
+    def set_sinks(  # noqa: ANN001
+        self,
+        sink,
+        read_sink=None,
+        status_sink=None,
+        session_sink=None,
+        delete_sink=None,
+        inbox_read_sink=None,
+    ) -> None:
         """Те же приёмники, что и у боевого провайдера: путь входящего сообщения
         в базу проверяется целиком ещё до подключения настоящего Telegram.
         session_sink (вход по QR) демо не изображает — принимается и не используется."""

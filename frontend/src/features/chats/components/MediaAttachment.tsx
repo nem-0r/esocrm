@@ -84,17 +84,41 @@ export function VideoPreview({
   src,
   width,
   height,
+  poster,
+  variant = 'video',
 }: {
   src: string
   width?: number | null
   height?: number | null
+  /** Кадр-превью: без него до загрузки видео виден чёрный прямоугольник. */
+  poster?: string | null
+  /** round — «кружочек» Telegram; loop — GIF: без звука, по кругу, сам. */
+  variant?: 'video' | 'round' | 'loop'
 }) {
+  if (variant === 'round') {
+    return (
+      <video
+        src={src}
+        controls
+        playsInline
+        preload="metadata"
+        poster={poster ?? undefined}
+        className="block size-60 max-w-full rounded-full bg-black object-cover"
+      />
+    )
+  }
   const size = previewSize(width, height)
+  const loop = variant === 'loop'
   return (
     <video
       src={src}
-      controls
+      controls={!loop}
+      autoPlay={loop}
+      loop={loop}
+      muted={loop}
+      playsInline
       preload="metadata"
+      poster={poster ?? undefined}
       width={width ?? undefined}
       height={height ?? undefined}
       style={{

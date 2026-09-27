@@ -41,6 +41,8 @@ class ClientCard(ClientRef):
 class DealItemIn(ApiModel):
     name: str
     amount: int  # копейки
+    # Услуга из справочника. Пусто — менеджер вписал название сам.
+    service_id: int | None = None
 
 
 class DealItemOut(ApiModel):
@@ -48,6 +50,9 @@ class DealItemOut(ApiModel):
     name: str
     amount: int
     position: int
+    service_id: int | None = None
+    # Цена по прайсу на момент продажи — снимок, правка справочника его не меняет.
+    list_price: int | None = None
 
 
 class DealEventOut(ApiModel):
@@ -207,7 +212,14 @@ def detail_payload(deal: Any, sold_by: Any, events: list[tuple[Any, Any]]) -> di
         conversation_id=deal.conversation_id,
         client={"id": deal.client.id, "name": deal.client.name, "phone": deal.client.phone},
         items=[
-            {"id": i.id, "name": i.name, "amount": i.amount, "position": i.position}
+            {
+                "id": i.id,
+                "name": i.name,
+                "amount": i.amount,
+                "position": i.position,
+                "service_id": i.service_id,
+                "list_price": i.list_price,
+            }
             for i in deal.items
         ],
         requisites_snapshot=deal.requisites_snapshot,

@@ -30,6 +30,9 @@ const StaffPage = lazy(() =>
 const SettingsPage = lazy(() =>
   import('@/features/profile/SettingsPage').then((m) => ({ default: m.SettingsPage })),
 )
+const ServicesPage = lazy(() =>
+  import('@/features/services/ServicesPage').then((m) => ({ default: m.ServicesPage })),
+)
 const RequisitesPage = lazy(() =>
   import('@/features/profile/RequisitesPage').then((m) => ({ default: m.RequisitesPage })),
 )
@@ -115,6 +118,14 @@ export function AppRoutes() {
           element={
             <AdminOnly>
               <RequisitesPage />
+            </AdminOnly>
+          }
+        />
+        <Route
+          path="/profile/services"
+          element={
+            <AdminOnly>
+              <ServicesPage />
             </AdminOnly>
           }
         />

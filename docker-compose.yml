@@ -75,6 +75,8 @@ services:
     env_file: [.env]
     environment:
       SERVICE_ROLE: gateway
+      # На ноутбуке хватает одного процесса шлюза (на сервере — по числу ядер).
+      GATEWAY_WORKERS: "1"
     volumes: ["./backend:/app"]
     depends_on:
       api: {condition: service_started}
