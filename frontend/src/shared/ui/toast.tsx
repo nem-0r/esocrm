@@ -1,17 +1,19 @@
-import { CheckCircle2, X } from 'lucide-react'
+import { AlertCircle, CheckCircle2, X } from 'lucide-react'
 import { useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { create } from 'zustand'
 
 /**
- * Короткие подтверждения действий: «Скопировано», «Переслано в чат …».
- * Не для ошибок — ошибка показывается там, где случилась, и не исчезает сама.
+ * Короткие уведомления о действиях: «Скопировано», «Переслано в чат …».
+ * Ошибку формы показывают у самой формы; сюда — только ошибки действий, у
+ * которых своего места нет (копирование, скачивание): `toastError`.
  */
 
 interface Toast {
   id: number
   text: string
   link?: { to: string; label: string }
+  kind: 'success' | 'error'
 }
 
 interface ToastState {
@@ -30,21 +32,35 @@ export const useToasts = create<ToastState>((set) => ({
 }))
 
 export function toast(text: string, link?: Toast['link']) {
-  useToasts.getState().push({ text, link })
+  useToasts.getState().push({ text, link, kind: 'success' })
+}
+
+export function toastError(text: string) {
+  useToasts.getState().push({ text, kind: 'error' })
+}
+
+// Ошибку и уведомление со ссылкой надо успеть прочитать и нажать.
+function lifetime(item: Toast): number {
+  if (item.kind === 'error') return 8000
+  return item.link ? 7000 : 4000
 }
 
 function ToastItem({ item }: { item: Toast }) {
   const dismiss = useToasts((state) => state.dismiss)
   useEffect(() => {
-    const timer = window.setTimeout(() => dismiss(item.id), 4000)
+    const timer = window.setTimeout(() => dismiss(item.id), lifetime(item))
     return () => window.clearTimeout(timer)
-  }, [dismiss, item.id])
+  }, [dismiss, item])
   return (
     <div
-      role="status"
+      role={item.kind === 'error' ? 'alert' : 'status'}
       className="pointer-events-auto flex items-center gap-2.5 rounded-md border border-line-strong bg-surface-raised px-3 py-2.5 shadow-sheet"
     >
-      <CheckCircle2 className="size-4 shrink-0 text-success" aria-hidden />
+      {item.kind === 'error' ? (
+        <AlertCircle className="size-4 shrink-0 text-danger" aria-hidden />
+      ) : (
+        <CheckCircle2 className="size-4 shrink-0 text-success" aria-hidden />
+      )}
       <span className="text-sm text-ink">{item.text}</span>
       {item.link && (
         <Link

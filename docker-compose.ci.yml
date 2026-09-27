@@ -44,7 +44,9 @@ services:
       retries: 30
 
   storage:
-    image: minio/minio:latest
+    image: ${MINIO_IMAGE:-astra-minio:ci}
+    build:
+      context: ./deploy/minio
     command: server /data
     environment:
       MINIO_ROOT_USER: astra_ci_access

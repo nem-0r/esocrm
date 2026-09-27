@@ -4,7 +4,7 @@ import { Link, useParams } from 'react-router-dom'
 
 import { realtime } from '@/shared/api/ws'
 import { dateFull, dayDivider, dayKey, money, plural, waitingLabel } from '@/shared/lib/format'
-import { BackButton, Badge, Button, EmptyState, ErrorState, ListSkeleton, toast } from '@/shared/ui'
+import { BackButton, Badge, Button, EmptyState, ErrorState, ListSkeleton, toast, toastError } from '@/shared/ui'
 import { ChatsLayout } from '@/features/chats/ChatsLayout'
 import { Composer, type ComposerHandle } from '@/features/chats/components/Composer'
 import { ForwardSheet } from '@/features/chats/components/ForwardSheet'
@@ -114,7 +114,7 @@ function ChatPane({ conversationId }: { conversationId: number }) {
         toast(`Скопировано: ${chosen.length} ${plural(chosen.length, 'сообщение', 'сообщения', 'сообщений')}`)
         stopSelecting()
       },
-      () => toast('Не удалось скопировать'),
+      () => toastError('Не удалось скопировать'),
     )
   }
 

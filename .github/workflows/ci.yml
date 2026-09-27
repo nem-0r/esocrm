@@ -134,11 +134,23 @@ jobs:
           cache-from: type=gha,scope=web
           cache-to: type=gha,scope=web,mode=max
 
+      # minio/minio больше не скачать (Docker Hub удалил образ) — собираем тот же
+      # выпуск, что на проде, из исходников; кеш держит сборку до смены версии.
+      - name: сборка MinIO (тот же выпуск, что на проде)
+        uses: docker/build-push-action@v7
+        with:
+          context: deploy/minio
+          load: true
+          tags: astra-minio:ci
+          cache-from: type=gha,scope=minio
+          cache-to: type=gha,scope=minio,mode=max
+
       - name: тестовый стенд
         env:
           BACKEND_IMAGE: ${{ steps.names.outputs.backend }}
           WEB_IMAGE: ${{ steps.names.outputs.web }}
           IMAGE_TAG: ${{ steps.names.outputs.tag }}
+          MINIO_IMAGE: astra-minio:ci
         run: docker compose -f docker-compose.ci.yml up -d --no-build --wait --wait-timeout 300
 
       - name: все проверки (как make ci-verify)

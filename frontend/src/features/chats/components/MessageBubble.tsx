@@ -10,7 +10,7 @@ import { ApiError } from '@/shared/api/client'
 import { useMe } from '@/shared/hooks/useAuth'
 import { cn } from '@/shared/lib/cn'
 import { time } from '@/shared/lib/format'
-import { Button, InlineError, Textarea, toast } from '@/shared/ui'
+import { Button, InlineError, Textarea, toast, toastError } from '@/shared/ui'
 
 /** Столько же разрешает сам Telegram — после этого срока правка отклонится сервером. */
 const EDIT_WINDOW_HOURS = 48
@@ -113,7 +113,7 @@ export function MessageBubble({
       ? () =>
           void copyText(message.text ?? '').then(
             () => toast('Текст скопирован'),
-            () => toast('Не удалось скопировать — выделите текст вручную'),
+            () => toastError('Не удалось скопировать — выделите текст вручную'),
           )
       : undefined,
     onCopyImage:
@@ -121,7 +121,7 @@ export function MessageBubble({
         ? () =>
             void copyImage(photo.url).then(
               () => toast('Изображение скопировано'),
-              () => toast('Не удалось скопировать изображение'),
+              () => toastError('Не удалось скопировать изображение'),
             )
         : undefined,
     onDownload:
