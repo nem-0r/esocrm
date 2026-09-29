@@ -20,6 +20,7 @@ import asyncio
 import io
 import math
 import sys
+import uuid
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -884,6 +885,162 @@ async def check_money_roundtrip(api: httpx.AsyncClient, db: Any, admin_id: int) 
         print("  · тестовая сделка удалена, демо-данные восстановлены")
 
 
+async def check_service_name_matching(api: httpx.AsyncClient, db: Any) -> None:
+    """Аудит №10: позиция без своей услуги (service_id пуст, менеджер вписал
+    название сам) с тем же написанием, что у услуги справочника — без учёта
+    регистра, пробелов по краям и «е»/«ё» — обязана попасть в ОДНУ строку
+    «По услугам» с этой услугой, а не завести вторую («Натальная карта»
+    дважды). Ровно так возникали дубли: старые позиции, вписанные до того,
+    как руководитель нажал «Добавить» у подсказки из истории, service_id
+    задним числом не получают.
+    """
+    print("\nНепривязанная позиция с тем же названием — одна строка (аудит №10)")
+    suffix = uuid.uuid4().hex[:6]
+    canonical_name = f"Расчёт для проверки {suffix}"
+    # «ё» → «е», другой регистр, пробел по краю — то самое, что раньше
+    # заводило вторую строку.
+    typed_name = f" расчет для проверки {suffix} "
+
+    created_service = await api.post(
+        f"{BASE}/services", json={"name": canonical_name, "price": 100000}
+    )
+    if created_service.status_code != 201:
+        check(
+            "услуга для проверки склейки создана",
+            201,
+            created_service.status_code,
+            created_service.text,
+        )
+        return
+    service_id = created_service.json()["id"]
+
+    conversation_id = int(
+        (
+            await db.execute(
+                text(
+                    "select c.id from conversations c "
+                    "join telegram_accounts a on a.id = c.account_id "
+                    "where a.deleted_at is null order by c.id limit 1"
+                )
+            )
+        ).scalar_one()
+    )
+    requisite_id = int(
+        (
+            await db.execute(
+                text(
+                    "select id from payment_requisites "
+                    "where is_active and deleted_at is null order by id limit 1"
+                )
+            )
+        ).scalar_one()
+    )
+
+    deal_id: int | None = None
+    try:
+        created_deal = await api.post(
+            f"{BASE}/deals",
+            json={
+                "conversation_id": conversation_id,
+                "payment_method": "requisites",
+                "requisite_id": requisite_id,
+                "items": [
+                    {"name": canonical_name, "amount": 100000, "service_id": service_id},
+                    {"name": typed_name, "amount": 50000},
+                ],
+            },
+        )
+        if created_deal.status_code != 201:
+            check(
+                "сделка для проверки склейки создана",
+                201,
+                created_deal.status_code,
+                created_deal.text,
+            )
+            return
+        deal = created_deal.json()
+        deal_id = deal["id"]
+        check(
+            "вторая позиция без своей услуги — service_id пуст",
+            None,
+            deal["items"][1]["service_id"],
+        )
+
+        await api.post(f"{BASE}/deals/{deal_id}/send")
+        uploaded = (
+            await api.post(
+                f"{BASE}/files/upload",
+                files={"file": ("чек.png", io.BytesIO(RECEIPT_PNG), "image/png")},
+            )
+        ).json()
+        paid = await api.post(
+            f"{BASE}/deals/{deal_id}/pay",
+            json={
+                "receipt_upload_key": uploaded["upload_key"],
+                "receipt_file_name": uploaded["file_name"],
+                "receipt_mime_type": uploaded["mime_type"],
+                "receipt_size_bytes": uploaded["size_bytes"],
+            },
+        )
+        check("оплата для проверки склейки подтверждена", 200, paid.status_code, paid.text)
+
+        today = datetime.now(DEFAULT_TZ).date()
+        params = {"date_from": today.isoformat(), "date_to": today.isoformat()}
+        services_stats = (await api.get(f"{BASE}/stats/services", params=params)).json()
+        rows = [row for row in services_stats["rows"] if row["service_id"] == service_id]
+        check(
+            "непривязанная позиция склеилась в одну строку с услугой, а не завела вторую",
+            1,
+            len(rows),
+            services_stats["rows"],
+        )
+        if rows:
+            check("продано штук — обе позиции вместе", 2, rows[0]["sold_count"])
+            check("выручка — обе позиции вместе", 150000, rows[0]["revenue"])
+            check("строка подписана названием из справочника", canonical_name, rows[0]["name"])
+    finally:
+        if deal_id is not None:
+            message_id = (
+                await db.execute(
+                    text("select sent_message_id from deals where id=:id"), {"id": deal_id}
+                )
+            ).scalar_one_or_none()
+            await db.execute(
+                text("update deals set sent_message_id = null where id=:id"), {"id": deal_id}
+            )
+            await db.execute(
+                text("delete from notifications where entity_type='deal' and entity_id=:id"),
+                {"id": deal_id},
+            )
+            await db.execute(
+                text("delete from event_log where entity_type='deal' and entity_id=:id"),
+                {"id": deal_id},
+            )
+            await db.execute(text("delete from payment_events where deal_id=:id"), {"id": deal_id})
+            await db.execute(text("delete from deals where id=:id"), {"id": deal_id})
+            if message_id is not None:
+                # Тот же порядок, что и в check_money_roundtrip: outbox перед
+                # messages — шлюз лочит их в этом порядке при отправке.
+                await db.execute(
+                    text("delete from outbox where message_id=:id"), {"id": message_id}
+                )
+                await db.execute(text("delete from messages where id=:id"), {"id": message_id})
+            await db.execute(
+                text(
+                    "update conversations c set last_message_at = s.last_at, "
+                    "last_manager_message_at = s.last_out from ("
+                    "  select max(created_at) last_at, "
+                    "         max(created_at) filter (where direction='out') last_out "
+                    "  from messages where conversation_id = :cid and deleted_at is null"
+                    ") s where c.id = :cid"
+                ),
+                {"cid": conversation_id},
+            )
+            await db.commit()
+        await api.delete(f"{BASE}/services/{service_id}")
+        print("  · тестовые сделка и услуга удалены")
+
+
 async def check_admin_excluded_from_response_time(api: httpx.AsyncClient, db: Any) -> None:
     """Диалог, который сейчас числится за руководителем, не красит среднее время
     ответа (docs/03-business-rules.md §10, 2026-09-17).
@@ -1183,6 +1340,7 @@ async def main() -> int:  # noqa: PLR0915
             )
 
         await check_money_roundtrip(api, db, admin_id)
+        await check_service_name_matching(api, db)
         await check_admin_excluded_from_response_time(api, db)
 
         print("\nРабочие часы влияют на метрики, а не только на настройку")

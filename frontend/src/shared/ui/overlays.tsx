@@ -44,6 +44,18 @@ export function Sheet({
         <Dialog.Content
           ref={contentRef}
           style={dragY ? { transform: `translateY(${dragY}px)` } : undefined}
+          // Radix слушает Escape раньше поля ввода (document, capture-фаза —
+          // node_modules/@radix-ui/react-dismissable-layer): без этого Escape,
+          // нажатый в раскрытом списке услуг, закрывал бы всё окно оплаты, а
+          // не сам список. Если Escape пришёл из раскрытого комбобокса —
+          // гасим закрытие окна здесь; список после этого закроет обработчик
+          // самого поля (он получит то же нажатие следующим, в фазе всплытия).
+          onEscapeKeyDown={(event) => {
+            const target = event.target as HTMLElement | null
+            if (target?.closest('[role="combobox"][aria-expanded="true"]')) {
+              event.preventDefault()
+            }
+          }}
           className={cn(
             'fixed inset-x-0 bottom-0 z-50 flex max-h-[92dvh] flex-col',
             'animate-sheet-up rounded-t-xl border-t border-line bg-surface shadow-sheet',

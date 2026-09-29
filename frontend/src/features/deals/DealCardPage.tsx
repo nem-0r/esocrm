@@ -145,6 +145,15 @@ function DealPane({ dealId }: { dealId: number }) {
     (!editNeedsRequisite || editRequisiteId !== null) &&
     editComment.trim().length > 0 &&
     !update.isPending
+  // Та же причина, что покажет submitEdit(), если всё-таки нажать на
+  // неактивную кнопку, — только заранее (аудит №29).
+  const editDisabledReason =
+    editValidation ??
+    (editNeedsRequisite && editRequisiteId === null
+      ? 'Выберите счёт получателя'
+      : editComment.trim().length === 0
+        ? 'Укажите причину изменения'
+        : null)
 
   async function submitEdit() {
     setEditTouched(true)
@@ -505,14 +514,19 @@ function DealPane({ dealId }: { dealId: number }) {
         title="Изменить сделку"
         description="Причина обязательна — попадёт в журнал"
         footer={
-          <Button
-            fullWidth
-            loading={update.isPending}
-            disabled={!editCanSubmit}
-            onClick={() => void submitEdit()}
-          >
-            Сохранить · {money(editTotal)}
-          </Button>
+          <div className="flex flex-col items-center gap-1.5">
+            <Button
+              fullWidth
+              loading={update.isPending}
+              disabled={!editCanSubmit}
+              onClick={() => void submitEdit()}
+            >
+              Сохранить · {money(editTotal)}
+            </Button>
+            {!editCanSubmit && !update.isPending && editDisabledReason && (
+              <p className="text-xs text-ink-faint">{editDisabledReason}</p>
+            )}
+          </div>
         }
       >
         <div className="flex flex-col gap-5">

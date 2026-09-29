@@ -42,6 +42,15 @@ function Frame<T>({
   )
 }
 
+/** Таблица шире экрана на телефоне — прокрутка есть (overflow-x-auto), но на
+ *  тачскрине у неё нет видимой полосы, и без прямой подсказки не догадаться,
+ *  что можно листать вбок, а не всё уместилось (аудит №37). */
+function ScrollHint() {
+  return (
+    <p className="text-micro text-ink-faint desk:hidden">Таблица шире экрана — листайте вбок →</p>
+  )
+}
+
 /** Продажи по услугам: сколько, на какую сумму, доля выручки, конверсия выставленного. */
 export function ServicesTable({ query }: { query: QueryLike<ServiceStats> }) {
   return (
@@ -52,46 +61,49 @@ export function ServicesTable({ query }: { query: QueryLike<ServiceStats> }) {
       empty={(data) => data.rows.length === 0}
     >
       {(data) => (
-        <div className="-mx-1 overflow-x-auto">
-          <table className="w-full min-w-max border-separate border-spacing-y-1 text-sm">
-            <thead>
-              <tr className="text-left text-micro uppercase tracking-wide text-ink-faint">
-                <th className="px-2 font-normal">Услуга</th>
-                <th className="px-2 text-right font-normal">Продано</th>
-                <th className="px-2 text-right font-normal">Выручка</th>
-                <th className="w-32 px-2 font-normal">Доля</th>
-                <th className="px-2 text-right font-normal">Конверсия</th>
-              </tr>
-            </thead>
-            <tbody>
-              {data.rows.map((row) => (
-                <tr key={row.key} className="bg-surface-raised">
-                  <td className="rounded-l-md px-2 py-2 text-ink">{row.name}</td>
-                  <td className="tnum px-2 py-2 text-right text-ink-muted">{row.sold_count}</td>
-                  <td className="tnum px-2 py-2 text-right font-semibold text-ink">
-                    {money(row.revenue)}
-                  </td>
-                  <td className="px-2 py-2">
-                    <div className="flex items-center gap-2">
-                      <ShareBar value={row.share_pct} />
-                      <span className="tnum w-12 shrink-0 text-right text-micro text-ink-muted">
-                        {pct(row.share_pct)}
-                      </span>
-                    </div>
-                  </td>
-                  <td className="tnum rounded-r-md px-2 py-2 text-right text-ink-muted">
-                    {row.offered ? (
-                      <span title={`оплачено ${row.offered_paid} из ${row.offered}`}>
-                        {pct(row.conversion_pct)}
-                      </span>
-                    ) : (
-                      '—'
-                    )}
-                  </td>
+        <div className="flex flex-col gap-1.5">
+          <ScrollHint />
+          <div className="-mx-1 overflow-x-auto">
+            <table className="w-full min-w-max border-separate border-spacing-y-1 text-sm">
+              <thead>
+                <tr className="text-left text-micro uppercase tracking-wide text-ink-faint">
+                  <th className="px-2 font-normal">Услуга</th>
+                  <th className="px-2 text-right font-normal">Продано</th>
+                  <th className="px-2 text-right font-normal">Выручка</th>
+                  <th className="w-32 px-2 font-normal">Доля</th>
+                  <th className="px-2 text-right font-normal">Конверсия</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {data.rows.map((row) => (
+                  <tr key={row.key} className="bg-surface-raised">
+                    <td className="rounded-l-md px-2 py-2 text-ink">{row.name}</td>
+                    <td className="tnum px-2 py-2 text-right text-ink-muted">{row.sold_count}</td>
+                    <td className="tnum px-2 py-2 text-right font-semibold text-ink">
+                      {money(row.revenue)}
+                    </td>
+                    <td className="px-2 py-2">
+                      <div className="flex items-center gap-2">
+                        <ShareBar value={row.share_pct} />
+                        <span className="tnum w-12 shrink-0 text-right text-micro text-ink-muted">
+                          {pct(row.share_pct)}
+                        </span>
+                      </div>
+                    </td>
+                    <td className="tnum rounded-r-md px-2 py-2 text-right text-ink-muted">
+                      {row.offered ? (
+                        <span title={`оплачено ${row.offered_paid} из ${row.offered}`}>
+                          {pct(row.conversion_pct)}
+                        </span>
+                      ) : (
+                        '—'
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
     </Frame>
@@ -108,48 +120,51 @@ export function AccountsTable({ query }: { query: QueryLike<AccountStatsRow[]> }
       empty={(rows) => rows.length === 0}
     >
       {(rows) => (
-        <div className="-mx-1 overflow-x-auto">
-          <table className="w-full min-w-max border-separate border-spacing-y-1 text-sm">
-            <thead>
-              <tr className="text-left text-micro uppercase tracking-wide text-ink-faint">
-                <th className="px-2 font-normal">Аккаунт</th>
-                <th className="px-2 text-right font-normal">Продажи</th>
-                <th className="px-2 text-right font-normal">Ср. чек</th>
-                <th className="px-2 text-right font-normal">Новых чатов</th>
-                <th className="px-2 text-right font-normal">В работе</th>
-                <th className="px-2 text-right font-normal">Ответ</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row) => (
-                <tr key={row.account.id} className="bg-surface-raised">
-                  <td className="rounded-l-md px-2 py-2">
-                    <span className="block text-ink">{row.account.title}</span>
-                    <span className="block text-micro text-ink-faint">
-                      {FUNNEL_LABEL[row.account.funnel_stage]}
-                    </span>
-                  </td>
-                  <td className="px-2 py-2 text-right">
-                    <span className="tnum block font-semibold text-ink">{money(row.sales_amount)}</span>
-                    <span className="tnum block text-micro text-ink-faint">{row.sales_count} шт.</span>
-                  </td>
-                  <td className="tnum px-2 py-2 text-right text-ink-muted">
-                    {moneyWhole(row.avg_check)}
-                  </td>
-                  <td className="tnum px-2 py-2 text-right text-ink-muted">{row.new_conversations}</td>
-                  <td className="tnum px-2 py-2 text-right text-ink-muted">{row.active_conversations}</td>
-                  <td className="rounded-r-md px-2 py-2 text-right">
-                    <span className="tnum block text-ink-muted">{durationLabel(row.avg_response_seconds)}</span>
-                    {row.in_goal_pct !== null && (
-                      <span className="tnum block text-micro text-ink-faint">
-                        вовремя {pct(row.in_goal_pct)}
-                      </span>
-                    )}
-                  </td>
+        <div className="flex flex-col gap-1.5">
+          <ScrollHint />
+          <div className="-mx-1 overflow-x-auto">
+            <table className="w-full min-w-max border-separate border-spacing-y-1 text-sm">
+              <thead>
+                <tr className="text-left text-micro uppercase tracking-wide text-ink-faint">
+                  <th className="px-2 font-normal">Аккаунт</th>
+                  <th className="px-2 text-right font-normal">Продажи</th>
+                  <th className="px-2 text-right font-normal">Ср. чек</th>
+                  <th className="px-2 text-right font-normal">Новых чатов</th>
+                  <th className="px-2 text-right font-normal">В работе</th>
+                  <th className="px-2 text-right font-normal">Ответ</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {rows.map((row) => (
+                  <tr key={row.account.id} className="bg-surface-raised">
+                    <td className="rounded-l-md px-2 py-2">
+                      <span className="block text-ink">{row.account.title}</span>
+                      <span className="block text-micro text-ink-faint">
+                        {FUNNEL_LABEL[row.account.funnel_stage]}
+                      </span>
+                    </td>
+                    <td className="px-2 py-2 text-right">
+                      <span className="tnum block font-semibold text-ink">{money(row.sales_amount)}</span>
+                      <span className="tnum block text-micro text-ink-faint">{row.sales_count} шт.</span>
+                    </td>
+                    <td className="tnum px-2 py-2 text-right text-ink-muted">
+                      {moneyWhole(row.avg_check)}
+                    </td>
+                    <td className="tnum px-2 py-2 text-right text-ink-muted">{row.new_conversations}</td>
+                    <td className="tnum px-2 py-2 text-right text-ink-muted">{row.active_conversations}</td>
+                    <td className="rounded-r-md px-2 py-2 text-right">
+                      <span className="tnum block text-ink-muted">{durationLabel(row.avg_response_seconds)}</span>
+                      {row.in_goal_pct !== null && (
+                        <span className="tnum block text-micro text-ink-faint">
+                          вовремя {pct(row.in_goal_pct)}
+                        </span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
     </Frame>

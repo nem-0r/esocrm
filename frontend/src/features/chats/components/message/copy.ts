@@ -67,7 +67,7 @@ export function formatForCopy(messages: Message[], clientName: string): string {
       const who =
         message.direction === 'in'
           ? clientName
-          : message.author?.full_name ?? (message.author_kind === 'userbot' ? 'Не из CRM' : 'Менеджер')
+          : message.author?.full_name ?? (message.author_kind === 'userbot' ? 'Рассылка воронки' : 'Менеджер')
       const files = message.attachments.map((file) => `[${file.file_name}]`).join(' ')
       const body = [message.text ?? '', files].filter(Boolean).join('\n')
       return `${who}, ${time(message.created_at)}:\n${body}`

@@ -34,6 +34,19 @@ async def run() -> int:  # noqa: PLR0915
         c.check("у услуг есть цены", all("price" in s for s in services))
         inactive_view = (await manager.get(f"{BASE}/services", params={"include_inactive": True})).json()
         c.check("снятые с продажи менеджеру не показываются", all(s["is_active"] for s in inactive_view))
+        # Аудит №9: в окне оплаты показывались только первые 8 услуг — но это
+        # была подрезка на фронтенде (ItemsEditor.MAX_SHOWN), сервер всегда
+        # отдавал весь список. Сверяем длину с независимым счётом по базе —
+        # регрессия, если сервер когда-нибудь незаметно обзаведётся лимитом.
+        async with SessionLocal() as db:
+            active_count = (
+                await db.execute(
+                    text("select count(*) from services where deleted_at is null and is_active")
+                )
+            ).scalar_one()
+        c.check("справочник отдаётся целиком, без обрезки", int(active_count), len(services))
+        sort_orders = [s["sort_order"] for s in services]
+        c.check("порядок — по sort_order справочника", sorted(sort_orders), sort_orders)
 
         c.section("Права")
         r = await manager.post(f"{BASE}/services", json={"name": f"Попытка {suffix}", "price": 100000})
@@ -130,6 +143,57 @@ async def run() -> int:  # noqa: PLR0915
             },
         )
         c.check("несуществующая услуга — 422", r.status_code == 422, r.status_code)
+
+        c.section("Правку сделки со снятой услугой можно сохранить (аудит №8)")
+        # Позиция «deal» уже ссылается на «service», которую только что сняли
+        # с продажи (строка выше). Раньше правка такой сделки была тупиком:
+        # сервер отвечал тем же «снята с продажи», что и при выборе её в
+        # новой сделке, — хотя позиция и так уже в сделке, менять её не просят.
+        r = await admin.patch(
+            f"{BASE}/deals/{deal.get('id')}",
+            json={
+                "items": [
+                    {"name": items[0]["name"], "amount": 320000, "service_id": service.get("id")},
+                    {"name": items[1]["name"], "amount": items[1]["amount"]},
+                ],
+                "comment": "проверка: услугу сняли с продажи после выбора",
+            },
+        )
+        c.check(
+            "правка со снятой (уже выбранной) услугой — не 422", r.status_code == 200, r.text[:200]
+        )
+        edited = r.json() if r.status_code == 200 else {}
+        edited_items = edited.get("items", [])
+        c.check(
+            "услуга и позиция остались связаны",
+            len(edited_items) == 2 and edited_items[0].get("service_id") == service.get("id"),
+            edited_items,
+        )
+        c.check(
+            "цена по прайсу — прежний снимок, а не текущая (уже другая) цена услуги",
+            bool(edited_items) and edited_items[0].get("list_price") == 350000,
+            edited_items[:1],
+        )
+        c.check(
+            "сумма позиции менеджер всё равно может поправить",
+            bool(edited_items) and edited_items[0].get("amount") == 320000,
+            edited_items[:1],
+        )
+        # А вот НОВУЮ позицию с чужой (никогда не стоявшей в этой сделке)
+        # услугой правка по-прежнему не пропустит — исключение только для того,
+        # что уже было в сделке.
+        r = await admin.patch(
+            f"{BASE}/deals/{deal.get('id')}",
+            json={
+                "items": [{"name": "x", "amount": 100000, "service_id": 987654321}],
+                "comment": "проверка: новая позиция с чужой услугой",
+            },
+        )
+        c.check(
+            "правка с НОВОЙ несуществующей услугой всё ещё отклоняется",
+            r.status_code == 422,
+            r.status_code,
+        )
 
         # Черновик больше не нужен — отменяем, чтобы не висел «ждёт оплаты».
         if deal.get("id"):

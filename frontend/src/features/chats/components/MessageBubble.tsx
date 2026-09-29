@@ -6,7 +6,7 @@ import { AttachmentView, kindOf } from '@/features/chats/components/message/Atta
 import { ForwardedHeader, MetaCard, hasMetaCard } from '@/features/chats/components/message/MetaCards'
 import { MessageMenu, type MessageActions } from '@/features/chats/components/message/MessageMenu'
 import { canCopyImage, copyImage, copyText } from '@/features/chats/components/message/copy'
-import { ApiError } from '@/shared/api/client'
+import { ApiError, downloadFile } from '@/shared/api/client'
 import { useMe } from '@/shared/hooks/useAuth'
 import { cn } from '@/shared/lib/cn'
 import { time } from '@/shared/lib/format'
@@ -25,7 +25,10 @@ function canEditMessage(message: Message, myUserId: number): boolean {
     message.author?.id === myUserId &&
     message.kind === 'text' &&
     (message.status === 'sent' || message.status === 'read') &&
-    Date.now() - new Date(sentAt).getTime() < EDIT_WINDOW_HOURS * 3600_000
+    Date.now() - new Date(sentAt).getTime() < EDIT_WINDOW_HOURS * 3600_000 &&
+    // Настоящая пересылка Telegram (не копия) — Telegram не даёт редактировать
+    // пересланные сообщения, поэтому и в CRM не предлагаем «Изменить».
+    !message.meta?.forwarded?.native
   )
 }
 
@@ -107,7 +110,7 @@ export function MessageBubble({
   const photo = message.attachments.find(
     (file) => (file.status ?? 'ready') === 'ready' && kindOf(file) === 'photo',
   )
-  const single = message.attachments.length === 1 ? message.attachments[0] : null
+  const downloadable = message.attachments.filter((file) => (file.status ?? 'ready') === 'ready')
   const actions: MessageActions = {
     onCopyText: message.text
       ? () =>
@@ -124,12 +127,20 @@ export function MessageBubble({
               () => toastError('Не удалось скопировать изображение'),
             )
         : undefined,
-    onDownload:
-      single && (single.status ?? 'ready') === 'ready'
-        ? () => {
-            window.location.href = `${single.url}?download=1`
-          }
-        : undefined,
+    // Несколько файлов (альбом) — пункт на каждый, с именем: иначе не понять,
+    // что именно скачивается. Один файл — один пункт «Скачать», как раньше.
+    downloads: downloadable.length
+      ? downloadable.map((file) => ({
+          label: downloadable.length > 1 ? `Скачать «${file.file_name}»` : 'Скачать',
+          run: () => {
+            // Не прямая навигация: на ошибке (файл не найден, сессия истекла)
+            // браузер открыл бы вместо CRM технический ответ сервера.
+            void downloadFile(`/files/${file.id}`, file.file_name, { download: 1 }).catch(() =>
+              toastError('Не удалось скачать файл — попробуйте ещё раз'),
+            )
+          },
+        }))
+      : undefined,
     onForward: onForward && canForward(message) ? onForward : undefined,
     onSelect: selection && !message.is_internal ? selection.onStart : undefined,
     onEdit: editable ? startEdit : undefined,

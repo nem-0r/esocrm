@@ -92,6 +92,30 @@ export function newItemDraft(): ItemDraft {
   return { key: `item-${nextKey}`, name: '', amount: '', serviceId: null }
 }
 
+/**
+ * Сравнение названий услуг: без регистра, без пробелов по краям и без
+ * различия «е»/«ё» — человек читает «расчет» и «Расчёт» как одно и то же,
+ * а обычный `toLowerCase` эту букву не выравнивает. Используется и в поиске
+ * по справочнику (аудит №9), и при автосвязывании вручную введённого
+ * названия с услугой (аудит №10 — чтобы для новых позиций дубли в
+ * статистике не появлялись вовсе).
+ */
+export function normalizeServiceName(value: string): string {
+  return value.trim().toLowerCase().replace(/ё/g, 'е')
+}
+
+/**
+ * Есть ли в черновике оплаты что-то введённое менеджером. Используется, чтобы
+ * не закрывать окно оплаты молча при случайном Esc или клике мимо — введённое
+ * жалко терять (аудит №4).
+ */
+export function hasDealDraft(items: ItemDraft[], extraFields: string[] = []): boolean {
+  return (
+    items.some((item) => item.name.trim().length > 0 || item.amount.trim().length > 0) ||
+    extraFields.some((value) => value.trim().length > 0)
+  )
+}
+
 /** Копейки → текст поля: «4500» или «4500,50» — копейки не теряем. */
 export function amountInput(kopecks: number): string {
   const whole = Math.trunc(kopecks / 100)

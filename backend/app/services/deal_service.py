@@ -42,6 +42,7 @@ from app.schemas.common import decode_cursor, encode_cursor
 from app.schemas.deal import DealCreate, DealItemIn, DealUpdate, detail_payload, row_payload
 from app.services import robokassa, service_catalog
 from app.services.audit import log_event
+from app.services.file_service import is_upload_key
 from app.services.message_service import send_outgoing
 from app.services.money import MoneyError, format_rubles, validate_amount
 from app.services.settings_service import get_value
@@ -74,10 +75,27 @@ class _Item(NamedTuple):
     list_price: int | None = None
 
 
-async def _validated_items(db: AsyncSession, items: list[DealItemIn]) -> list[_Item]:
-    """Проверить позиции и снять цену по прайсу у выбранных из справочника услуг."""
+async def _validated_items(
+    db: AsyncSession,
+    items: list[DealItemIn],
+    existing_prices: dict[int, int | None] | None = None,
+) -> list[_Item]:
+    """Проверить позиции и снять цену по прайсу у выбранных из справочника услуг.
+
+    `existing_prices` — услуги, которые уже были в позициях ЭТОЙ сделки ДО
+    правки (service_id → list_price). Для них услуга принимается, даже если
+    её успели снять с продажи или удалить из справочника: иначе сделку с такой
+    позицией нельзя было бы больше никак сохранить — правку блокировал бы тот
+    же текст, что и выбор снятой услуги в новой сделке (аудит №8). Цена по
+    прайсу для них не пересчитывается заново из текущей (возможно, уже другой)
+    цены услуги, а берётся из прежнего снимка — иначе правка одной строки
+    сделки задним числом переписывала бы цену другой. Для новых сделок и для
+    новых позиций (`service_id`, которого не было среди прежних) правило
+    прежнее: услуга обязана существовать и продаваться.
+    """
     if not items:
         raise Invalid("Добавьте хотя бы одну позицию")
+    existing_prices = existing_prices or {}
     result: list[_Item] = []
     for item in items:
         name = (item.name or "").strip()
@@ -90,8 +108,11 @@ async def _validated_items(db: AsyncSession, items: list[DealItemIn]) -> list[_I
         service_id: int | None = None
         list_price: int | None = None
         if item.service_id is not None:
-            service = await service_catalog.get_active(db, item.service_id)
-            service_id, list_price = service.id, service.price
+            if item.service_id in existing_prices:
+                service_id, list_price = item.service_id, existing_prices[item.service_id]
+            else:
+                service = await service_catalog.get_active(db, item.service_id)
+                service_id, list_price = service.id, service.price
         result.append(_Item(name, amount, service_id, list_price))
     return result
 
@@ -422,7 +443,14 @@ async def update_deal(
 
     before = {"total_amount": deal.total_amount, "requisite_id": deal.requisite_id}
     if data.items is not None:
-        _replace_items(deal, await _validated_items(db, data.items))
+        # Услуги, уже стоявшие в сделке до этой правки, — их можно оставить,
+        # даже если снять с продажи или удалить успели именно сейчас.
+        existing_prices = {
+            item.service_id: item.list_price
+            for item in deal.items
+            if item.service_id is not None
+        }
+        _replace_items(deal, await _validated_items(db, data.items, existing_prices))
     if data.requisite_id is not None:
         deal.requisite_id = (await _active_requisite(db, data.requisite_id)).id
     deal.edit_count += 1
@@ -652,8 +680,11 @@ async def pay_deal(
             "Чек принимается только как изображение или PDF", field="receipt_upload_key"
         )
     # Только то, что загрузили через /files/upload: ключ входящего файла из
-    # чужого диалога не должен становиться «чеком» этой сделки.
-    if not receipt_upload_key.startswith("uploads/"):
+    # чужого диалога не должен становиться «чеком» этой сделки. Сверяем ключ
+    # целиком с форматом загрузки (не только префикс) — иначе «uploads/../
+    # incoming/…» проходил бы проверку, а при схлопывании «..» в хранилище
+    # к сделке прикрепился бы чужой файл.
+    if not is_upload_key(receipt_upload_key, prefixes=("uploads",)):
         raise Invalid("Файл чека не найден — загрузите его ещё раз", field="receipt_upload_key")
     # Оплата необратима (PAID — конечный статус), поэтому чек обязан реально
     # лежать в хранилище прямо сейчас — иначе сделка навсегда осталась бы

@@ -153,6 +153,8 @@ def downgrade() -> None:
     op.drop_index("ix_attachments_pending", table_name="attachments")
     # Вложения без файла (докачка не завершилась, файл больше лимита) прежняя
     # схема хранить не умеет — у неё storage_key обязателен.
+    # ВНИМАНИЕ: удаление необратимо. Автооткат выкатки схему назад не крутит
+    # (D-28, deploy/deploy.sh) — сюда попадают только ручным `alembic downgrade`.
     op.execute("delete from attachments where storage_key is null")
     op.alter_column("attachments", "storage_key", existing_type=sa.String(500), nullable=False)
     op.drop_column("attachments", "meta")

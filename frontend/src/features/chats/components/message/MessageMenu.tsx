@@ -7,7 +7,9 @@ import { cn } from '@/shared/lib/cn'
 export interface MessageActions {
   onCopyText?: () => void
   onCopyImage?: () => void
-  onDownload?: () => void
+  // Один файл — один пункт «Скачать». Несколько (альбом) — по пункту на
+  // файл, с именем в подписи, иначе не разобрать, что именно скачивается.
+  downloads?: { label: string; run: () => void }[]
   onForward?: () => void
   onSelect?: () => void
   onEdit?: () => void
@@ -28,8 +30,14 @@ export function MessageMenu({ actions, className }: { actions: MessageActions; c
       icon: <ImageDown className="size-4" />,
       run: actions.onCopyImage,
     })
-  if (actions.onDownload)
-    items.push({ key: 'download', label: 'Скачать', icon: <Download className="size-4" />, run: actions.onDownload })
+  actions.downloads?.forEach((file, index) =>
+    items.push({
+      key: `download-${index}`,
+      label: file.label,
+      icon: <Download className="size-4" />,
+      run: file.run,
+    }),
+  )
   if (actions.onForward)
     items.push({ key: 'forward', label: 'Переслать', icon: <Forward className="size-4" />, run: actions.onForward })
   if (actions.onSelect)

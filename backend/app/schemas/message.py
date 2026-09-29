@@ -65,7 +65,17 @@ class ForwardedInCrm(ApiModel):
     conversation_id: int
     message_id: int
     client_name: str | None = None
+    # Реальный исход, а не флаг из запроса: копию клиент никогда не видит с
+    # подписью «Переслано от …», поэтому тут true и при выключенном переключателе,
+    # если пересылка ушла копией.
     hide_sender: bool = True
+    # true — настоящая пересылка Telegram (messages.forwardMessages): такое
+    # сообщение Telegram не даёт редактировать, поэтому в CRM для него нет
+    # «Изменить» (см. MessageBubble.canEditMessage на фронтенде). false —
+    # копия: обычное отправленное сообщение, редактируется как любое другое.
+    # Старые записи без этого поля в meta — считаем не настоящей пересылкой,
+    # чтобы не отбирать «Изменить» задним числом там, где раньше оно работало.
+    native: bool = False
 
 
 class ContactMeta(ApiModel):

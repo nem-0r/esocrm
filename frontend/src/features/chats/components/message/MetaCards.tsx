@@ -24,7 +24,9 @@ export function ForwardedHeader({ meta }: { meta: MessageMeta }) {
           <Link to={`/chats/${inCrm.conversation_id}`} className="underline-offset-2 hover:underline">
             {inCrm.client_name ?? `№${inCrm.conversation_id}`}
           </Link>
-          {inCrm.hide_sender ? ' · клиент видит без подписи «Переслано»' : ''}
+          {inCrm.hide_sender
+            ? ' · клиент видит без подписи «Переслано»'
+            : ' · клиент видит «Переслано от …» с именем отправителя'}
         </span>
       )}
     </div>

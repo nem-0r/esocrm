@@ -358,7 +358,7 @@ async def _process_forward(
         # для неё положены в задание заранее. Попытку не тратим.
         log.info("Пересылка невозможна (%s) — отправляю копией", exc)
         now = datetime.now(UTC)
-        for row, _ in pairs:
+        for row, row_message in pairs:
             payload = dict(row.payload or {})
             payload.pop("forward", None)
             payload["forward_fallback"] = str(exc)[:200]
@@ -366,6 +366,12 @@ async def _process_forward(
             row.status = OutboxStatus.PENDING
             row.next_attempt_at = now
             row.locked_by = None
+            # Уходит копия, а не пересылка Telegram: подписи «Переслано» у клиента
+            # нет, и сообщение можно править — пометка в CRM должна это знать.
+            meta = dict(row_message.meta or {})
+            if meta.get("forwarded"):
+                meta["forwarded"] = {**meta["forwarded"], "native": False, "hide_sender": True}
+                row_message.meta = meta
         await db.commit()
         return []
     except Exception as exc:  # noqa: BLE001

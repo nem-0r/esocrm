@@ -16,7 +16,6 @@ import {
   Badge,
   Button,
   Card,
-  ConfirmDialog,
   EmptyState,
   ErrorState,
   Field,
@@ -55,6 +54,9 @@ export function ServicesPage() {
   const [draft, setDraft] = useState<Draft | null>(null)
   const [removing, setRemoving] = useState<Service | null>(null)
   const remove = useDeleteService()
+  // «Снять с продажи» вместо удаления — та же мутация, что в форме услуги,
+  // отдельный экземпляр, чтобы не путать её состояние загрузки с формой.
+  const deactivate = useUpdateService()
   const [removeError, setRemoveError] = useState<string | null>(null)
   const rows = services.data ?? []
   const hints = suggestions.data ?? []
@@ -172,34 +174,83 @@ export function ServicesPage() {
             )}
           </Card>
         )}
-        {removeError && <InlineError message={removeError} />}
       </div>
 
       <ServiceSheet draft={draft} onClose={() => setDraft(null)} />
 
-      <ConfirmDialog
+      {/* Свой Sheet вместо ConfirmDialog: нужна третья кнопка («Снять с
+          продажи») и место для ошибки удаления ВНУТРИ окна, а не под списком
+          за его затемнением, где её раньше не было видно (аудит №32, №33). */}
+      <Sheet
         open={removing !== null}
         onOpenChange={(open) => !open && setRemoving(null)}
         title="Удалить услугу"
-        message={
+        description={
           removing
-            ? `«${removing.name}» пропадёт из окна оплаты. Уже выставленные счета и статистика прошлых продаж не изменятся. Если услугу могут вернуть — лучше снимите её с продажи.`
+            ? `«${removing.name}» пропадёт из окна оплаты. Уже выставленные счета и статистика прошлых продаж не изменятся.`
             : ''
         }
-        confirmLabel="Удалить"
-        danger
-        loading={remove.isPending}
-        onConfirm={async () => {
-          if (!removing) return
-          try {
-            await remove.mutateAsync(removing.id)
-            toast(`Услуга «${removing.name}» удалена`)
-            setRemoving(null)
-          } catch (cause) {
-            setRemoveError(errorMessage(cause))
-          }
-        }}
-      />
+        className="desk:w-[440px]"
+        footer={
+          <div className="flex flex-col gap-2">
+            {removing?.is_active && (
+              <Button
+                variant="secondary"
+                fullWidth
+                disabled={remove.isPending}
+                loading={deactivate.isPending}
+                onClick={async () => {
+                  if (!removing) return
+                  setRemoveError(null)
+                  try {
+                    await deactivate.mutateAsync({ id: removing.id, is_active: false })
+                    toast(`Услуга «${removing.name}» снята с продажи`)
+                    setRemoving(null)
+                  } catch (cause) {
+                    setRemoveError(errorMessage(cause))
+                  }
+                }}
+              >
+                Снять с продажи
+              </Button>
+            )}
+            <div className="flex gap-2">
+              <Button variant="secondary" fullWidth onClick={() => setRemoving(null)}>
+                Отмена
+              </Button>
+              <Button
+                variant="danger"
+                fullWidth
+                disabled={deactivate.isPending}
+                loading={remove.isPending}
+                onClick={async () => {
+                  if (!removing) return
+                  setRemoveError(null)
+                  try {
+                    await remove.mutateAsync(removing.id)
+                    toast(`Услуга «${removing.name}» удалена`)
+                    setRemoving(null)
+                  } catch (cause) {
+                    setRemoveError(errorMessage(cause))
+                  }
+                }}
+              >
+                Удалить
+              </Button>
+            </div>
+          </div>
+        }
+      >
+        <div className="flex flex-col gap-3">
+          {removing?.is_active && (
+            <p className="text-xs text-ink-faint">
+              Если услугу могут вернуть — не обязательно удалять: «Снять с продажи» скроет
+              её из окна оплаты, но оставит в справочнике, и её можно будет включить обратно.
+            </p>
+          )}
+          {removeError && <InlineError message={removeError} />}
+        </div>
+      </Sheet>
     </ProfileScreen>
   )
 }

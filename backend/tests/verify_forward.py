@@ -99,6 +99,17 @@ async def run() -> int:  # noqa: PLR0915
             "в CRM видно, откуда переслано",
             all((m.get("meta") or {}).get("forwarded", {}).get("conversation_id") == source_id for m in forwarded),
         )
+        # D-31/№6: пометка в CRM должна говорить правду — настоящая пересылка
+        # отмечена как native, и раз hide_sender=True в запросе, подпись скрыта.
+        c.check(
+            "настоящая пересылка отмечена как native, и подпись скрыта",
+            all(
+                (m.get("meta") or {}).get("forwarded", {}).get("native") is True
+                and (m.get("meta") or {}).get("forwarded", {}).get("hide_sender") is True
+                for m in forwarded
+            ),
+            [(m.get("meta") or {}).get("forwarded") for m in forwarded],
+        )
         c.check("файл виден и в новом сообщении", len(forwarded[1].get("attachments", [])) == 1 if len(forwarded) > 1 else False)
         async with SessionLocal() as db:
             specs = [
@@ -124,6 +135,15 @@ async def run() -> int:  # noqa: PLR0915
         body = r.json() if r.status_code == 201 else {}
         c.check("режим — копия", r.status_code == 201 and body.get("mode") == "copy", r.text[:200])
         copied = (body.get("messages") or [{}])[0]
+        # D-31/№6: между аккаунтами подписи «Переслано от…» у клиента не бывает
+        # никогда, даже если в запросе hide_sender=False (переключатель тут ни
+        # на что не влияет — фронтенд после фикса его и не показывает).
+        copied_forward_meta = (copied.get("meta") or {}).get("forwarded") or {}
+        c.check(
+            "копия: hide_sender=True и native=False независимо от флага в запросе",
+            copied_forward_meta.get("hide_sender") is True and copied_forward_meta.get("native") is False,
+            copied_forward_meta,
+        )
         async with SessionLocal() as db:
             keys = (
                 await db.execute(
@@ -138,6 +158,13 @@ async def run() -> int:  # noqa: PLR0915
         c.check("копия ушла в Telegram", bool(done))
 
         c.section("Запреты")
+        # №26: больше 50 сообщений разом — Pydantic отклоняет по длине списка
+        # раньше любых обращений к БД, реальные id сообщений тут не нужны.
+        r = await admin.post(
+            f"{BASE}/conversations/{same_id}/forward",
+            json={"source_conversation_id": source_id, "message_ids": list(range(1, 52)), "hide_sender": True},
+        )
+        c.check("больше 50 сообщений — понятный отказ (422)", r.status_code == 422, r.status_code)
         r = await admin.post(f"{BASE}/conversations/{same_id}/forward", json={"source_conversation_id": source_id, "message_ids": [note["id"]]})
         c.check("служебную заметку переслать нельзя", r.status_code == 422, r.status_code)
         r = await admin.post(f"{BASE}/conversations/{same_id}/forward", json={"source_conversation_id": same_id, "message_ids": [m1["id"]]})

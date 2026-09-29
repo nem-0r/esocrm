@@ -1,4 +1,4 @@
-import { Check, Search } from 'lucide-react'
+import { Ban, Check, Search } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 
 import type { Conversation } from '@/entities/types'
@@ -19,6 +19,11 @@ import {
   Textarea,
   toast,
 } from '@/shared/ui'
+
+// Столько же разрешает бэкенд (MAX_FORWARD_MESSAGES в schemas/message.py) —
+// проверяем заранее, чтобы не ловить техническую ошибку сервера после отправки.
+// Экспортирован — пригодится, например, для счётчика в панели выбора ChatPage.
+export const MAX_FORWARD_MESSAGES = 50
 
 /**
  * Переслать выбранные сообщения в другой чат CRM.
@@ -72,10 +77,11 @@ export function ForwardSheet({
     [conversations.data],
   )
   const count = messageIds.length
+  const tooMany = count > MAX_FORWARD_MESSAGES
   const sameAccount = target ? target.account.id === sourceAccountId : null
 
   async function submit() {
-    if (!target) return
+    if (!target || tooMany) return
     setError(null)
     try {
       await forward.mutateAsync({
@@ -103,9 +109,22 @@ export function ForwardSheet({
       title={`Переслать ${count} ${plural(count, 'сообщение', 'сообщения', 'сообщений')}`}
       description="Выберите чат, куда переслать"
       footer={
-        <Button fullWidth disabled={!target} loading={forward.isPending} onClick={() => void submit()}>
-          {target ? `Переслать в «${target.client.name}»` : 'Выберите чат'}
-        </Button>
+        <div className="flex flex-col gap-2">
+          {tooMany && (
+            <InlineError
+              message={`За один раз можно переслать до 50 сообщений — выбрано ${count}`}
+            />
+          )}
+          {error && <InlineError message={error} />}
+          <Button
+            fullWidth
+            disabled={!target || tooMany}
+            loading={forward.isPending}
+            onClick={() => void submit()}
+          >
+            {target ? `Переслать в «${target.client.name}»` : 'Выберите чат'}
+          </Button>
+        </div>
       }
     >
       <div className="flex flex-col gap-4">
@@ -127,14 +146,20 @@ export function ForwardSheet({
           ) : (
             rows.map((row) => {
               const chosen = target?.id === row.id
+              const blocked = row.is_blocked_by_client
               return (
                 <button
                   key={row.id}
                   type="button"
+                  disabled={blocked}
                   onClick={() => setTarget(row)}
                   className={cn(
                     'flex items-center gap-3 rounded-md px-3 py-2 text-left transition-colors',
-                    chosen ? 'bg-accent-soft' : 'hover:bg-surface-raised',
+                    blocked
+                      ? 'cursor-not-allowed opacity-60'
+                      : chosen
+                        ? 'bg-accent-soft'
+                        : 'hover:bg-surface-raised',
                   )}
                 >
                   <span className="flex min-w-0 flex-1 flex-col">
@@ -145,6 +170,12 @@ export function ForwardSheet({
                     <span className="truncate text-micro text-ink-faint">
                       {row.account.title} · {FUNNEL_LABEL[row.account.funnel_stage]} · id {row.client.id}
                     </span>
+                    {blocked && (
+                      <span className="flex items-center gap-1 text-micro text-warning">
+                        <Ban className="size-3 shrink-0" aria-hidden />
+                        Клиент заблокировал номер — переслать сюда нельзя
+                      </span>
+                    )}
                   </span>
                   {chosen && <Check className="size-4 shrink-0 text-accent-text" aria-hidden />}
                 </button>
@@ -163,12 +194,23 @@ export function ForwardSheet({
           )}
         </div>
 
-        <Switch
-          checked={hideSender}
-          onChange={setHideSender}
-          label="Скрыть отправителя"
-          hint="Клиент увидит сообщения как новые, без подписи «Переслано от …»"
-        />
+        {sameAccount === false ? (
+          <p className="text-xs leading-relaxed text-ink-faint">
+            Чат на другом аккаунте («{target?.account.title}»): уйдёт копия — клиент увидит
+            обычные сообщения без подписи «Переслано».
+          </p>
+        ) : (
+          <Switch
+            checked={hideSender}
+            onChange={setHideSender}
+            label="Не показывать, от кого переслано"
+            hint={
+              hideSender
+                ? 'Клиент увидит сообщения как новые'
+                : 'Клиент увидит «Переслано от …» с именем отправителя'
+            }
+          />
+        )}
 
         <Field label="Комментарий" hint="Необязательно. Уйдёт отдельным сообщением перед пересланными">
           <Textarea
@@ -179,15 +221,6 @@ export function ForwardSheet({
             placeholder="Например: «Вот пример разбора, о котором говорили»"
           />
         </Field>
-
-        {sameAccount === false && (
-          <p className="text-xs leading-relaxed text-ink-faint">
-            Чат на другом аккаунте Telegram: сообщения уйдут копией от имени этого аккаунта —
-            пересылать между разными аккаунтами Telegram не позволяет.
-          </p>
-        )}
-
-        {error && <InlineError message={error} />}
       </div>
     </Sheet>
   )

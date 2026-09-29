@@ -1,14 +1,12 @@
-import { Check, Plus, Tag, Trash2 } from 'lucide-react'
+import { Check, Info, Plus, Tag, Trash2 } from 'lucide-react'
 import { useMemo, useState, type KeyboardEvent } from 'react'
 
 import type { Service } from '@/entities/types'
-import { amountInput, newItemDraft, type ItemDraft } from '@/features/deals/lib'
+import { amountInput, newItemDraft, normalizeServiceName, type ItemDraft } from '@/features/deals/lib'
 import { useServices } from '@/features/services/queries'
 import { cn } from '@/shared/lib/cn'
 import { money, parseMoney } from '@/shared/lib/format'
 import { Button, Input } from '@/shared/ui'
-
-const MAX_SHOWN = 8
 
 /**
  * Состав сделки: услуги и цены. Одинаковый в окне создания оплаты и в правке
@@ -38,6 +36,11 @@ export function ItemsEditor({
       <span className="text-label uppercase tracking-wide text-ink-faint">Услуги · {items.length}</span>
       {items.map((item, index) => {
         const linked = catalog.find((service) => service.id === item.serviceId) ?? null
+        // Позиция ссылается на услугу, которой нет среди продающихся: значит
+        // её сняли с продажи или удалили уже ПОСЛЕ того, как её выбрали в
+        // этой сделке. Правку такой сделки сервер всё равно принимает —
+        // позиция остаётся как есть (аудит №8), просто предупреждаем об этом.
+        const missingService = item.serviceId !== null && !services.isLoading && !linked
         const amount = parseMoney(item.amount)
         return (
           <div key={item.key} className="flex flex-col gap-2 rounded-md bg-surface-raised p-3">
@@ -56,9 +59,11 @@ export function ItemsEditor({
                 }
                 onType={(name) => {
                   // Своё название — это уже не услуга из справочника, если только
-                  // не совпало с ней буква в букву (тогда связываем сами).
+                  // не совпало с ней буква в букву (без учёта регистра, пробелов
+                  // по краям и е/ё — тогда связываем сами, и в статистике по
+                  // услугам эта позиция не заведёт вторую строку, аудит №10).
                   const exact = catalog.find(
-                    (service) => service.name.toLowerCase() === name.trim().toLowerCase(),
+                    (service) => normalizeServiceName(service.name) === normalizeServiceName(name),
                   )
                   patch(index, { name, serviceId: exact ? exact.id : null })
                 }}
@@ -88,6 +93,12 @@ export function ItemsEditor({
             />
             {linked && linked.price !== null && amount !== null && amount !== linked.price && (
               <span className="text-micro text-ink-faint">По прайсу {money(linked.price)}</span>
+            )}
+            {missingService && (
+              <span className="flex items-center gap-1 text-micro text-ink-faint">
+                <Info className="size-3.5 shrink-0" aria-hidden />
+                Услуга снята с продажи — останется как есть
+              </span>
             )}
           </div>
         )
@@ -119,14 +130,15 @@ function ServiceNameField({
   const [open, setOpen] = useState(false)
   const [active, setActive] = useState(0)
 
-  const query = item.name.trim().toLowerCase()
-  const options = useMemo(() => {
+  // «е»/«ё» — одна буква для поиска: «расчет» обязан находить «Расчёт…».
+  const query = normalizeServiceName(item.name)
+  const options = useMemo(
     // Выбранная услуга уже в поле — список не мешает, пока не начнут печатать.
-    const matches = catalog.filter(
-      (service) => !query || service.name.toLowerCase().includes(query),
-    )
-    return matches.slice(0, MAX_SHOWN)
-  }, [catalog, query])
+    // Список не режем: он прокручивается (max-h-56), и справочник должен быть
+    // виден целиком, а не первыми восемью по алфавиту (аудит №9).
+    () => catalog.filter((service) => !query || normalizeServiceName(service.name).includes(query)),
+    [catalog, query],
+  )
 
   const showList = open && catalog.length > 0 && options.length > 0 && !(item.serviceId && options.length === 1)
 

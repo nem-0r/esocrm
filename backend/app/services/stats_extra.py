@@ -256,11 +256,29 @@ async def new_client_conversion(
 # ------------------------------------------------------------ по услугам
 
 
-_ITEM_KEY = (
-    "case when i.service_id is not null then 's' || i.service_id "
-    "else 'n' || regexp_replace(lower(trim(i.name)), '\\s+', ' ', 'g') end"
+# Сравнение названий: без регистра, без пробелов по краям (и лишних внутри)
+# и без различия «е»/«ё» — «расчет» и «Расчёт» человек читает как одно и то же,
+# а lower()/regexp_replace сами это не выравнивают (аудит №9, №10).
+_NAME_NORM = "regexp_replace(replace(lower(trim({0})), 'ё', 'е'), '\\s+', ' ', 'g')"
+
+# Позиция без своей услуги (менеджер вписал название сам, service_id пуст)
+# донормализуется до услуги справочника по написанию. Это нужно, когда позицию
+# добавили ДО того, как руководитель нажал «Добавить» у подсказки из истории:
+# у старых позиций service_id остаётся пустым навсегда, и без этой склейки
+# «Натальная карта» превращалась бы в статистике в две строки — с услугой и без
+# (аудит №10). Сверяем только с ещё не удалёнными услугами — как и подсказки
+# из истории (`service_catalog.suggestions`), которые тем же способом решают,
+# что уже «есть в справочнике».
+_SERVICE_MATCH_JOIN = (
+    "left join services s2 on i.service_id is null and s2.deleted_at is null "
+    "and " + _NAME_NORM.format("s2.name") + " = " + _NAME_NORM.format("i.name")
 )
-_ITEM_LABEL = "coalesce(s.name, regexp_replace(trim(i.name), '\\s+', ' ', 'g'))"
+_ITEM_KEY = (
+    "case when coalesce(i.service_id, s2.id) is not null "
+    "then 's' || coalesce(i.service_id, s2.id) "
+    "else 'n' || " + _NAME_NORM.format("i.name") + " end"
+)
+_ITEM_LABEL = "coalesce(s.name, s2.name, regexp_replace(trim(i.name), '\\s+', ' ', 'g'))"
 
 
 async def by_service(
@@ -270,21 +288,25 @@ async def by_service(
     название в сделках писали по-разному; вписанные вручную склеиваются по
     написанию без учёта регистра и лишних пробелов."""
     sold_sql = f"""
-        select {_ITEM_KEY} as key, min({_ITEM_LABEL}) as name, max(i.service_id) as service_id,
+        select {_ITEM_KEY} as key, min({_ITEM_LABEL}) as name,
+               max(coalesce(i.service_id, s2.id)) as service_id,
                count(*) as sold, sum(i.amount) as revenue
         from deal_items i
         join deals d on d.id = i.deal_id
         left join services s on s.id = i.service_id
+        {_SERVICE_MATCH_JOIN}
         where d.status = 'paid' and d.paid_at >= :start and d.paid_at < :end {_seller(scope)}
         group by 1
     """  # noqa: S608
     offered_sql = f"""
-        select {_ITEM_KEY} as key, min({_ITEM_LABEL}) as name, max(i.service_id) as service_id,
+        select {_ITEM_KEY} as key, min({_ITEM_LABEL}) as name,
+               max(coalesce(i.service_id, s2.id)) as service_id,
                count(*) as offered,
                count(*) filter (where d.status = 'paid') as offered_paid
         from deal_items i
         join deals d on d.id = i.deal_id
         left join services s on s.id = i.service_id
+        {_SERVICE_MATCH_JOIN}
         where d.sent_at >= :start and d.sent_at < :end {_seller(scope)}
         group by 1
     """  # noqa: S608

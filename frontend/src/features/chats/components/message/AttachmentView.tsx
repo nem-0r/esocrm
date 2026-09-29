@@ -3,7 +3,9 @@ import { AlertCircle, Download, FileText, Loader2 } from 'lucide-react'
 import type { AttachmentRef } from '@/entities/types'
 import { ImagePreview, VideoPreview } from '@/features/chats/components/MediaAttachment'
 import { VoicePlayer } from '@/features/chats/components/VoicePlayer'
+import { downloadFile } from '@/shared/api/client'
 import { fileSize } from '@/shared/lib/format'
+import { toastError } from '@/shared/ui'
 
 /** Вид вложения: с сервера, а у старых записей — по типу файла. */
 export function kindOf(file: AttachmentRef): NonNullable<AttachmentRef['kind']> {
@@ -72,9 +74,16 @@ export function AttachmentView({ file }: { file: AttachmentRef }) {
     )
   }
   return (
-    <a
-      href={`${file.url}?download=1`}
-      className="flex items-center gap-2 rounded bg-black/25 px-2.5 py-2 transition-colors hover:bg-black/40"
+    <button
+      type="button"
+      onClick={() => {
+        // Не прямая ссылка: на ошибке (файл не найден, сессия истекла) браузер
+        // открыл бы вместо CRM технический ответ сервера — уходить некуда.
+        void downloadFile(`/files/${file.id}`, file.file_name, { download: 1 }).catch(() =>
+          toastError('Не удалось скачать файл — попробуйте ещё раз'),
+        )
+      }}
+      className="flex items-center gap-2 rounded bg-black/25 px-2.5 py-2 text-left transition-colors hover:bg-black/40"
     >
       <FileText className="size-4 shrink-0 text-accent-text" aria-hidden />
       <span className="min-w-0 flex-1">
@@ -82,7 +91,7 @@ export function AttachmentView({ file }: { file: AttachmentRef }) {
         <span className="block text-micro text-ink-faint">{fileSize(file.size_bytes)}</span>
       </span>
       <Download className="size-4 shrink-0 text-ink-faint" aria-hidden />
-    </a>
+    </button>
   )
 }
 

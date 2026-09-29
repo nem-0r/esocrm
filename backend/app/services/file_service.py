@@ -21,6 +21,7 @@ import asyncio
 import base64
 import contextlib
 import os
+import re
 import shutil
 import tempfile
 import uuid
@@ -52,10 +53,6 @@ MAX_UPLOAD_BYTES = 200 * 1024 * 1024
 MAX_VOICE_BYTES = 40 * 1024 * 1024
 MIN_VOICE_SECONDS = 1
 _COPY_CHUNK = 1024 * 1024
-
-# Ключи, которые браузер может приложить к сообщению. Только то, что загружено
-# через /files/upload и /files/voice — не входящие файлы чужих диалогов.
-UPLOAD_PREFIXES = ("uploads/", "voice/")
 
 
 class UploadResult(ApiModel):
@@ -194,6 +191,23 @@ def _new_key(prefix: str, ext: str) -> str:
     return f"{prefix}/{now:%Y}/{now:%m}/{uuid.uuid4()}.{ext}"
 
 
+# Ключи, которые браузер может приложить к сообщению: только то, что загружено
+# через /files/upload и /files/voice, — не входящие файлы чужих диалогов. Ключ
+# сверяется целиком с тем, что выдаёт _new_key (префикс/год/месяц/uuid.расширение):
+# проверка по началу строки пропустила бы «uploads/../incoming/…», и если
+# хранилище схлопнет «..» в пути, к сообщению прикрепился бы чужой файл.
+_UPLOAD_KEY = re.compile(
+    r"(uploads|voice)/\d{4}/\d{2}/"
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.[a-z0-9]{1,16}"
+)
+
+
+def is_upload_key(key: object, prefixes: tuple[str, ...] = ("uploads", "voice")) -> bool:
+    """Ключ выдан загрузкой CRM (а не подставлен руками) и лежит под одним из префиксов."""
+    match = _UPLOAD_KEY.fullmatch(key) if isinstance(key, str) else None
+    return match is not None and match.group(1) in prefixes
+
+
 async def upload(file: UploadFile) -> UploadResult:
     """Проверить, изучить, сохранить в хранилище и вернуть ключ для отправки."""
     file_name = _safe_name(file.filename)
@@ -325,7 +339,7 @@ async def attach_uploads(
     for item in uploads:
         storage_key = item.get("upload_key")
         file_name = _safe_name(item.get("file_name"))
-        if not storage_key or not file_name or not str(storage_key).startswith(UPLOAD_PREFIXES):
+        if not file_name or not is_upload_key(storage_key):
             raise Invalid("Не хватает данных о загруженном файле")
         head = await storage.head(storage_key)
         if head is None:

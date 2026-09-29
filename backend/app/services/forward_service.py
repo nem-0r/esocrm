@@ -150,7 +150,12 @@ async def forward(
             "conversation_id": source.id,
             "message_id": original.id,
             "client_name": client_name,
-            "hide_sender": request.hide_sender,
+            # Правда, а не флаг из запроса: между аккаунтами всегда уходит
+            # копия без подписи «Переслано от …», независимо от положения
+            # переключателя в CRM — переключатель работает только внутри
+            # одного аккаунта (drop_author настоящей пересылки).
+            "hide_sender": (not native) or request.hide_sender,
+            "native": native,
         }
         copy = Message(
             conversation_id=target.id,

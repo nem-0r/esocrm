@@ -13,7 +13,7 @@ import {
 import type { Granularity } from '@/entities/types'
 import { useAuth } from '@/shared/hooks/useAuth'
 import { cn } from '@/shared/lib/cn'
-import { dateFull, dateShort, daysAgo, isoDate, money } from '@/shared/lib/format'
+import { dateFull, dateShort, daysAgo, isoDate, money, plural } from '@/shared/lib/format'
 import {
   Button,
   Card,
@@ -52,13 +52,67 @@ const GRID_COLOR = '#232937'
 const AXIS_COLOR = '#6B7385'
 
 type Preset = 'week' | 'month' | 'quarter' | 'custom'
+type Range = { from: string; to: string }
 
-function presetRange(preset: Preset): { from: string; to: string } {
+function presetRange(preset: Preset): Range {
   const to = isoDate(new Date())
   if (preset === 'week') return { from: daysAgo(6), to }
   if (preset === 'quarter') return { from: daysAgo(89), to }
   const now = new Date()
   return { from: isoDate(new Date(now.getFullYear(), now.getMonth(), 1)), to }
+}
+
+/**
+ * Гранулярность графика («Дни/Недели/Месяцы»). Свой переключатель, а не общий
+ * `Segmented`: тому нечем отключить один вариант — а «Дни» обязана быть
+ * неактивной на длинном периоде, иначе кнопка нажимается впустую: сервер её
+ * не примет, а `useSeries`/`useOverview` сами молча понижают гранулярность
+ * до недель (аудит №35).
+ */
+function GranularityPicker({
+  value,
+  onChange,
+  dayDisabled,
+}: {
+  value: Granularity
+  onChange: (value: Granularity) => void
+  dayDisabled: boolean
+}) {
+  const options: { value: Granularity; label: string }[] = [
+    { value: 'day', label: 'Дни' },
+    { value: 'week', label: 'Недели' },
+    { value: 'month', label: 'Месяцы' },
+  ]
+  return (
+    <div className="flex gap-1.5" role="tablist">
+      {options.map((option) => {
+        const disabled = option.value === 'day' && dayDisabled
+        const active = option.value === value
+        return (
+          <button
+            key={option.value}
+            type="button"
+            role="tab"
+            aria-selected={active}
+            aria-disabled={disabled}
+            disabled={disabled}
+            title={disabled ? 'При периоде больше двух месяцев дни недоступны' : undefined}
+            onClick={() => onChange(option.value)}
+            className={cn(
+              'inline-flex shrink-0 items-center gap-1.5 rounded px-3 py-1.5 text-sm transition-colors',
+              disabled
+                ? 'cursor-not-allowed text-ink-faint/50'
+                : active
+                  ? 'bg-accent-soft text-accent-text'
+                  : 'text-ink-muted hover:bg-surface-raised hover:text-ink',
+            )}
+          >
+            {option.label}
+          </button>
+        )
+      })}
+    </div>
+  )
 }
 
 export function StatsPage() {
@@ -68,10 +122,24 @@ export function StatsPage() {
   const [granularity, setGranularity] = useState<Granularity>('day')
   const [periodOpen, setPeriodOpen] = useState(false)
   const [explainOpen, setExplainOpen] = useState(false)
+  // Черновик окна «Период»: даты и гранулярность внутри него применяются по
+  // кнопке «Применить», а не сразу по мере ввода (аудит №35) — иначе кнопка
+  // ничего не делает, кроме закрытия окна, а показатели дёргаются на каждую
+  // недопечатанную дату. Синхронизируется с боевыми значениями при открытии.
+  const [draftRange, setDraftRange] = useState<Range>(range)
+  const [draftGranularity, setDraftGranularity] = useState<Granularity>(granularity)
 
   const span = daysBetween(range.from, range.to)
   const dayDisabled = span > MAX_DAYS_FOR_DAILY
   const effectiveGranularity: Granularity = dayDisabled && granularity === 'day' ? 'week' : granularity
+  const draftSpan = daysBetween(draftRange.from, draftRange.to)
+  const draftDayDisabled = draftSpan > MAX_DAYS_FOR_DAILY
+  // Та же подстраховка, что и у боевой гранулярности: если черновик дат
+  // расширили за порог дневного графика уже ПОСЛЕ выбора «Дни», перед
+  // применением тихо понижаем до недель — «Применить» не обязан спорить
+  // с пользователем, но и не обязан отправить заведомо отклонённый запрос.
+  const effectiveDraftGranularity: Granularity =
+    draftDayDisabled && draftGranularity === 'day' ? 'week' : draftGranularity
 
   const overview = useOverview(range)
   const series = useSeries(range, effectiveGranularity)
@@ -82,10 +150,18 @@ export function StatsPage() {
   function choose(next: Preset) {
     setPreset(next)
     if (next === 'custom') {
+      setDraftRange(range)
+      setDraftGranularity(effectiveGranularity)
       setPeriodOpen(true)
       return
     }
     setRange(presetRange(next))
+  }
+
+  function applyPeriod() {
+    setRange(draftRange)
+    setGranularity(effectiveDraftGranularity)
+    setPeriodOpen(false)
   }
 
   // ТЗ Б.14: при недельной гранулярности подпись «24 авг» непонятна — это день
@@ -112,6 +188,14 @@ export function StatsPage() {
     label: pointLabel(point),
     rubles: Math.round(point.amount / 100),
   }))
+
+  // «Как считаются показатели» называет эти минуты по имени, а не общими
+  // словами (аудит №36) — берём их с сервера (настройки руководителя), а не
+  // хардкодим: на живой базе они могут отличаться от значений по умолчанию.
+  // 15 и 30 — те же значения по умолчанию, что и на сервере (settings_service),
+  // только пока сводка ещё не загрузилась.
+  const goalMinutes = overview.data?.response_goal_minutes ?? 15
+  const lateMinutes = overview.data?.late_threshold_minutes ?? 30
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -147,14 +231,10 @@ export function StatsPage() {
               <Card>
                 <SectionTitle
                   action={
-                    <Segmented
+                    <GranularityPicker
                       value={effectiveGranularity}
                       onChange={setGranularity}
-                      options={[
-                        { value: 'day', label: 'Дни' },
-                        { value: 'week', label: 'Недели' },
-                        { value: 'month', label: 'Месяцы' },
-                      ]}
+                      dayDisabled={dayDisabled}
                     />
                   }
                 >
@@ -210,7 +290,10 @@ export function StatsPage() {
                                 | { amount: number; count: number }
                                 | undefined
                               if (!point) return ['—', 'Продажи']
-                              return [`${money(point.amount)} · ${point.count} продаж`, 'Продажи']
+                              return [
+                                `${money(point.amount)} · ${point.count} ${plural(point.count, 'продажа', 'продажи', 'продаж')}`,
+                                'Продажи',
+                              ]
                             }}
                           />
                           <Bar dataKey="rubles" fill={BAR_COLOR} radius={[4, 4, 0, 0]} />
@@ -252,9 +335,9 @@ export function StatsPage() {
                   длины. Если сравнивать не с чем, показывается прочерк.
                 </li>
                 <li>
-                  <b className="text-ink">Среднее время ответа</b> — от входящего, начавшего
-                  ожидание, до первого исходящего. Подряд идущие сообщения клиента считаются одним
-                  ожиданием. Служебные заметки не считаются ответом.
+                  <b className="text-ink">Среднее время ответа</b> — от сообщения клиента, начавшего
+                  ожидание, до первого ответа на него. Несколько сообщений клиента подряд — одно
+                  ожидание. Служебные заметки ответом не считаются.
                 </li>
                 <li>
                   <b className="text-ink">Чатов в работе</b> — диалоги, где было хотя бы одно
@@ -284,13 +367,18 @@ export function StatsPage() {
                   написавших в периоде, доля тех, у кого есть оплата.
                 </li>
                 <li>
-                  <b className="text-ink">Ответили вовремя</b> — доля ожиданий клиента, закрытых
-                  ответом не позже цели. Свежие ожидания, у которых время ещё не вышло, не
-                  считаются ни в плюс, ни в минус.
+                  <b className="text-ink">Ответили вовремя</b> — клиент получил ответ не позже чем
+                  через {goalMinutes} мин. Свежие ожидания, у которых это время ещё не истекло, пока
+                  не считаются ни вовремя, ни просрочкой.
                 </li>
                 <li>
-                  <b className="text-ink">Просрочки</b> — ответ пришёл позже порога плашки «ждёт
-                  ответа» или его нет, а клиент ждёт дольше порога.
+                  <b className="text-ink">Просрочки</b> — клиент ждал ответа дольше {lateMinutes} мин,
+                  либо до сих пор ждёт дольше этого времени.
+                </li>
+                <li>
+                  <b className="text-ink">Ждут ответа сейчас</b> — диалоги, где последним написал
+                  клиент и ответа ещё нет, прямо сейчас. Отдельно показано, сколько из них ждут
+                  дольше {lateMinutes} мин.
                 </li>
                 <li>
                   <b className="text-ink">По услугам</b> — позиции оплаченных сделок. Услуга из
@@ -310,13 +398,16 @@ export function StatsPage() {
         </div>
       </div>
 
+      {/* Закрытие НЕ через «Применить» (Esc, крестик, клик мимо) отменяет
+          черновик дат и гранулярности — боевой период он не трогает: раз
+          не нажали «Применить», значит передумали, а не подтвердили правку. */}
       <Sheet
         open={periodOpen}
         onOpenChange={setPeriodOpen}
         title="Период"
-        description="Действует на показатели периода. «Ждут оплаты» — исключение, это всегда на сегодня"
+        description="Даты и гранулярность здесь применяются по кнопке «Применить». «Ждут оплаты» — исключение, это всегда на сегодня"
         footer={
-          <Button fullWidth onClick={() => setPeriodOpen(false)}>
+          <Button fullWidth onClick={applyPeriod}>
             Применить
           </Button>
         }
@@ -326,34 +417,32 @@ export function StatsPage() {
             <Field label="С">
               <Input
                 type="date"
-                value={range.from}
-                max={range.to}
-                onChange={(event) => setRange((prev) => ({ ...prev, from: event.target.value }))}
+                value={draftRange.from}
+                max={draftRange.to}
+                onChange={(event) =>
+                  setDraftRange((prev) => ({ ...prev, from: event.target.value }))
+                }
               />
             </Field>
             <Field label="По">
               <Input
                 type="date"
-                value={range.to}
-                min={range.from}
-                onChange={(event) => setRange((prev) => ({ ...prev, to: event.target.value }))}
+                value={draftRange.to}
+                min={draftRange.from}
+                onChange={(event) => setDraftRange((prev) => ({ ...prev, to: event.target.value }))}
               />
             </Field>
           </div>
           <Field label="Гранулярность графика" group>
-            <Segmented
-              value={effectiveGranularity}
-              onChange={setGranularity}
-              options={[
-                { value: 'day', label: 'Дни' },
-                { value: 'week', label: 'Недели' },
-                { value: 'month', label: 'Месяцы' },
-              ]}
+            <GranularityPicker
+              value={effectiveDraftGranularity}
+              onChange={setDraftGranularity}
+              dayDisabled={draftDayDisabled}
             />
           </Field>
           <p className="text-xs text-ink-faint">
-            Выбрано {span + 1} дней.{' '}
-            {span > MAX_DAYS_FOR_DAILY
+            Выбрано {draftSpan + 1} {plural(draftSpan + 1, 'день', 'дня', 'дней')}.{' '}
+            {draftDayDisabled
               ? 'При периоде больше двух месяцев дни недоступны.'
               : 'Гранулярность можно изменить и в разделе статистики.'}
           </p>

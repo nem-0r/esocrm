@@ -243,7 +243,10 @@ export interface MessageMeta {
     conversation_id: number
     message_id: number
     client_name: string | null
+    /** Реальный исход: без подписи, если это копия ИЛИ был скрыт отправитель. */
     hide_sender: boolean
+    /** Настоящая пересылка Telegram (не копия) — Telegram не даёт её редактировать. */
+    native: boolean
   } | null
   contact?: {
     first_name: string | null

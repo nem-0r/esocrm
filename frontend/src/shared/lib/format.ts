@@ -155,7 +155,8 @@ export function playerTime(seconds: number): string {
 export function fileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} Б`
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} КБ`
-  return `${(bytes / (1024 * 1024)).toFixed(1)} МБ`
+  // toFixed всегда даёт точку — по-русски дробная часть отделяется запятой.
+  return `${(bytes / (1024 * 1024)).toFixed(1).replace('.', ',')} МБ`
 }
 
 export function initials(name: string): string {

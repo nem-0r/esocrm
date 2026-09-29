@@ -4,11 +4,12 @@ import { useEffect, useMemo, useState } from 'react'
 import type { PaymentMethod } from '@/entities/types'
 import { money } from '@/shared/lib/format'
 import { useMe } from '@/shared/hooks/useAuth'
-import { Button, Field, InlineError, Select, Sheet, Textarea } from '@/shared/ui'
+import { Button, ConfirmDialog, Field, InlineError, Select, Sheet, Textarea } from '@/shared/ui'
 import { ItemsEditor } from '@/features/deals/components/ItemsEditor'
 import {
   LINK_NOT_READY,
   draftTotal,
+  hasDealDraft,
   itemsError,
   newItemDraft,
   toItemsPayload,
@@ -55,6 +56,9 @@ export function DealSheet({
   const [introText, setIntroText] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [touched, setTouched] = useState(false)
+  // Своё окно вместо window.confirm: спрашиваем, только если есть что терять
+  // (аудит №4) — пустое окно, которое только что открыли, закрывается молча.
+  const [confirmCloseOpen, setConfirmCloseOpen] = useState(false)
 
   useEffect(() => {
     if (!open) {
@@ -85,6 +89,31 @@ export function DealSheet({
   const requisiteFilled =
     requisiteId !== null && (!isCustom || customText.trim().length > 0)
   const canSend = !validation && (!needsRequisite || requisiteFilled) && !createAndSend.isPending
+  // Под неактивной кнопкой пишем, чего не хватает, а не оставляем гадать
+  // (аудит №29) — та же причина, что submit() покажет, если всё-таки нажать.
+  const disabledReason =
+    validation ?? (needsRequisite && !requisiteFilled
+      ? isCustom
+        ? 'Впишите реквизиты'
+        : 'Выберите счёт получателя'
+      : null)
+  const hasDraft = hasDealDraft(items, [customText, introText])
+
+  /** Закрытие по Esc / клику мимо / крестику / свайпу — везде одна и та же
+   *  проверка: если менеджер уже что-то ввёл, сперва спрашиваем, а не стираем
+   *  черновик молча. Успешная отправка (submit) закрывает окно напрямую,
+   *  минуя эту проверку — там подтверждать нечего. */
+  function requestClose(next: boolean) {
+    if (next) {
+      onOpenChange(true)
+      return
+    }
+    if (hasDraft) {
+      setConfirmCloseOpen(true)
+      return
+    }
+    onOpenChange(false)
+  }
 
   async function submit() {
     setTouched(true)
@@ -113,150 +142,171 @@ export function DealSheet({
   }
 
   return (
-    <Sheet
-      open={open}
-      onOpenChange={onOpenChange}
-      title="Создать оплату"
-      description={`Клиент: ${clientName}`}
-      footer={
-        <Button fullWidth loading={createAndSend.isPending} disabled={!canSend} onClick={() => void submit()}>
-          {method === 'link' ? 'Отправить ссылку' : 'Отправить реквизиты'} · {money(total)}
-        </Button>
-      }
-    >
-      <div className="flex flex-col gap-5">
-        {conversations && conversations.length > 1 && (
-          <Field label="В какой чат отправить счёт">
-            <Select
-              value={String(convId)}
-              onChange={(value) => setConvId(Number(value))}
-              options={conversations.map((c) => ({ value: String(c.id), label: c.label }))}
-            />
-          </Field>
-        )}
-
-        <section className="flex flex-col gap-2">
-          <span className="text-label uppercase tracking-wide text-ink-faint">Способ оплаты</span>
-          <div className="grid grid-cols-2 gap-2">
-            <button
-              type="button"
-              disabled={!me.robokassa_enabled}
-              title={me.robokassa_enabled ? undefined : LINK_NOT_READY}
-              onClick={() => setMethod('link')}
-              className={
-                !me.robokassa_enabled
-                  ? 'flex cursor-not-allowed flex-col items-start gap-0.5 rounded-md border border-line bg-surface-raised/50 px-3 py-2.5 text-left opacity-60'
-                  : `flex flex-col items-start gap-0.5 rounded-md border px-3 py-2.5 text-left transition-colors ${
-                      method === 'link'
-                        ? 'border-accent bg-accent-soft'
-                        : 'border-line bg-surface-raised hover:border-line-strong'
-                    }`
-              }
-            >
-              <span className={method === 'link' ? 'text-sm text-accent-text' : 'text-sm text-ink-muted'}>
-                Ссылка
-              </span>
-              <span className="text-micro text-ink-faint">
-                {me.robokassa_enabled ? 'через Робокассу' : 'пока недоступно'}
-              </span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setMethod('requisites')}
-              className={`flex flex-col items-start gap-0.5 rounded-md border px-3 py-2.5 text-left transition-colors ${
-                method === 'requisites'
-                  ? 'border-accent bg-accent-soft'
-                  : 'border-line bg-surface-raised hover:border-line-strong'
-              }`}
-            >
-              <span
-                className={method === 'requisites' ? 'text-sm text-accent-text' : 'text-sm text-ink-muted'}
-              >
-                Реквизиты
-              </span>
-              <span className="text-micro text-ink-faint">перевод по счёту</span>
-            </button>
+    <>
+      <Sheet
+        open={open}
+        onOpenChange={requestClose}
+        title="Создать оплату"
+        description={`Клиент: ${clientName}`}
+        footer={
+          <div className="flex flex-col items-center gap-1.5">
+            <Button fullWidth loading={createAndSend.isPending} disabled={!canSend} onClick={() => void submit()}>
+              {method === 'link' ? 'Отправить ссылку' : 'Отправить реквизиты'} · {money(total)}
+            </Button>
+            {!canSend && !createAndSend.isPending && disabledReason && (
+              <p className="text-xs text-ink-faint">{disabledReason}</p>
+            )}
           </div>
-          {!me.robokassa_enabled && (
-            <span className="flex items-start gap-1.5 text-micro text-ink-faint">
-              <Info className="mt-0.5 size-3.5 shrink-0" aria-hidden />
-              {LINK_NOT_READY}
-            </span>
+        }
+      >
+        <div className="flex flex-col gap-5">
+          {conversations && conversations.length > 1 && (
+            <Field label="В какой чат отправить счёт">
+              <Select
+                value={String(convId)}
+                onChange={(value) => setConvId(Number(value))}
+                options={conversations.map((c) => ({ value: String(c.id), label: c.label }))}
+              />
+            </Field>
           )}
-        </section>
 
-        <ItemsEditor items={items} onChange={setItems} />
+          <section className="flex flex-col gap-2">
+            <span className="text-label uppercase tracking-wide text-ink-faint">Способ оплаты</span>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                disabled={!me.robokassa_enabled}
+                title={me.robokassa_enabled ? undefined : LINK_NOT_READY}
+                onClick={() => setMethod('link')}
+                className={
+                  !me.robokassa_enabled
+                    ? 'flex cursor-not-allowed flex-col items-start gap-0.5 rounded-md border border-line bg-surface-raised/50 px-3 py-2.5 text-left opacity-60'
+                    : `flex flex-col items-start gap-0.5 rounded-md border px-3 py-2.5 text-left transition-colors ${
+                        method === 'link'
+                          ? 'border-accent bg-accent-soft'
+                          : 'border-line bg-surface-raised hover:border-line-strong'
+                      }`
+                }
+              >
+                <span className={method === 'link' ? 'text-sm text-accent-text' : 'text-sm text-ink-muted'}>
+                  Ссылка
+                </span>
+                <span className="text-micro text-ink-faint">
+                  {me.robokassa_enabled ? 'через Робокассу' : 'пока недоступно'}
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setMethod('requisites')}
+                className={`flex flex-col items-start gap-0.5 rounded-md border px-3 py-2.5 text-left transition-colors ${
+                  method === 'requisites'
+                    ? 'border-accent bg-accent-soft'
+                    : 'border-line bg-surface-raised hover:border-line-strong'
+                }`}
+              >
+                <span
+                  className={method === 'requisites' ? 'text-sm text-accent-text' : 'text-sm text-ink-muted'}
+                >
+                  Реквизиты
+                </span>
+                <span className="text-micro text-ink-faint">перевод по счёту</span>
+              </button>
+            </div>
+            {!me.robokassa_enabled && (
+              <span className="flex items-start gap-1.5 text-micro text-ink-faint">
+                <Info className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+                {LINK_NOT_READY}
+              </span>
+            )}
+          </section>
 
-        {needsRequisite && (
-          <Field label="Счёт получателя" required>
-            <Select
-              value={requisiteId}
-              onChange={setRequisiteId}
-              placeholder={requisites.isLoading ? 'Загружаем…' : 'Выберите счёт'}
-              // Счета сгруппированы по стране: отправить казахстанскую карту
-              // клиенту из России — значит не получить оплату. «Другое» —
-              // последним пунктом: для случая, когда клиенту нужно перевести
-              // на счёт, которого нет в справочнике руководителя.
-              options={[
-                ...active.map((requisite) => ({
-                  value: String(requisite.id),
-                  label: requisite.country
-                    ? `${requisite.country} — ${requisite.method ?? requisite.title}`
-                    : requisite.title,
-                  hint: [requisite.kind, requisite.account_masked, requisite.holder]
-                    .filter(Boolean)
-                    .join(' · '),
-                })),
-                { value: CUSTOM_REQUISITE, label: 'Другое', hint: 'Впишу реквизиты вручную' },
-              ]}
-            />
-          </Field>
-        )}
+          <ItemsEditor items={items} onChange={setItems} />
 
-        {needsRequisite && isCustom && (
-          <Field label="Реквизиты" required hint="Уйдут клиенту точно в этом виде — проверьте перед отправкой">
+          {needsRequisite && (
+            <Field label="Счёт получателя" required>
+              <Select
+                value={requisiteId}
+                onChange={setRequisiteId}
+                placeholder={requisites.isLoading ? 'Загружаем…' : 'Выберите счёт'}
+                // Счета сгруппированы по стране: отправить казахстанскую карту
+                // клиенту из России — значит не получить оплату. «Другое» —
+                // последним пунктом: для случая, когда клиенту нужно перевести
+                // на счёт, которого нет в справочнике руководителя.
+                options={[
+                  ...active.map((requisite) => ({
+                    value: String(requisite.id),
+                    label: requisite.country
+                      ? `${requisite.country} — ${requisite.method ?? requisite.title}`
+                      : requisite.title,
+                    hint: [requisite.kind, requisite.account_masked, requisite.holder]
+                      .filter(Boolean)
+                      .join(' · '),
+                  })),
+                  { value: CUSTOM_REQUISITE, label: 'Другое', hint: 'Впишу реквизиты вручную' },
+                ]}
+              />
+            </Field>
+          )}
+
+          {needsRequisite && isCustom && (
+            <Field label="Реквизиты" required hint="Уйдут клиенту точно в этом виде — проверьте перед отправкой">
+              <Textarea
+                rows={4}
+                value={customText}
+                onChange={(event) => setCustomText(event.target.value)}
+                placeholder={'Получатель: …\nБанк: …\nНомер счёта/карты: …'}
+              />
+            </Field>
+          )}
+
+          {/* ТЗ п. 4.4 и 4.5: сопроводительный текст уходит клиенту перед
+              реквизитами или ссылкой — одинаково для обоих способов оплаты. */}
+          <Field
+            label="Текст к счёту"
+            hint={`Уйдёт клиенту первым сообщением, перед ${needsRequisite ? 'реквизитами' : 'ссылкой'}`}
+          >
             <Textarea
-              rows={4}
-              value={customText}
-              onChange={(event) => setCustomText(event.target.value)}
-              placeholder={'Получатель: …\nБанк: …\nНомер счёта/карты: …'}
+              rows={3}
+              value={introText}
+              onChange={(event) => setIntroText(event.target.value)}
+              placeholder={
+                needsRequisite
+                  ? 'Вот ваша оплата ✨ Реквизиты ниже. После перевода пришлите, пожалуйста, чек.'
+                  : 'Вот ваша оплата ✨ Ссылка ниже.'
+              }
             />
           </Field>
-        )}
 
-        {/* ТЗ п. 4.4 и 4.5: сопроводительный текст уходит клиенту перед
-            реквизитами или ссылкой — одинаково для обоих способов оплаты. */}
-        <Field
-          label="Текст к счёту"
-          hint={`Уйдёт клиенту первым сообщением, перед ${needsRequisite ? 'реквизитами' : 'ссылкой'}`}
-        >
-          <Textarea
-            rows={3}
-            value={introText}
-            onChange={(event) => setIntroText(event.target.value)}
-            placeholder={
-              needsRequisite
-                ? 'Вот ваша оплата ✨ Реквизиты ниже. После перевода пришлите, пожалуйста, чек.'
-                : 'Вот ваша оплата ✨ Ссылка ниже.'
-            }
-          />
-        </Field>
+          <div className="flex items-baseline justify-between rounded-md bg-surface-raised px-3 py-3">
+            <span className="text-sm text-ink-muted">Итого</span>
+            <span className="tnum text-xl font-semibold text-ink">{money(total)}</span>
+          </div>
 
-        <div className="flex items-baseline justify-between rounded-md bg-surface-raised px-3 py-3">
-          <span className="text-sm text-ink-muted">Итого</span>
-          <span className="tnum text-xl font-semibold text-ink">{money(total)}</span>
+          <p className="text-xs leading-relaxed text-ink-faint">
+            {needsRequisite
+              ? 'Клиенту уйдут реквизиты и сумма. Когда клиент пришлёт чек, приложите его в карточке оплаты — этим подтверждается поступление.'
+              : 'Клиенту уйдёт ссылка на оплату через Робокассу. Поступление подтвердится само, как только банк проведёт платёж.'}
+          </p>
+
+          {(error || (touched && validation)) && (
+            <InlineError message={error ?? validation ?? ''} />
+          )}
         </div>
+      </Sheet>
 
-        <p className="text-xs leading-relaxed text-ink-faint">
-          {needsRequisite
-            ? 'Клиенту уйдут реквизиты и сумма. Когда клиент пришлёт чек, приложите его в карточке оплаты — этим подтверждается поступление.'
-            : 'Клиенту уйдёт ссылка на оплату через Робокассу. Поступление подтвердится само, как только банк проведёт платёж.'}
-        </p>
-
-        {(error || (touched && validation)) && (
-          <InlineError message={error ?? validation ?? ''} />
-        )}
-      </div>
-    </Sheet>
+      <ConfirmDialog
+        open={confirmCloseOpen}
+        onOpenChange={setConfirmCloseOpen}
+        title="Закрыть без отправки?"
+        message="Введённые услуги и суммы пропадут — оплата не создана и не отправлена клиенту."
+        confirmLabel="Закрыть"
+        cancelLabel="Продолжить оплату"
+        danger
+        onConfirm={() => {
+          setConfirmCloseOpen(false)
+          onOpenChange(false)
+        }}
+      />
+    </>
   )
 }
