@@ -224,7 +224,13 @@ async def run() -> int:  # noqa: PLR0915
             ],
         )
         pending = await _attachment_of(conv_id, 910020)
-        c.check("сообщение появилось сразу, файл «загружается»", pending is not None and pending.status == "pending")
+        # Докачку подхватывает шлюз сразу, на быстром стенде она успевает закончиться
+        # до этой проверки — важно, что сообщение уже видно и файл не потерян.
+        c.check(
+            "сообщение появилось сразу, файл «загружается» или уже загружен",
+            pending is not None and pending.status in ("pending", "ready"),
+            pending.status if pending else None,
+        )
         ready = await until(lambda: _ready(conv_id, 910020), 25)
         c.check("файл докачан в фоне", bool(ready), ready)
         await incoming(
