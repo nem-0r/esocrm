@@ -1,7 +1,7 @@
 import { Ban, Check, Search } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 
-import type { Conversation } from '@/entities/types'
+import type { Conversation, Message } from '@/entities/types'
 import { FUNNEL_LABEL } from '@/features/profile/lib'
 import { useConversations, useForwardMessages } from '@/features/chats/queries'
 import { ApiError } from '@/shared/api/client'
@@ -38,6 +38,8 @@ export function ForwardSheet({
   sourceConversationId,
   sourceAccountId,
   messageIds,
+  messages,
+  clientName,
   onDone,
 }: {
   open: boolean
@@ -45,6 +47,9 @@ export function ForwardSheet({
   sourceConversationId: number
   sourceAccountId: number
   messageIds: number[]
+  /** Сами сообщения — для предпросмотра «что именно пересылаем». */
+  messages: Message[]
+  clientName: string
   onDone: () => void
 }) {
   const [query, setQuery] = useState('')
@@ -128,6 +133,25 @@ export function ForwardSheet({
       }
     >
       <div className="flex flex-col gap-4">
+        {messages.length > 0 && (
+          <ul
+            aria-label="Что пересылаем"
+            className="flex flex-col gap-1 rounded-md bg-surface-raised px-3 py-2"
+          >
+            {messages.slice(0, 3).map((message) => (
+              <li key={message.id} className="truncate text-xs text-ink-muted">
+                <span className="text-ink-faint">
+                  {message.direction === 'in' ? clientName : (message.author?.full_name ?? 'Менеджер')}:
+                </span>{' '}
+                {previewText(message)}
+              </li>
+            ))}
+            {messages.length > 3 && (
+              <li className="text-micro text-ink-faint">и ещё {messages.length - 3}</li>
+            )}
+          </ul>
+        )}
+
         <Input
           autoFocus
           value={query}
@@ -224,4 +248,13 @@ export function ForwardSheet({
       </div>
     </Sheet>
   )
+}
+
+/** Одна строка о сообщении: текст или название файла — чтобы узнать, что выбрано. */
+function previewText(message: Message): string {
+  if (message.text) return message.text
+  const file = message.attachments[0]
+  if (!file) return 'сообщение'
+  const more = message.attachments.length > 1 ? ` и ещё ${message.attachments.length - 1}` : ''
+  return `[${file.file_name}]${more}`
 }

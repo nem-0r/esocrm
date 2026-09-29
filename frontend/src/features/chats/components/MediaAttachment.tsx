@@ -1,4 +1,4 @@
-import { X } from 'lucide-react'
+import { ImageOff, X } from 'lucide-react'
 import { useEffect, useState } from 'react'
 
 /** Ширина/высота с сервера — плейсхолдер держит место в ленте, картинка не
@@ -23,6 +23,9 @@ export function ImagePreview({
   alt: string
 }) {
   const [open, setOpen] = useState(false)
+  // Файл не открылся (удалён из хранилища, оборвалась сеть) — без запасного вида
+  // в чате оставался бы пустой квадрат нужного размера, непонятный менеджеру.
+  const [failed, setFailed] = useState(false)
   const size = previewSize(width, height)
 
   useEffect(() => {
@@ -33,6 +36,23 @@ export function ImagePreview({
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [open])
+
+  if (failed) {
+    return (
+      <button
+        type="button"
+        onClick={() => setFailed(false)}
+        title="Попробовать загрузить ещё раз"
+        className="flex items-center gap-2 rounded bg-black/25 px-2.5 py-2 text-left transition-colors hover:bg-black/40"
+      >
+        <ImageOff className="size-4 shrink-0 text-warning" aria-hidden />
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-xs font-medium text-ink">{alt}</span>
+          <span className="block text-micro text-ink-faint">Не удалось загрузить — нажмите, чтобы повторить</span>
+        </span>
+      </button>
+    )
+  }
 
   return (
     <>
@@ -46,6 +66,7 @@ export function ImagePreview({
           src={src}
           alt={alt}
           loading="lazy"
+          onError={() => setFailed(true)}
           width={width ?? undefined}
           height={height ?? undefined}
           style={{ aspectRatio: width && height ? `${width} / ${height}` : undefined }}

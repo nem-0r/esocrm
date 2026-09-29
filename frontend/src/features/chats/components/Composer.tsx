@@ -1,6 +1,7 @@
 import { Lock, Mic, Paperclip, Send, StickyNote } from 'lucide-react'
 import {
   forwardRef,
+  useEffect,
   useImperativeHandle,
   useRef,
   useState,
@@ -47,7 +48,10 @@ export const Composer = forwardRef<ComposerHandle, { conversationId: number }>(f
   const { data: templates } = useTemplates()
   const queue = useAttachmentQueue()
   // Запись остановлена — голосовое уходит в список вложений и сразу грузится.
-  const recorder = useVoiceRecorder(queue.addVoice)
+  const recorder = useVoiceRecorder((blob, seconds, sendNow) => {
+    queue.addVoice(blob, seconds)
+    if (sendNow) setAutoSend(true)
+  })
   const fileInput = useRef<HTMLInputElement>(null)
   const textarea = useRef<HTMLTextAreaElement>(null)
 
@@ -55,6 +59,8 @@ export const Composer = forwardRef<ComposerHandle, { conversationId: number }>(f
   const [internal, setInternal] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [templatesOpen, setTemplatesOpen] = useState(false)
+  // Голосовое, которое нужно отправить, как только оно загрузится на сервер.
+  const [autoSend, setAutoSend] = useState(false)
 
   const recording = recorder.state === 'recording' || recorder.state === 'requesting'
   const hasContent = text.trim().length > 0 || queue.items.length > 0
@@ -88,6 +94,15 @@ export const Composer = forwardRef<ComposerHandle, { conversationId: number }>(f
       setError(cause instanceof ApiError ? cause.message : 'Не удалось отправить')
     }
   }
+
+  // «Отправить» из полосы записи: ждём конца загрузки и отправляем. Если файл
+  // не загрузился, остаётся в списке с причиной — менеджер решает сам.
+  useEffect(() => {
+    if (!autoSend || queue.uploading || send.isPending) return
+    setAutoSend(false)
+    if (queue.items.length > 0 && !queue.failed) void submit()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoSend, queue.uploading, queue.failed, queue.items.length])
 
   function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
@@ -139,6 +154,7 @@ export const Composer = forwardRef<ComposerHandle, { conversationId: number }>(f
             requesting={recorder.state === 'requesting'}
             onCancel={recorder.cancel}
             onStop={recorder.stop}
+            onSend={recorder.stopAndSend}
           />
         ) : (
           <>

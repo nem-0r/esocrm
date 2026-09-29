@@ -17,7 +17,9 @@ export function Delta({ percent, count }: { percent?: number | null; count?: num
     >
       <Icon className="size-3" aria-hidden />
       {positive ? '+' : ''}
-      {percent !== undefined && percent !== null ? `${value}%` : value}
+      {percent !== undefined && percent !== null
+        ? `${value.toLocaleString('ru-RU', { maximumFractionDigits: 1 })}%`
+        : value}
     </span>
   )
 }

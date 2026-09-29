@@ -31,12 +31,21 @@ export function AttachmentTray({
           )}
         >
           {item.voice && item.previewUrl ? (
-            <VoicePlayer
-              src={item.previewUrl}
-              durationSec={item.result?.duration_sec ?? item.durationSec}
-              waveform={item.result?.waveform ?? null}
-              local
-            />
+            <div className="flex flex-col gap-1">
+              <VoicePlayer
+                src={item.previewUrl}
+                durationSec={item.result?.duration_sec ?? item.durationSec}
+                waveform={item.result?.waveform ?? null}
+                local
+              />
+              {/* Причину показываем: красная рамка без слов не объясняет, что делать. */}
+              {item.status === 'error' && (
+                <span className="px-1 text-micro text-danger">{item.error}</span>
+              )}
+              {item.status === 'uploading' && (
+                <span className="px-1 text-micro text-ink-faint">{uploadLabel(item.progress)}</span>
+              )}
+            </div>
           ) : (
             <>
               <Thumb item={item} />
@@ -44,7 +53,7 @@ export function AttachmentTray({
                 <span className="max-w-40 truncate text-xs text-ink">{item.name}</span>
                 <span className="text-micro text-ink-faint">
                   {item.status === 'uploading'
-                    ? `загрузка ${Math.round(item.progress * 100)}%`
+                    ? uploadLabel(item.progress)
                     : item.status === 'error'
                       ? item.error
                       : fileSize(item.result?.size_bytes ?? item.size)}
@@ -85,6 +94,12 @@ export function AttachmentTray({
       ))}
     </ul>
   )
+}
+
+/** Файл уже передан, но сервер ещё разбирает его (голосовое перекодируется) —
+ *  «загрузка 100%» на этом этапе висела бы и выглядела как зависание. */
+function uploadLabel(progress: number): string {
+  return progress >= 1 ? 'обработка…' : `загрузка ${Math.round(progress * 100)}%`
 }
 
 function Thumb({ item }: { item: QueueItem }) {

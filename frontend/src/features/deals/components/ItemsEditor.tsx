@@ -1,9 +1,11 @@
 import { Check, Info, Plus, Tag, Trash2 } from 'lucide-react'
 import { useMemo, useState, type KeyboardEvent } from 'react'
+import { Link } from 'react-router-dom'
 
 import type { Service } from '@/entities/types'
 import { amountInput, newItemDraft, normalizeServiceName, type ItemDraft } from '@/features/deals/lib'
 import { useServices } from '@/features/services/queries'
+import { useAuth } from '@/shared/hooks/useAuth'
 import { cn } from '@/shared/lib/cn'
 import { money, parseMoney } from '@/shared/lib/format'
 import { Button, Input } from '@/shared/ui'
@@ -26,6 +28,8 @@ export function ItemsEditor({
 }) {
   const services = useServices()
   const catalog = useMemo(() => services.data ?? [], [services.data])
+  const { isAdmin } = useAuth()
+  const catalogEmpty = !services.isLoading && !services.isError && catalog.length === 0
 
   function patch(index: number, update: Partial<ItemDraft>) {
     onChange(items.map((item, i) => (i === index ? { ...item, ...update } : item)))
@@ -34,6 +38,24 @@ export function ItemsEditor({
   return (
     <section className="flex flex-col gap-2">
       <span className="text-label uppercase tracking-wide text-ink-faint">Услуги · {items.length}</span>
+      {/* Пустой справочник — не поломка, но и списка не будет: говорим, почему и кто
+          может это исправить, а не оставляем гадать. */}
+      {catalogEmpty && (
+        <span className="flex items-start gap-1.5 text-micro text-ink-faint">
+          <Info className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+          {isAdmin ? (
+            <span>
+              Справочник услуг пуст — список не появится, пока вы его не заполните:{' '}
+              <Link to="/profile/services" className="text-accent-text underline-offset-4 hover:underline">
+                Профиль → Услуги и цены
+              </Link>
+              . Пока название вписывается вручную.
+            </span>
+          ) : (
+            <span>Справочник услуг пока пуст — впишите название вручную. Заполнить его может руководитель.</span>
+          )}
+        </span>
+      )}
       {items.map((item, index) => {
         const linked = catalog.find((service) => service.id === item.serviceId) ?? null
         // Позиция ссылается на услугу, которой нет среди продающихся: значит

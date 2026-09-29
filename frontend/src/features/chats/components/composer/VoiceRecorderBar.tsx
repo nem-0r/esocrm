@@ -1,11 +1,12 @@
-import { Square, Trash2 } from 'lucide-react'
+import { Send, Square, Trash2 } from 'lucide-react'
 
 import { playerTime } from '@/shared/lib/format'
-import { IconButton } from '@/shared/ui'
+import { Button, IconButton } from '@/shared/ui'
 
 /**
  * Полоса записи голосового — на месте поля ввода, как в Telegram:
- * красная точка, таймер, живой уровень громкости, «удалить» и «стоп».
+ * красная точка, таймер, живой уровень громкости, «удалить», «стоп» (остановить
+ * и прослушать перед отправкой) и «отправить» (остановить и сразу отправить).
  */
 export function VoiceRecorderBar({
   seconds,
@@ -13,12 +14,14 @@ export function VoiceRecorderBar({
   requesting,
   onCancel,
   onStop,
+  onSend,
 }: {
   seconds: number
   level: number
   requesting: boolean
   onCancel: () => void
   onStop: () => void
+  onSend: () => void
 }) {
   return (
     <div className="flex min-h-10 flex-1 items-center gap-3 rounded border border-danger/40 bg-danger-soft/40 px-3">
@@ -40,13 +43,22 @@ export function VoiceRecorderBar({
         <Trash2 className="size-5" aria-hidden />
       </IconButton>
       <IconButton
-        label="Остановить запись"
+        label="Остановить и прослушать"
         onClick={onStop}
         disabled={requesting}
         className="text-danger hover:text-danger"
       >
         <Square className="size-4 fill-current" aria-hidden />
       </IconButton>
+      <Button
+        aria-label="Остановить и отправить"
+        title="Остановить и отправить"
+        onClick={onSend}
+        disabled={requesting}
+        className="size-8 shrink-0 rounded-full p-0"
+      >
+        <Send className="size-4" aria-hidden />
+      </Button>
     </div>
   )
 }

@@ -10,6 +10,7 @@ import { Composer, type ComposerHandle } from '@/features/chats/components/Compo
 import { ForwardSheet } from '@/features/chats/components/ForwardSheet'
 import { MessageBubble, canForward } from '@/features/chats/components/MessageBubble'
 import { TransferSheet } from '@/features/chats/components/TransferSheet'
+import { decidePaste } from '@/features/chats/components/composer/clipboard'
 import { copyText, formatForCopy } from '@/features/chats/components/message/copy'
 import { DealSheet } from '@/features/deals/DealSheet'
 import { FUNNEL_LABEL } from '@/features/profile/lib'
@@ -47,6 +48,10 @@ function ChatPane({ conversationId }: { conversationId: number }) {
   const retryMessage = useRetryMessage(conversationId)
   const editMessage = useEditMessage(conversationId)
   const bottom = useRef<HTMLDivElement>(null)
+  const scroller = useRef<HTMLDivElement>(null)
+  // Ленту держим у нижнего края, пока человек его не покинул: когда поле ввода
+  // растёт (вложения, длинный текст), последние сообщения не уезжают под него.
+  const stickToBottom = useRef(true)
   const composer = useRef<ComposerHandle>(null)
   const [dealOpen, setDealOpen] = useState(false)
   const [transferOpen, setTransferOpen] = useState(false)
@@ -62,6 +67,7 @@ function ChatPane({ conversationId }: { conversationId: number }) {
     setSelecting(false)
     setSelected([])
     setForwardIds(null)
+    stickToBottom.current = true
   }, [conversationId])
 
   // Открыли чат — сбрасываем непрочитанные и сообщаем, что мы здесь.
@@ -70,6 +76,48 @@ function ChatPane({ conversationId }: { conversationId: number }) {
     realtime.setViewing(conversationId)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [conversationId])
+
+  const chatReady = Boolean(conversation.data)
+  useEffect(() => {
+    const element = scroller.current
+    if (!element) return
+    const observer = new ResizeObserver(() => {
+      if (stickToBottom.current) element.scrollTop = element.scrollHeight
+    })
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [chatReady])
+
+  // Вставка из буфера работает в любом месте чата, а не только когда курсор в
+  // поле ввода: скриншот сделали, открыли чат, нажали Ctrl/Cmd+V — и он в письме.
+  // Поля ввода и открытые окна обрабатывают вставку сами.
+  useEffect(() => {
+    function onPaste(event: globalThis.ClipboardEvent) {
+      if (event.defaultPrevented) return
+      const target = event.target as HTMLElement | null
+      if (target?.closest('input, textarea, [contenteditable="true"]')) return
+      if (document.querySelector('[role="dialog"]')) return
+      const decision = decidePaste(event.clipboardData)
+      if (decision.files.length === 0) return
+      event.preventDefault()
+      composer.current?.addFiles(decision.files)
+    }
+    document.addEventListener('paste', onPaste)
+    return () => document.removeEventListener('paste', onPaste)
+  }, [])
+
+  // Esc выходит из режима выбора сообщений.
+  useEffect(() => {
+    if (!selecting || forwardIds !== null) return
+    function onKey(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        setSelecting(false)
+        setSelected([])
+      }
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [selecting, forwardIds])
 
   const items = useMemo(
     // Сервер отдаёт от новых к старым — в ленте порядок обратный.
@@ -107,6 +155,7 @@ function ChatPane({ conversationId }: { conversationId: number }) {
   // Выбранное — в порядке ленты, а не в порядке нажатий: так и пересылается.
   const chosen = items.filter((message) => selected.includes(message.id))
   const forwardable = chosen.filter(canForward)
+  const forwardMessages = items.filter((message) => forwardIds?.includes(message.id))
 
   function copySelected() {
     void copyText(formatForCopy(chosen, chat.client.name)).then(
@@ -268,7 +317,14 @@ function ChatPane({ conversationId }: { conversationId: number }) {
         )}
       </header>
 
-      <div className="min-h-0 flex-1 overflow-y-auto bg-surface-sunken py-3">
+      <div
+        ref={scroller}
+        onScroll={(event) => {
+          const el = event.currentTarget
+          stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 96
+        }}
+        className="min-h-0 flex-1 overflow-y-auto bg-surface-sunken py-3"
+      >
         {messages.isLoading ? (
           <ListSkeleton rows={5} />
         ) : messages.error ? (
@@ -338,6 +394,8 @@ function ChatPane({ conversationId }: { conversationId: number }) {
         sourceConversationId={conversationId}
         sourceAccountId={chat.account.id}
         messageIds={forwardIds ?? []}
+        messages={forwardMessages}
+        clientName={chat.client.name}
         onDone={stopSelecting}
       />
 

@@ -17,6 +17,10 @@ export type RecorderState = 'idle' | 'requesting' | 'recording' | 'error'
 // и её лучше отправить файлом.
 export const MAX_RECORDING_SECONDS = 60 * 60
 
+// Как на сервере (file_service.MIN_VOICE_SECONDS): короче секунды — случайное
+// нажатие. Не грузим впустую и объясняем, что произошло.
+export const MIN_RECORDING_SECONDS = 1
+
 const MIME_CANDIDATES = ['audio/ogg;codecs=opus', 'audio/webm;codecs=opus', 'audio/mp4', 'audio/webm']
 
 export function isRecordingSupported(): boolean {
@@ -48,7 +52,9 @@ export function microphoneError(cause: unknown): string {
   return 'Не удалось начать запись. Попробуйте ещё раз.'
 }
 
-export function useVoiceRecorder(onRecorded: (blob: Blob, seconds: number) => void) {
+export function useVoiceRecorder(
+  onRecorded: (blob: Blob, seconds: number, sendNow: boolean) => void,
+) {
   const [state, setState] = useState<RecorderState>('idle')
   const [seconds, setSeconds] = useState(0)
   const [level, setLevel] = useState(0)
@@ -67,6 +73,8 @@ export function useVoiceRecorder(onRecorded: (blob: Blob, seconds: number) => vo
   const timer = useRef<number | null>(null)
   const startedAt = useRef(0)
   const discard = useRef(false)
+  // «Отправить» прямо из полосы записи: после остановки сообщение уходит само.
+  const sendNow = useRef(false)
 
   const teardown = useCallback(() => {
     if (frame.current !== null) cancelAnimationFrame(frame.current)
@@ -84,6 +92,12 @@ export function useVoiceRecorder(onRecorded: (blob: Blob, seconds: number) => vo
     const active = recorder.current
     if (active && active.state !== 'inactive') active.stop()
   }, [])
+
+  /** Остановить и сразу отправить — как стрелка в Telegram. */
+  const stopAndSend = useCallback(() => {
+    sendNow.current = true
+    stop()
+  }, [stop])
 
   const start = useCallback(async () => {
     if (!isRecordingSupported()) {
@@ -115,12 +129,19 @@ export function useVoiceRecorder(onRecorded: (blob: Blob, seconds: number) => vo
         // Длительность считаем сами: Chrome пишет запись без неё (у файла
         // «бесконечная» длина), и превью показало бы 0:00 до ответа сервера.
         const recordedSeconds = (Date.now() - startedAt.current) / 1000
+        const wantSend = sendNow.current
+        sendNow.current = false
         chunks.current = []
         teardown()
         recorder.current = null
         setState('idle')
         setSeconds(0)
-        if (!discard.current && result.size > 0) recorded.current(result, recordedSeconds)
+        if (discard.current || result.size === 0) return
+        if (recordedSeconds < MIN_RECORDING_SECONDS) {
+          setError('Запись слишком короткая — говорите хотя бы секунду и нажмите «Стоп»')
+          return
+        }
+        recorded.current(result, recordedSeconds, wantSend)
       }
       recorder.current = instance
       instance.start(250)
@@ -167,6 +188,7 @@ export function useVoiceRecorder(onRecorded: (blob: Blob, seconds: number) => vo
   /** Удалить запись: остановить и выбросить. */
   const cancel = useCallback(() => {
     discard.current = true
+    sendNow.current = false
     const active = recorder.current
     if (active && active.state !== 'inactive') {
       active.stop()
@@ -187,5 +209,5 @@ export function useVoiceRecorder(onRecorded: (blob: Blob, seconds: number) => vo
     [teardown],
   )
 
-  return { state, seconds, level, error, start, stop, cancel }
+  return { state, seconds, level, error, start, stop, stopAndSend, cancel }
 }
