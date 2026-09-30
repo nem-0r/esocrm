@@ -132,6 +132,9 @@ export function StatsPage() {
   const span = daysBetween(range.from, range.to)
   const dayDisabled = span > MAX_DAYS_FOR_DAILY
   const effectiveGranularity: Granularity = dayDisabled && granularity === 'day' ? 'week' : granularity
+  // Начало позже конца или пустая дата — «Применить» нечего применять: сервер такой
+  // период всё равно отклонит, а в окне было бы написано «выбрано −30 дней».
+  const draftInvalid = !draftRange.from || !draftRange.to || draftRange.from > draftRange.to
   const draftSpan = daysBetween(draftRange.from, draftRange.to)
   const draftDayDisabled = draftSpan > MAX_DAYS_FOR_DAILY
   // Та же подстраховка, что и у боевой гранулярности: если черновик дат
@@ -159,6 +162,7 @@ export function StatsPage() {
   }
 
   function applyPeriod() {
+    if (draftInvalid) return
     setRange(draftRange)
     setGranularity(effectiveDraftGranularity)
     setPeriodOpen(false)
@@ -407,7 +411,7 @@ export function StatsPage() {
         title="Период"
         description="Даты и гранулярность здесь применяются по кнопке «Применить». «Ждут оплаты» — исключение, это всегда на сегодня"
         footer={
-          <Button fullWidth onClick={applyPeriod}>
+          <Button fullWidth onClick={applyPeriod} disabled={draftInvalid}>
             Применить
           </Button>
         }
@@ -440,12 +444,20 @@ export function StatsPage() {
               dayDisabled={draftDayDisabled}
             />
           </Field>
-          <p className="text-xs text-ink-faint">
-            Выбрано {draftSpan + 1} {plural(draftSpan + 1, 'день', 'дня', 'дней')}.{' '}
-            {draftDayDisabled
-              ? 'При периоде больше двух месяцев дни недоступны.'
-              : 'Гранулярность можно изменить и в разделе статистики.'}
-          </p>
+          {draftInvalid ? (
+            <p className="text-xs text-danger" role="alert">
+              {!draftRange.from || !draftRange.to
+                ? 'Укажите обе даты.'
+                : 'Начало периода позже его конца — поправьте даты.'}
+            </p>
+          ) : (
+            <p className="text-xs text-ink-faint">
+              Выбрано {draftSpan + 1} {plural(draftSpan + 1, 'день', 'дня', 'дней')}.{' '}
+              {draftDayDisabled
+                ? 'При периоде больше двух месяцев дни недоступны.'
+                : 'Гранулярность можно изменить и в разделе статистики.'}
+            </p>
+          )}
         </div>
       </Sheet>
     </div>

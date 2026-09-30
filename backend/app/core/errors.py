@@ -103,3 +103,24 @@ async def validation_error_handler(_: Request, exc: Exception) -> JSONResponse:
         status_code=422,
         content=error_body("validation", message, {"field": field, "errors": details}),
     )
+
+
+async def db_data_error_handler(_: Request, exc: Exception) -> JSONResponse:
+    """Пользователь прислал то, что база принять не может: число больше её
+    предела (id из двадцати девяток), нулевой байт в тексте. Это ошибка запроса,
+    а не сервера: отвечаем 422 с понятным текстом вместо «500 Internal Server
+    Error». Настоящие сбои базы (обрыв, блокировка) сюда не попадают — пусть
+    остаются 500 и попадают в журнал."""
+    from asyncpg.exceptions import DataError as PgDataError
+
+    cause = getattr(getattr(exc, "orig", None), "__cause__", None)
+    if not isinstance(cause, PgDataError):
+        raise exc
+    text = str(cause)
+    if "out of int" in text or "out of range" in text:
+        message = "Число слишком большое или выходит за допустимые пределы"
+    elif "0x00" in text or "UTF8" in text:
+        message = "В тексте есть недопустимые символы"
+    else:
+        message = "Запрос содержит недопустимое значение"
+    return JSONResponse(status_code=422, content=error_body("invalid", message))

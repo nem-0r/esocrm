@@ -77,6 +77,9 @@ async def forward(
     source = await conversation_service.load_visible(db, user, request.source_conversation_id)
     if target.is_blocked_by_client:
         raise Invalid("Клиент заблокировал этот номер — сообщения ему не доходят")
+    # Две пересылки (или пересылка и обычная отправка) в один чат одновременно
+    # раньше рвались взаимной блокировкой базы — теперь встают в очередь.
+    await conversation_service.lock_for_write(db, target.id)
 
     ids = list(dict.fromkeys(request.message_ids))
     rows = (

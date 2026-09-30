@@ -5,11 +5,13 @@ from fastapi import FastAPI, HTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import ORJSONResponse
+from sqlalchemy.exc import DBAPIError
 
 from app.core.config import settings
 from app.core.errors import (
     AppError,
     app_error_handler,
+    db_data_error_handler,
     http_error_handler,
     validation_error_handler,
 )
@@ -61,6 +63,7 @@ def create_app() -> FastAPI:
     app.add_exception_handler(AppError, app_error_handler)
     app.add_exception_handler(HTTPException, http_error_handler)
     app.add_exception_handler(RequestValidationError, validation_error_handler)
+    app.add_exception_handler(DBAPIError, db_data_error_handler)
 
     from app.api.v1 import api_router
 

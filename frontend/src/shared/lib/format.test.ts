@@ -32,6 +32,37 @@ describe('деньги', () => {
     expect(parseMoney('0')).toBeNull()
     expect(parseMoney('абв')).toBeNull()
   })
+
+  it('не «исправляет» ввод молча: минус, буквы и экспонента — не сумма', () => {
+    expect(parseMoney('-100')).toBeNull()
+    expect(parseMoney('−100')).toBeNull()
+    expect(parseMoney('1e5')).toBeNull()
+    expect(parseMoney('12abc')).toBeNull()
+    expect(parseMoney('1.2.3')).toBeNull()
+    expect(parseMoney('1,234.50')).toBeNull()
+    expect(parseMoney('100,123')).toBeNull()
+    expect(parseMoney('')).toBeNull()
+    expect(parseMoney('  ')).toBeNull()
+    expect(parseMoney(',')).toBeNull()
+  })
+
+  it('понимает привычные записи суммы', () => {
+    expect(parseMoney('4 500')).toBe(450000)
+    expect(parseMoney('4\u00a0500')).toBe(450000)
+    expect(parseMoney('4500,5')).toBe(450050)
+    expect(parseMoney('4500.50')).toBe(450050)
+    expect(parseMoney('4500 ₽')).toBe(450000)
+    expect(parseMoney('4500 руб.')).toBe(450000)
+    expect(parseMoney('4500.000000')).toBe(450000) // так отдаёт сумму Робокасса
+    expect(parseMoney('0,01')).toBe(1)
+    expect(parseMoney('0,00')).toBeNull()
+  })
+
+  it('отсекает заведомо опечаточные суммы', () => {
+    expect(parseMoney('99999999999999999999')).toBeNull()
+    expect(parseMoney('10000000000')).toBe(1_000_000_000_000)
+    expect(parseMoney('10000000001')).toBeNull()
+  })
 })
 
 describe('склонения', () => {

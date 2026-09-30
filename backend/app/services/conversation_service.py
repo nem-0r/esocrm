@@ -418,6 +418,22 @@ async def load_visible(db: AsyncSession, user: User, conversation_id: int) -> Co
     return conv
 
 
+async def lock_for_write(db: AsyncSession, conversation_id: int) -> None:
+    """Занять строку чата, пока идёт запись в него, — ПЕРВЫМ действием запроса.
+
+    Вставка сообщения берёт слабую блокировку строки чата (внешний ключ), а
+    потом чат обновляется (время последнего сообщения, ответственный) — для
+    этого нужна сильная. Два запроса в один чат разом оба успевали взять слабую
+    и оба ждали сильную: база разрывала это ошибкой «deadlock detected», а
+    менеджер видел 500 на обычной отправке (двойной клик, две вкладки, ответ
+    одновременно с пересылкой). Если сильную блокировку взять до всякой записи,
+    запросы просто выстраиваются в очередь.
+    """
+    await db.execute(
+        select(Conversation.id).where(Conversation.id == conversation_id).with_for_update()
+    )
+
+
 async def get_detail(db: AsyncSession, user: User, conversation_id: int) -> ConversationDetail:
     await load_visible(db, user, conversation_id)
     return await build_detail(db, conversation_id)

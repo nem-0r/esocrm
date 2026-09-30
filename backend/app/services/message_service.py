@@ -225,6 +225,9 @@ async def send_outgoing(
     должны попасть в базу вместе или не попасть вовсе.
     """
     now = datetime.now(UTC)
+    # Уже занята вызывающим (post_message, пересылка) — повторный захват своей же
+    # блокировки бесплатен; нужен для остальных путей (счета из сделок).
+    await conversation_service.lock_for_write(db, conversation.id)
     attachments = await _bind_attachments(db, conversation, attachment_ids)
     if kind == MessageKind.TEXT and attachments:
         kind = _kind_for(attachments[0])
@@ -300,6 +303,7 @@ async def post_message(
     from app.services import file_service
 
     conversation = await conversation_service.load_visible(db, user, conversation_id)
+    await conversation_service.lock_for_write(db, conversation.id)
     text = (payload.text or "").strip() or None
     attachment_ids = payload.attachment_ids or []
     uploads = payload.uploads or []

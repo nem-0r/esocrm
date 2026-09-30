@@ -59,13 +59,33 @@ export function moneyPlain(kopecks: number): string {
   return String(Math.round(kopecks / 100))
 }
 
+/**
+ * Рубли из поля ввода → целые копейки. `null` — ввод нельзя понять как сумму.
+ *
+ * Раньше всё, кроме цифр и разделителей, молча выбрасывалось: «-100» превращалось
+ * в 100 ₽, а «1e5» — в 15 ₽ — и менеджер отправлял клиенту не ту сумму, не
+ * заметив этого. Теперь допустимы только цифры, пробелы между разрядами (обычные
+ * и неразрывные), одна десятичная запятая или точка (до двух значащих знаков) и пометка
+ * валюты («₽», «руб», «р.»); всё остальное — не сумма.
+ */
 export function parseMoney(input: string): number | null {
-  const cleaned = input.replace(/[^\d,.]/g, '').replace(',', '.')
-  if (!cleaned) return null
-  const value = Number(cleaned)
+  const stripped = input
+    .replace(/(?:₽|руб(?:\.|лей|ля|ль)?|р\.?)\s*$/i, '')
+    .replace(/[\s\u00a0\u202f]/g, '')
+  if (!/^\d+(?:[.,]\d+)?$/.test(stripped)) return null
+  // «4500.000000» (так отдаёт сумму Робокасса) — те же 4500; а «100,123» — уже
+  // не рубли и копейки, а неведомая доля копейки, это опечатка.
+  const fraction = stripped.split(/[.,]/)[1] ?? ''
+  if (fraction.length > 2 && /[1-9]/.test(fraction.slice(2))) return null
+  const value = Number(stripped.replace(',', '.'))
   if (!Number.isFinite(value) || value <= 0) return null
-  return Math.round(value * 100)
+  const kopecks = Math.round(value * 100)
+  // Больше, чем вмещает копеечное поле сервера, — заведомо опечатка.
+  return kopecks <= MAX_KOPECKS ? kopecks : null
 }
+
+/** Предел суммы в копейках — 10 млрд ₽: сервер хранит целым, а такая сумма в чате уже опечатка. */
+const MAX_KOPECKS = 1_000_000_000_000
 
 export function plural(n: number, one: string, few: string, many: string): string {
   const mod10 = n % 10

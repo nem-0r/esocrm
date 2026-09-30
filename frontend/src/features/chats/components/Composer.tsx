@@ -24,6 +24,27 @@ import { Button, IconButton, InlineError, Sheet, Textarea } from '@/shared/ui'
 
 const MAX_LENGTH = 4096
 
+// Черновик текста — по чату, в пределах вкладки. Менеджер отвлёкся в другой
+// чат посмотреть переписку — набранный ответ на месте, когда он вернулся
+// (как в Telegram). Хранилище браузера может быть закрыто — тогда просто
+// без черновика.
+const draftKey = (conversationId: number) => `crm-draft:${conversationId}`
+function readDraft(conversationId: number): string {
+  try {
+    return window.sessionStorage.getItem(draftKey(conversationId)) ?? ''
+  } catch {
+    return ''
+  }
+}
+function writeDraft(conversationId: number, value: string) {
+  try {
+    if (value) window.sessionStorage.setItem(draftKey(conversationId), value)
+    else window.sessionStorage.removeItem(draftKey(conversationId))
+  } catch {
+    // без черновика — не беда
+  }
+}
+
 // Шаблоны сообщений выключены до второй версии (ТЗ от 01.09.2026, п. 3.1).
 const TEMPLATES_ENABLED = false
 
@@ -55,10 +76,12 @@ export const Composer = forwardRef<ComposerHandle, { conversationId: number }>(f
   const fileInput = useRef<HTMLInputElement>(null)
   const textarea = useRef<HTMLTextAreaElement>(null)
 
-  const [text, setText] = useState('')
+  const [text, setText] = useState(() => readDraft(conversationId))
   const [internal, setInternal] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [templatesOpen, setTemplatesOpen] = useState(false)
+  useEffect(() => writeDraft(conversationId, text), [conversationId, text])
+
   // Голосовое, которое нужно отправить, как только оно загрузится на сервер.
   const [autoSend, setAutoSend] = useState(false)
 

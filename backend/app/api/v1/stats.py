@@ -6,10 +6,14 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Query
 
 from app.core.deps import AdminUser, CurrentUser, Db
+from app.core.errors import Invalid
 from app.services import stats_service
 from app.services.worktime import local_zone
 
 router = APIRouter()
+
+MIN_DATE = date(1900, 1, 1)
+MAX_DATE = date(2100, 12, 31)
 
 DateFrom = Annotated[date | None, Query(description="Начало периода, ГГГГ-ММ-ДД")]
 DateTo = Annotated[date | None, Query(description="Конец периода включительно")]
@@ -26,6 +30,11 @@ async def _period(db: Db, date_from: date | None, date_to: date | None) -> tuple
     today = datetime.now(UTC).astimezone(await local_zone(db)).date()
     end = date_to or today
     start = date_from or end.replace(day=1)
+    # Границы здравого смысла: год 0001 или 9999 в запросе — либо опечатка, либо
+    # попытка заставить сервер считать тысячи лет; в расчётах прироста и
+    # границ дней это ещё и падало с «date value out of range» (500).
+    if start < MIN_DATE or end > MAX_DATE:
+        raise Invalid("Период должен лежать между 1900 и 2100 годами")
     return start, end
 
 
