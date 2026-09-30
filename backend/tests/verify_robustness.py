@@ -31,6 +31,12 @@ async def run() -> int:
         )
         codes = sorted(r.status_code for r in rs)
         c.check("10 одновременных отправок в один чат — все приняты", codes == [201] * 10, codes)
+        # После всплеска параллельных запросов в пуле десять соединений. Пока идёт
+        # ожидание отправки, сервер закрывает простаивающие (keep-alive 5 с), и
+        # httpx на следующем запросе получает ReadError — ошибка самого теста,
+        # не сервера. Берём свежее соединение.
+        await admin.aclose()
+        admin = await login(ADMIN)
         first = (await admin.post(f"{BASE}/conversations/{source}/messages", json={"text": "источник"})).json()
 
         async def _sent():  # noqa: ANN202
@@ -38,6 +44,8 @@ async def run() -> int:
             return row and all(m["status"] in ("sent", "read") for m in row if m["id"] == first["id"])
 
         await until(_sent, 15)
+        await admin.aclose()
+        admin = await login(ADMIN)
         forward = {"source_conversation_id": source, "message_ids": [first["id"]]}
         rs = await asyncio.gather(
             *[admin.post(f"{BASE}/conversations/{target}/forward", json=forward) for _ in range(8)]
