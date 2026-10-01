@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.command_bus import serve as serve_commands
 from app.core.config import settings
 from app.core.db import SessionLocal
-from app.gateway import backfill, handlers, lease, load, outbox
+from app.gateway import backfill, handlers, lease, load, outbox, topology
 from app.gateway.provider import get_provider
 from app.models import (
     TelegramAccount,
@@ -105,10 +105,30 @@ async def _stop_accounts(account_ids: set[int]) -> None:
                 log.exception("Не удалось освободить сессию аккаунта %s", account.id)
 
 
+async def _wait_for_siblings(worker_id: str, stop: asyncio.Event) -> None:
+    """Дождаться, пока поднимутся соседние процессы контейнера (но не дольше
+    `gateway_settle_seconds`), — иначе первый, кто успел, видит себя единственным
+    живым и забирает все аккаунты, а остальные ядра простаивают."""
+    expected = topology.expected_workers()
+    if expected <= 1:
+        return
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + settings.gateway_settle_seconds
+    while not stop.is_set() and loop.time() < deadline:
+        async with SessionLocal() as db:
+            alive = await lease.live_workers(db)
+        if alive >= expected:
+            return
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(stop.wait(), timeout=1.0)
+    log.info("Шлюз %s: часть соседних процессов не отозвалась за срок, иду дальше", worker_id)
+
+
 async def _lease_loop(worker_id: str, hostname: str, stop: asyncio.Event) -> None:
     async with SessionLocal() as db:
         await lease.register_worker(db, worker_id, hostname, settings.gateway_capacity)
     log.info("Шлюз %s зарегистрирован, вместимость %s", worker_id, settings.gateway_capacity)
+    await _wait_for_siblings(worker_id, stop)
 
     while not stop.is_set():
         try:

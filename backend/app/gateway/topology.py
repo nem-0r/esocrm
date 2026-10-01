@@ -47,3 +47,14 @@ def worker_count() -> int:
     if raw.isdigit() and int(raw) >= MIN_WORKERS:
         return int(raw)
     return max(MIN_WORKERS, detected_cores() - RESERVED_CORES)
+
+
+def expected_workers() -> int:
+    """Сколько процессов шлюза поднимает контейнер вместе с этим.
+
+    Супервизор кладёт число в окружение до запуска процессов (`worker.main`).
+    Нужно, чтобы процесс при старте дождался соседей и не принял себя за
+    единственного. Нет переменной (запуск без супервизора) — считаем, что он один.
+    """
+    raw = os.environ.get("GATEWAY_EXPECTED_WORKERS", "").strip()
+    return int(raw) if raw.isdigit() and int(raw) >= MIN_WORKERS else 1

@@ -1,3 +1,4 @@
+import os
 from collections.abc import AsyncIterator
 from datetime import datetime
 
@@ -37,6 +38,8 @@ class PKMixin:
 # нескольких аккаунтов параллельно) нужно хотя бы это, иначе они бы просто
 # стояли в очереди друг за другом за место в пуле.
 _MIN_GATEWAY_POOL_PER_WORKER = 2
+# То же для api: запросу менеджера нужно хотя бы несколько соединений в процессе.
+_MIN_API_POOL_PER_WORKER = 4
 
 
 def _pool_kwargs() -> dict[str, int]:
@@ -52,6 +55,17 @@ def _pool_kwargs() -> dict[str, int]:
     контейнер, а не бюджет на процесс: подставили сервер с другим числом
     ядер — бюджет остался прежним, просто иначе поделился.
     """
+    if settings.service_role == "api":
+        # Настройки заданы под два процесса (так было вписано в compose): общий
+        # бюджет — удвоенные значения, а на процесс он делится. Два процесса — те же
+        # 10 + 20, как раньше; если сервер большой и процессов 4 или 8, суммарное
+        # число соединений с базой не растёт вместе с ними (у Postgres потолок 100).
+        resolved = os.environ.get("API_WORKERS_RESOLVED", "").strip()
+        workers = int(resolved) if resolved.isdigit() and int(resolved) >= 1 else 2
+        return {
+            "pool_size": max(_MIN_API_POOL_PER_WORKER, settings.db_pool_size * 2 // workers),
+            "max_overflow": max(_MIN_API_POOL_PER_WORKER, settings.db_max_overflow * 2 // workers),
+        }
     if settings.service_role != "gateway":
         return {"pool_size": settings.db_pool_size, "max_overflow": settings.db_max_overflow}
     workers = topology.worker_count()

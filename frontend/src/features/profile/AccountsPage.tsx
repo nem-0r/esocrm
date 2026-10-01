@@ -1,6 +1,7 @@
 import {
   AlertTriangle,
   History,
+  Info,
   Plus,
   RefreshCw,
   Smartphone,
@@ -651,6 +652,20 @@ function ConnectSheet({
       <div className="flex flex-col gap-4">
         {step === 'form' && (
           <>
+            {/* Переподключение: словами о главном — в какой аккаунт входить и что
+                с данными, чтобы не ошибиться номером и не бояться потерять чаты. */}
+            {reconnecting && (
+              <p className="flex items-start gap-1.5 rounded-md bg-accent-soft px-3 py-2.5 text-xs leading-relaxed text-accent-text">
+                <Info className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+                <span>
+                  Входите в тот же аккаунт Telegram
+                  {reconnecting.tg_username ? <b>: @{reconnecting.tg_username}</b> : null}. Чаты,
+                  клиенты, сделки и вся переписка останутся на месте, а сообщения, пришедшие за
+                  время отключения, подтянутся сами. Если войти в другой аккаунт, CRM откажет и
+                  ничего не изменит.
+                </span>
+              </p>
+            )}
             <Field label="Название для CRM" hint="Видят только сотрудники" required>
               <Input
                 value={title}

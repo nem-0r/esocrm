@@ -148,6 +148,10 @@ class Settings(BaseSettings):
     gateway_lease_seconds: int = 30
     gateway_heartbeat_seconds: int = 10
     gateway_capacity: int = 25
+    # Сколько секунд процесс шлюза при старте ждёт, пока поднимутся соседние, прежде
+    # чем брать аккаунты: иначе первый, кто успел, видел бы себя единственным и
+    # забирал всё (см. lease.fair_limit).
+    gateway_settle_seconds: int = 20
 
     # Ключи приложения Telegram общие для всех аккаунтов: на доске руководитель
     # вводит только название, номер и этап воронки. Значения берутся с

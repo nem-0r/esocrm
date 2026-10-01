@@ -163,6 +163,8 @@ class _QrSession:
     expires_at: datetime | None = None
     message: str | None = None
     task: asyncio.Task | None = None
+    # Чей это аккаунт в Telegram по нашим записям. Пусто — аккаунт подключают впервые.
+    expected_user_id: int | None = None
 
     def refresh(self) -> None:
         """Перечитать токен после создания или обновления."""
@@ -429,7 +431,7 @@ class MTProtoProvider:
         except Exception:
             await client.disconnect()
             raise
-        session = _QrSession(client=client, qr=qr)
+        session = _QrSession(client=client, qr=qr, expected_user_id=account.tg_user_id)
         session.refresh()
         self._qr[account.id] = session
         session.task = asyncio.create_task(self._qr_wait(account.id, session))
@@ -493,6 +495,7 @@ class MTProtoProvider:
         """Вход состоялся: соединение становится рабочим клиентом аккаунта."""
         client = session.client
         me = await client.get_me()
+        await self._ensure_same_user(session.expected_user_id, client, me)
         result = SessionResult(
             session_string=client.session.save(),
             tg_user_id=int(me.id),
@@ -556,6 +559,11 @@ class MTProtoProvider:
             raise RetryAfter(int(exc.seconds)) from exc
 
         me = await client.get_me()
+        try:
+            await self._ensure_same_user(account.tg_user_id, client, me)
+        except ValueError:
+            self._logins.pop(account.id, None)
+            raise
         session_string = client.session.save()
         self._logins.pop(account.id, None)
         self._register_handlers(account.id, client)
@@ -573,6 +581,30 @@ class MTProtoProvider:
             tg_user_id=int(me.id),
             tg_username=me.username,
             needs_password=False,
+        )
+
+    async def _ensure_same_user(
+        self, expected: int | None, client: TelegramClient, me: Any
+    ) -> None:
+        """Переподключение — это вход в ТОТ ЖЕ аккаунт Telegram, что был.
+
+        Если ввели код или отсканировали QR из другого аккаунта, чаты и клиенты в CRM
+        остались бы привязаны к чужому человеку, а ответы менеджеров уходили бы от его
+        имени (и не доходили бы: ключи доступа к собеседникам у каждого аккаунта свои).
+        Поэтому вход отклоняется, а только что выданную сессию мы сразу отзываем в
+        Telegram — чужого сеанса «висеть» не должно.
+        """
+        if expected is None or int(me.id) == int(expected):
+            return
+        with contextlib.suppress(Exception):
+            await client.log_out()
+        with contextlib.suppress(Exception):
+            await client.disconnect()
+        who = f"@{me.username}" if getattr(me, "username", None) else f"id {me.id}"
+        raise ValueError(
+            f"Вы вошли в другой аккаунт Telegram ({who}), а нужен тот же, что был подключён. "
+            "Войдите именно в него. Если нужен другой аккаунт — подключите его отдельно, "
+            "новой записью. Вход отменён, ничего не изменилось."
         )
 
     # --------------------------------------------------------------- отправка

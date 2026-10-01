@@ -139,9 +139,10 @@ services:
       cache: {condition: service_healthy}
       storage: {condition: service_healthy}
       migrate: {condition: service_completed_successfully}
-    command: >
-      uvicorn app.main:app --host 0.0.0.0 --port 8000
-              --proxy-headers --forwarded-allow-ips='*' --workers 2
+    # Число процессов uvicorn считается при старте по ядрам и памяти, которые видны
+    # контейнеру (app/core/sizing.py): на нынешних 4 ядрах и 1,5 ГБ — те же 2, что
+    # были вписаны здесь руками; на большем сервере — больше, без правки этого файла.
+    command: python -m app.core.serve
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health || exit 1"]
       interval: 15s
@@ -151,7 +152,10 @@ services:
     logging: *default-logging
     deploy:
       resources:
-        limits: {cpus: "2.0", memory: 1536M}
+        # Лимита cpus нет намеренно (как у шлюза): число процессов уже ограничено
+        # половиной ядер, а жёсткий потолок мешал бы использовать новые ядра после
+        # апгрейда сервера. Память — страховка: по ней же sizing не берёт лишних процессов.
+        limits: {memory: 1536M}
 
   gateway:
     image: *backend-image

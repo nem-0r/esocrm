@@ -28,6 +28,7 @@ GIL не даст этого сделать потокам одного проц
 import asyncio
 import logging
 import multiprocessing
+import os
 import signal
 import threading
 from types import FrameType
@@ -57,6 +58,9 @@ def _run_one_worker() -> None:
 
 def main() -> None:
     count = topology.worker_count()
+    # Процессы запускаются по очереди, и каждый должен знать, сколько соседей
+    # ещё поднимется: иначе первый видит себя единственным (см. lease.fair_limit).
+    os.environ["GATEWAY_EXPECTED_WORKERS"] = str(count)
     log.info(
         "Поднимаю %s процессов шлюза (ядер видно контейнеру: %s)",
         count,
