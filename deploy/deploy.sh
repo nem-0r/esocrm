@@ -19,10 +19,13 @@
 #   2. скачать образы, прошедшие проверки (не вышло — собрать здесь же);
 #   3. есть новые миграции — сначала бэкап базы; база новее кода (возврат на
 #      прошлую версию) — миграции не трогаются вовсе;
+#   3б. план ресурсов под размер сервера (deploy/resource_plan.py): потолки памяти и
+#      настройки базы пересчитываются и пишутся в .env; изменилось — compose
+#      пересоздаст затронутые сервисы (docs/17-resource-autoscaling.md §5.3);
 #   4. миграции, затем api/шлюз/планировщик/веб; перезапуск nginx;
 #   5. проверка здоровья снаружи;
 #   6. успех — убрать бэкап этой выкатки и старые образы;
-#      неуспех — откат на прошлую версию, бэкап остаётся.
+#      неуспех — откат на прошлую версию (и прежний план ресурсов), бэкап остаётся.
 #
 # Миграции назад не откатываются: они только расширяющие (docs/05, D-28),
 # и прошлая версия кода работает с новой схемой.
@@ -37,6 +40,20 @@ cd "$PROJECT_DIR"
 
 COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.prod.yml}"
 ENV_FILE="${ENV_FILE:-$PROJECT_DIR/.env}"
+
+# Две выкатки (или выкатка и deploy/apply-resources.sh) одновременно на один сервер —
+# никогда: обе пересоздают контейнеры. Вторая сразу сообщает и не трогает ничего,
+# в том числе код на сервере (поэтому проверка стоит раньше отката).
+LOCK_FILE="${LOCK_FILE:-$PROJECT_DIR/deploy/.deploy.lock}"
+if command -v flock >/dev/null 2>&1; then
+    exec 9>"$LOCK_FILE"
+    if ! flock -n 9; then
+        echo "Другая выкатка или применение плана ресурсов уже идёт — дождитесь её конца" >&2
+        exit 75
+    fi
+else
+    echo "(flock не найден — защита от двойного запуска не работает; на сервере он есть)" >&2
+fi
 MIN_FREE_GB="${MIN_FREE_GB:-5}"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-180}"
 KEEP_IMAGES="${KEEP_IMAGES:-3}"
@@ -47,6 +64,12 @@ WEB_IMAGE="${WEB_IMAGE:-astra-web}"
 export IMAGE_TAG BACKEND_IMAGE WEB_IMAGE
 
 log()  { printf '[%s] %s\n' "$(date +'%H:%M:%S')" "$*"; }
+# Вернуть блок плана ресурсов к сохранённому. Код 10 — «изменился», это успех.
+restore_plan() {
+    local rc=0
+    python3 deploy/resource_plan.py --env-file "$ENV_FILE" --restore "$PLAN_PREVIOUS" >/dev/null 2>&1 || rc=$?
+    [[ "$rc" == 0 || "$rc" == 10 ]]
+}
 # Любая остановка выкатки идёт через откат: код на сервере возвращается на
 # прошлый коммит, чтобы рабочая копия совпадала с тем, что реально запущено.
 fail() { rollback "$*"; }
@@ -91,6 +114,8 @@ unset_env() {
 }
 
 BACKUP_FILE=""
+PLAN_PREVIOUS="$PROJECT_DIR/deploy/.resource-plan.previous"
+PLAN_CHANGED=false
 BUILT_LOCALLY=false
 STARTED=false
 SCHEMA_CHANGED=false
@@ -103,6 +128,14 @@ rollback() {
     local reason="$1"
     trap - ERR
     log "ВЫКАТКА НЕ УДАЛАСЬ: $reason"
+    if [[ "$PLAN_CHANGED" == true ]]; then
+        # План ресурсов — часть этой выкатки: .env должен остаться таким, каким был.
+        if restore_plan; then
+            log "план ресурсов возвращён к прежнему"
+        else
+            log "не удалось вернуть прежний план ресурсов — проверьте блок в .env"
+        fi
+    fi
     if [[ -n "$PREV_SHA" ]]; then
         git checkout -q -B main "$PREV_SHA" || log "не удалось вернуть код на $PREV_SHA"
         log "код на сервере возвращён на $PREV_SHA"
@@ -130,6 +163,11 @@ rollback() {
         # Миграции назад не крутим: они расширяющие, прошлый код с ними работает.
         # --no-deps обязателен: иначе compose запустил бы migrate прошлой версии,
         # а та не знает новую ревизию базы, падает — и api за ней не стартует.
+        if [[ "$PLAN_CHANGED" == true ]]; then
+            # База, redis и хранилище файлов могли быть пересозданы по новому плану —
+            # возвращаем им прежние значения (compose пересоздаст только изменившиеся).
+            dc up -d --no-deps --no-build db cache storage || log "откат: база/redis/хранилище не поднялись"
+        fi
         dc up -d --no-deps --no-build api gateway scheduler web || log "откат: контейнеры не поднялись"
         dc restart nginx || true
         if wait_healthy; then
@@ -249,6 +287,35 @@ else
     log "миграций нет (схема $db_rev) — бэкап не нужен"
 fi
 
+# ------------------------------------------------------------ 3б. план ресурсов
+# Потолки памяти и настройки базы по размеру сервера. Необязательный шаг: нет скрипта,
+# нет python3 или план не посчитался — выкатка идёт с прежними значениями (compose берёт
+# значения по умолчанию, равные нынешним). Если значения изменились, `up -d` ниже сам
+# пересоздаст затронутые сервисы — например, базу с новым shared_buffers (10–30 с).
+if [[ -f deploy/resource_plan.py ]] && command -v python3 >/dev/null 2>&1; then
+    if python3 deploy/resource_plan.py --env-file "$ENV_FILE" --apply --save-previous "$PLAN_PREVIOUS"; then
+        plan_rc=0
+    else
+        plan_rc=$?
+    fi
+    case "$plan_rc" in
+        0)  log "план ресурсов актуален" ;;
+        10)
+            PLAN_CHANGED=true
+            if dc config -q >/dev/null 2>&1; then
+                log "план ресурсов обновлён под размер сервера"
+            else
+                log "новый план не проходит проверку compose — возвращаю прежний"
+                restore_plan || true
+                PLAN_CHANGED=false
+            fi
+            ;;
+        *)  log "план ресурсов не применился (код $plan_rc) — иду с прежними значениями" ;;
+    esac
+else
+    log "план ресурсов пропущен (нет deploy/resource_plan.py или python3)"
+fi
+
 # ------------------------------------------------------------ 4. запуск
 set_env IMAGE_TAG "$IMAGE_TAG"
 set_env BACKEND_IMAGE "$BACKEND_IMAGE"
@@ -257,6 +324,7 @@ STARTED=true
 
 if [[ "$SCHEMA_AHEAD" == true ]]; then
     log "перезапуск сервисов (без migrate — схема базы новее кода)"
+    [[ "$PLAN_CHANGED" != true ]] || log "новый план ресурсов для базы применится при следующей обычной выкатке"
     dc up -d --no-build --no-deps --remove-orphans api gateway scheduler web
 else
     log "миграции"

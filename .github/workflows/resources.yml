@@ -1,0 +1,64 @@
+# Пересчитать ресурсы сервера после апгрейда тарифа (больше ядер/памяти) — одной кнопкой.
+#
+# Actions → «Пересчёт ресурсов сервера» → Run workflow. Что происходит на сервере —
+# deploy/apply-resources.sh: план считается заново по размеру сервера, пересоздаются
+# только контейнеры с изменившимися значениями (база перезапускается на 10–30 секунд),
+# затем проверка здоровья; не вышло — прежние значения возвращаются сами.
+# Подробнее: docs/17-resource-autoscaling.md §5.3. Секреты — те же, что у выкатки
+# (Settings → Environments → production), см. deploy.yml.
+
+name: Пересчёт ресурсов сервера
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Только показать, что изменится, ничего не применяя"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  # Вместе с выкаткой: обе пересоздают контейнеры, одновременно им нельзя.
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  resources:
+    name: Пересчёт ресурсов
+    runs-on: ubuntu-24.04
+    environment: production
+    timeout-minutes: 20
+    steps:
+      - name: ключ SSH
+        env:
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          [ -n "$KEY" ] && [ -n "$KNOWN" ] || { echo "::error::Не заданы секреты production — см. docs/16-ci-cd.md"; exit 1; }
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$KNOWN" > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: пересчёт
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER_NAME: ${{ secrets.DEPLOY_USER }}
+          PORT: ${{ secrets.DEPLOY_PORT || '22' }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || '/opt/astra' }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          flags="--yes"
+          [ "$DRY_RUN" = "true" ] && flags="--dry-run"
+          ssh -i ~/.ssh/deploy_key -p "$PORT" \
+            -o BatchMode=yes -o StrictHostKeyChecking=yes -o ServerAliveInterval=30 \
+            "$USER_NAME@$HOST" \
+            "cd '$DEPLOY_PATH' && test -x deploy/apply-resources.sh && ./deploy/apply-resources.sh $flags"
+
+      - name: убрать ключ
+        if: always()
+        run: rm -f ~/.ssh/deploy_key

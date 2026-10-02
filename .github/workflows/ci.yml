@@ -66,6 +66,11 @@ jobs:
       - name: pytest
         working-directory: backend
         run: python -m pytest tests/unit -q -p no:cacheprovider
+      # План ресурсов под размер сервера (deploy/resource_plan.py): формулы, правила
+      # безопасности, запись в .env. Только стандартная библиотека — на сервере он
+      # запускается без установки зависимостей.
+      - name: pytest · план ресурсов
+        run: python -m pytest deploy/tests -q -p no:cacheprovider
 
   frontend:
     name: Фронтенд · линт, типы, тесты, сборка
@@ -152,6 +157,12 @@ jobs:
           IMAGE_TAG: ${{ steps.names.outputs.tag }}
           MINIO_IMAGE: astra-minio:ci
         run: docker compose -f docker-compose.ci.yml up -d --no-build --wait --wait-timeout 300
+
+      # План ресурсов вместе с настоящим docker-compose.prod.yml: что попадёт в
+      # контейнеры (потолки памяти, веса процессора, флаги Postgres) на четырёх размерах
+      # сервера, и что без плана значения ровно нынешние. Контейнеры не запускаются.
+      - name: план ресурсов · compose
+        run: python3 deploy/check-resource-plan.py
 
       - name: все проверки (как make ci-verify)
         env:

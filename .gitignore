@@ -51,3 +51,5 @@ console-after-login.log
 desktop-chats.jpeg
 *.log
 deploy/.releases
+deploy/.resource-plan.previous
+deploy/.deploy.lock

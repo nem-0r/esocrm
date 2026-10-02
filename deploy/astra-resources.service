@@ -1,0 +1,28 @@
+# Пересчёт плана ресурсов при загрузке сервера (docs/17-resource-autoscaling.md §5.3).
+#
+# Сценарий «улучшил тариф → сервер перезагрузился → всё подхватилось»: после загрузки
+# Docker поднимает контейнеры со старыми потолками памяти, а этот юнит пересчитывает план
+# и, если размер сервера изменился, пересоздаёт нужные контейнеры. План не изменился —
+# ничего не делает. Выключатель — ASTRA_AUTOSIZE=off в .env.
+#
+# НЕ установлен автоматически: включается один раз командой deploy/install-resources-service.sh
+# после того, как применение плана вручную (deploy/apply-resources.sh) отработало на
+# вашем сервере.
+
+[Unit]
+Description=Астра CRM: пересчёт ресурсов под размер сервера
+After=docker.service network-online.target
+Wants=network-online.target
+Requires=docker.service
+ConditionPathExists=/opt/astra/deploy/apply-resources.sh
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/astra
+# Дать контейнерам, запущенным самим Docker, подняться, прежде чем сверять потолки.
+ExecStartPre=/bin/sleep 45
+ExecStart=/opt/astra/deploy/apply-resources.sh --if-changed
+TimeoutStartSec=900
+
+[Install]
+WantedBy=multi-user.target

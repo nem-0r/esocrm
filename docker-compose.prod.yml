@@ -44,10 +44,25 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
+    # Настройки считаются по размеру сервера (deploy/resource_plan.py пишет значения
+    # в .env, docs/17-resource-autoscaling.md §5.3); значения по умолчанию — прежние.
+    # random_page_cost=1.1 и effective_io_concurrency=200 — для SSD; jit=off — для
+    # нагрузки «много коротких запросов», где компиляция только мешает.
     command: >
-      postgres -c shared_buffers=512MB -c work_mem=16MB
-               -c max_connections=100 -c random_page_cost=1.1
-               -c effective_cache_size=1536MB
+      postgres -c shared_buffers=${ASTRA_DB_SHARED_BUFFERS:-512MB}
+               -c work_mem=${ASTRA_DB_WORK_MEM:-16MB}
+               -c maintenance_work_mem=${ASTRA_DB_MAINTENANCE_WORK_MEM:-64MB}
+               -c max_connections=${ASTRA_DB_MAX_CONNECTIONS:-100}
+               -c effective_cache_size=${ASTRA_DB_EFFECTIVE_CACHE_SIZE:-1536MB}
+               -c max_wal_size=${ASTRA_DB_MAX_WAL_SIZE:-1GB}
+               -c random_page_cost=1.1 -c effective_io_concurrency=200 -c jit=off
+    # /dev/shm у контейнера по умолчанию 64 МБ — параллельным запросам по мере роста
+    # базы этого не хватает.
+    shm_size: ${ASTRA_DB_SHM:-64m}
+    # Приоритеты (docs/17 §5.4): при нехватке процессора выигрывает база, при нехватке
+    # памяти ядро убивает кого угодно, но не её.
+    cpu_shares: ${ASTRA_DB_CPU_SHARES:-2048}
+    oom_score_adj: -500
     # Порт наружу не публикуется: до базы дотягиваются только контейнеры.
     # Доступ администратора — через `docker compose exec db psql` или ssh-туннель.
     expose: ["5432"]
@@ -61,7 +76,9 @@ services:
     logging: *default-logging
     deploy:
       resources:
-        limits: {cpus: "2.0", memory: 2G}
+        # Жёсткого потолка процессора нет: при свободных ядрах база пользуется всеми,
+        # при нехватке работают веса cpu_shares.
+        limits: {memory: "${ASTRA_DB_MEMORY:-2G}"}
 
   cache:
     image: redis:7-alpine
@@ -70,7 +87,7 @@ services:
     # но лимит памяти нужен, иначе Redis съест всё и его убьёт ядро.
     command: >
       redis-server --appendonly no --save ""
-                   --maxmemory 384mb --maxmemory-policy allkeys-lru
+                   --maxmemory ${ASTRA_CACHE_MAXMEMORY:-384mb} --maxmemory-policy allkeys-lru
     expose: ["6379"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
@@ -81,7 +98,7 @@ services:
     logging: *default-logging
     deploy:
       resources:
-        limits: {cpus: "0.5", memory: 512M}
+        limits: {cpus: "0.5", memory: "${ASTRA_CACHE_MEMORY:-512M}"}
 
   storage:
     image: minio/minio:latest
@@ -101,9 +118,12 @@ services:
       retries: 12
       start_period: 20s
     logging: *default-logging
+    # Хранилище файлов — фоновая нагрузка (подтяжка истории пишет в него гигабайты):
+    # при нехватке процессора уступает базе и api.
+    cpu_shares: ${ASTRA_STORAGE_CPU_SHARES:-512}
     deploy:
       resources:
-        limits: {cpus: "1.0", memory: 1G}
+        limits: {memory: "${ASTRA_STORAGE_MEMORY:-1G}"}
 
   # Одноразовый сервис. Отрабатывает и завершается; api ждёт кода возврата 0.
   # Так схема базы обновляется ровно один раз, а не в каждом контейнере,
@@ -150,12 +170,14 @@ services:
       retries: 5
       start_period: 30s
     logging: *default-logging
+    # Менеджеры важнее фоновой загрузки: api получает вдвое больший вес, чем шлюз.
+    cpu_shares: ${ASTRA_API_CPU_SHARES:-1024}
     deploy:
       resources:
         # Лимита cpus нет намеренно (как у шлюза): число процессов уже ограничено
         # половиной ядер, а жёсткий потолок мешал бы использовать новые ядра после
         # апгрейда сервера. Память — страховка: по ней же sizing не берёт лишних процессов.
-        limits: {memory: 1536M}
+        limits: {memory: "${ASTRA_API_MEMORY:-1536M}"}
 
   gateway:
     image: *backend-image
@@ -188,9 +210,14 @@ services:
     # (app/gateway/load.py), а не по заранее угаданному числу. 1.5G оставляет
     # весь остальной стек (db+cache+storage+api+scheduler+web+nginx = 6080M)
     # в пределах ~7.6 ГБ из 7.7 ГБ реальных — тот же запас, что был раньше.
+    # Подтяжка истории — фон: шлюз получает меньший вес, чем база и api, и при
+    # нехватке памяти ядро снимает именно его (супервизор и аренда аккаунтов
+    # восстанавливают его за секунды), а не базу.
+    cpu_shares: ${ASTRA_GATEWAY_CPU_SHARES:-512}
+    oom_score_adj: 300
     deploy:
       resources:
-        limits: {memory: 1536M}
+        limits: {memory: "${ASTRA_GATEWAY_MEMORY:-1536M}"}
 
   scheduler:
     image: *backend-image
