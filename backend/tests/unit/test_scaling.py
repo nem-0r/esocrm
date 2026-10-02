@@ -173,3 +173,59 @@ def test_qr_login_with_other_account_is_rejected():
         asyncio.run(provider._qr_finish(6, session))  # type: ignore[arg-type]
     assert client.logged_out
     assert 6 not in provider._clients
+
+
+# ------------------------------------- процессы шлюза: ядра и потолок памяти
+
+
+@pytest.mark.parametrize(
+    ("cores", "limit_mb", "expected"),
+    [
+        (4, 1536, 3),     # нынешний прод: ядра − 1
+        (16, 1536, 3),    # много ядер, но потолок 1,5 ГБ: 15 процессов не влезли бы
+        (8, 3072, 7),     # потолок подняли — растём вслед за ядрами
+        (64, None, 12),   # потолка нет — только ядра и верхняя граница
+        (2, 1536, 1),     # маленький сервер: не меньше одного
+        (4, 512, 1),      # памяти едва хватает на один процесс
+    ],
+)
+def test_gateway_worker_count_follows_cores_and_memory(monkeypatch, cores, limit_mb, expected):
+    monkeypatch.delenv("GATEWAY_WORKERS", raising=False)
+    monkeypatch.setattr(topology, "detected_cores", lambda: cores)
+    monkeypatch.setattr(topology, "cgroup_memory_limit_mb", lambda: limit_mb)
+    assert topology.worker_count() == expected
+
+
+def test_gateway_workers_explicit_override_wins(monkeypatch):
+    monkeypatch.setenv("GATEWAY_WORKERS", "1")
+    monkeypatch.setattr(topology, "detected_cores", lambda: 16)
+    monkeypatch.setattr(topology, "cgroup_memory_limit_mb", lambda: 1536)
+    assert topology.worker_count() == 1
+
+
+# ------------------------------------------------ ffmpeg: общий предел на сервер
+
+
+@pytest.mark.parametrize(
+    ("cores", "workers", "expected"),
+    [(4, 2, 2), (4, 4, 1), (16, 8, 2), (2, 2, 1), (8, 3, 2)],
+)
+def test_ffmpeg_parallelism_shrinks_when_api_workers_multiply(monkeypatch, cores, workers, expected):
+    from app.core import hostinfo
+    from app.services import media
+
+    monkeypatch.setattr(hostinfo, "detected_cores", lambda: cores)
+    monkeypatch.setenv("API_WORKERS_RESOLVED", str(workers))
+    assert media._max_parallel() == expected
+
+
+def test_ffmpeg_runs_niced():
+    """Конвертация идёт с пониженным приоритетом — менеджерам и базе процессор нужнее."""
+    import shutil
+
+    from app.services import media
+
+    if shutil.which("nice") is None:
+        pytest.skip("нет nice")
+    out = asyncio.run(media._run(["sh", "-c", "cat /proc/self/stat | cut -d' ' -f19"], 5, stdout=True))
+    assert out.strip() == b"10", out

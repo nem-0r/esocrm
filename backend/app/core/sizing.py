@@ -18,7 +18,7 @@
 
 import os
 
-from app.gateway.topology import detected_cores
+from app.core.hostinfo import cgroup_memory_limit_mb, detected_cores
 
 MIN_WORKERS = 2
 MAX_WORKERS = 8
@@ -27,24 +27,9 @@ MB_PER_WORKER = 250
 MB_BASE = 300
 
 
-def _read_int(path: str) -> int | None:
-    try:
-        with open(path) as handle:
-            raw = handle.read().strip()
-    except OSError:
-        return None
-    return int(raw) if raw.isdigit() else None
-
-
 def memory_limit_mb() -> int | None:
-    """Потолок памяти контейнера (cgroup v2, затем v1), МБ. `None` — не задан."""
-    limit = _read_int("/sys/fs/cgroup/memory.max") or _read_int(
-        "/sys/fs/cgroup/memory/memory.limit_in_bytes"
-    )
-    # Без ограничения cgroup отдаёт «max» или заведомо огромное число.
-    if limit is None or limit > 1 << 50:
-        return None
-    return limit // (1024 * 1024)
+    """Потолок памяти контейнера, МБ. `None` — не задан."""
+    return cgroup_memory_limit_mb()
 
 
 def api_workers() -> int:

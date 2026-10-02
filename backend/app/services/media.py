@@ -27,10 +27,27 @@ from pathlib import PurePosixPath
 
 log = logging.getLogger("astra.media")
 
-# Одновременно на процесс. На сервере два ядра и соседи (база, шлюз) — больше
-# двух тяжёлых задач разом превращают перекодирование в торможение всего.
-_MAX_PARALLEL = 2
+# Сколько конвертаций разом на процесс api. Больше двух тяжёлых задач на процесс
+# превращают перекодирование в торможение всего, а процессов api бывает несколько
+# (их число растёт с ядрами сервера, core/sizing.py), поэтому предел на процесс
+# уменьшается, когда ядер на процесс остаётся мало: на 4 ядрах и 2 процессах — по 2
+# (всего 4, как и было), на 4 ядрах и 4 процессах — по одной.
+_MAX_PARALLEL_CAP = 2
 _semaphore: asyncio.Semaphore | None = None
+
+# Конвертация — фон: менеджерам и базе процессор нужнее, поэтому ffmpeg идёт с
+# пониженным приоритетом (nice +10) и при нехватке уступает.
+_NICE_LEVEL = "10"
+
+
+def _max_parallel() -> int:
+    from app.core.hostinfo import detected_cores
+
+    try:
+        workers = max(1, int(os.environ.get("API_WORKERS_RESOLVED", "") or 2))
+    except ValueError:
+        workers = 2
+    return max(1, min(_MAX_PARALLEL_CAP, detected_cores() // workers))
 
 PROBE_TIMEOUT = 30.0
 TRANSCODE_TIMEOUT = 180.0
@@ -59,15 +76,16 @@ def available() -> bool:
 def _sem() -> asyncio.Semaphore:
     global _semaphore
     if _semaphore is None:
-        _semaphore = asyncio.Semaphore(_MAX_PARALLEL)
+        _semaphore = asyncio.Semaphore(_max_parallel())
     return _semaphore
 
 
 async def _run(args: list[str], limit_seconds: float, *, stdout: bool = False) -> bytes:
     """Запустить ffmpeg/ffprobe и дождаться. Истёк срок — процесс убивается."""
     async with _sem():
+        niced = ["nice", "-n", _NICE_LEVEL, *args] if shutil.which("nice") else args
         proc = await asyncio.create_subprocess_exec(
-            *args,
+            *niced,
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE if stdout else asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,

@@ -15,6 +15,11 @@ dependencies = [
   "cryptography>=43",
   "python-multipart>=0.0.17",
   "telethon>=1.37",
+  # Быстрое шифрование MTProto (AES-IGE). Без него Telethon считает его на чистом
+  # Python (pyaes): на сервере 4,5 МБ/с на ядро против 405 МБ/с с cryptg — в 90 раз
+  # (замер 01.10.2026, docs/17-resource-autoscaling.md §3.2). Подтяжка истории
+  # скачивает гигабайты файлов, и без cryptg она держала бы все ядра шлюза занятыми.
+  "cryptg>=0.5",
   # Прокси для MTProto: у каждого номера свой выход в сеть (решение D-21).
   "python-socks[asyncio]>=2.5",
   "apscheduler>=3.10",

@@ -16,23 +16,21 @@ scheduler, и на однопроцессорной машине это не д�
 
 import os
 
+from app.core.hostinfo import cgroup_memory_limit_mb, detected_cores
+
+__all__ = ["detected_cores", "expected_workers", "worker_count"]
+
 RESERVED_CORES = 1
 MIN_WORKERS = 1
-
-
-def detected_cores() -> int:
-    """Ядра, реально видные ЭТОМУ процессу.
-
-    `sched_getaffinity` учитывает ограничение контейнера через cpuset (если
-    оно есть), `cpu_count` — честное число ядер хоста в остальных случаях.
-    Не имеет отношения к Docker `cpus:` — тот лимит делит время ядра, а не
-    прячет ядра из вида, и никак не сузил бы это число."""
-    try:
-        return len(os.sched_getaffinity(0))
-    except AttributeError:
-        # sched_getaffinity есть только на Linux — на другой платформе просто
-        # берём общее число ядер, какое видит процесс.
-        return os.cpu_count() or 1
+# Больше двенадцати процессов не имеет смысла: дальше упирается база, а каждый
+# процесс стоит ≈ 130 МБ памяти (замер на проде, docs/17-resource-autoscaling.md §2).
+MAX_WORKERS = 12
+# Память процесса шлюза и супервизора (измерено на проде) и доля потолка памяти
+# контейнера, которую можно отдать под сами процессы: остальное — под аккаунты
+# (сессии Telegram) и всплески (скачивание файла до 20 МБ в память).
+GATEWAY_PROCESS_MB = 128
+GATEWAY_SUPERVISOR_MB = 94
+PROCESSES_MEMORY_SHARE = 0.35
 
 
 def worker_count() -> int:
@@ -46,7 +44,24 @@ def worker_count() -> int:
     raw = os.environ.get("GATEWAY_WORKERS", "").strip()
     if raw.isdigit() and int(raw) >= MIN_WORKERS:
         return int(raw)
-    return max(MIN_WORKERS, detected_cores() - RESERVED_CORES)
+    by_cores = max(MIN_WORKERS, detected_cores() - RESERVED_CORES)
+    by_memory = memory_bound_workers()
+    count = by_cores if by_memory is None else min(by_cores, by_memory)
+    return max(MIN_WORKERS, min(count, MAX_WORKERS))
+
+
+def memory_bound_workers() -> int | None:
+    """Сколько процессов выдерживает потолок памяти контейнера; `None` — потолка нет.
+
+    Число процессов зависит только от ядер, и на сервере с 16 ядрами и прежним
+    потолком 1,5 ГБ получилось бы 15 × 128 МБ ≈ 1,9 ГБ — ядро убило бы контейнер,
+    все аккаунты переподключились бы разом. Ограничиваем тем, что влезает.
+    """
+    limit = cgroup_memory_limit_mb()
+    if limit is None:
+        return None
+    room = limit * PROCESSES_MEMORY_SHARE - GATEWAY_SUPERVISOR_MB
+    return max(MIN_WORKERS, int(room // GATEWAY_PROCESS_MB))
 
 
 def expected_workers() -> int:

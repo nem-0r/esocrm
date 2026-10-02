@@ -792,15 +792,29 @@ class MTProtoProvider:
         Идём от новых к старым и обрываем диалог, как только упёрлись в границу:
         Telegram отдаёт историю страницами, и тянуть всё подряд — это часы
         ожидания и почти гарантированный FloodWait.
+
+        Лишней работы не делаем (docs/17-resource-autoscaling.md §3.3):
+
+        - диалог, где последнее сообщение старше границы, пропускаем целиком — без
+          запроса и без паузы (раньше каждый из тысяч диалогов стоил запрос и 0,4 с);
+        - сообщение, которое CRM уже знает, пропускаем до скачивания файла: раньше
+          файл качался (и шифровался на процессоре), а потом выбрасывался как дубль —
+          переподключение аккаунта заново скачивало всё медиа переписки.
         """
         client = await self._guarded(account)
         async for dialog in client.iter_dialogs():
             if not dialog.is_user or dialog.entity.bot:
                 continue
+            if _dialog_older_than(dialog, since):
+                continue
+            chat_id = int(dialog.entity.id)
+            known = await _known_since(account.id, chat_id, since)
             try:
                 async for message in client.iter_messages(dialog.entity, limit=per_dialog_limit):
                     if message.date.astimezone(UTC) < since:
                         break
+                    if int(message.id) in known:
+                        continue
                     try:
                         inbound = await mtproto_receive.to_inbound(
                             client, message, account.id, live=False
@@ -848,7 +862,7 @@ class MTProtoProvider:
                 )
                 continue
             # Пауза между диалогами: ровный темп дешевле, чем запрет на час.
-            await asyncio.sleep(0.4)
+            await asyncio.sleep(DIALOG_PAUSE_SECONDS)
 
     # ------------------------------------------------------------ соединение
 
@@ -906,6 +920,53 @@ class MTProtoProvider:
         if peer is not None and peer.access_hash is not None:
             return InputPeerUser(user_id=chat_id, access_hash=peer.access_hash)
         return await client.get_input_entity(chat_id)
+
+
+# Пауза между диалогами при подтяжке истории, секунд.
+DIALOG_PAUSE_SECONDS = 0.4
+
+
+def _dialog_older_than(dialog: Any, since: datetime) -> bool:
+    """В диалоге нет ничего свежее границы: его последнее сообщение старше неё.
+
+    Даты нет (пустой диалог, странный ответ) — считаем, что смотреть надо:
+    лишний запрос дешевле пропущенной переписки.
+    """
+    last = getattr(dialog, "date", None)
+    if last is None:
+        return False
+    return last.astimezone(UTC) < since
+
+
+async def _known_since(account_id: int, chat_id: int, since: datetime) -> set[int]:
+    """Номера Telegram, которые CRM уже знает в диалоге внутри окна подтяжки.
+
+    Окно берём с запасом в двое суток: дата сообщения в базе — это дата Telegram для
+    входящих, но у отправленных из CRM — момент отправки, чуть позже.
+    """
+    from datetime import timedelta
+
+    from sqlalchemy import select
+
+    from app.core.db import SessionLocal
+    from app.models import Conversation, Message
+
+    async with SessionLocal() as db:
+        rows = await db.execute(
+            select(Message.tg_message_id, Message.tg_extra_ids)
+            .join(Conversation, Conversation.id == Message.conversation_id)
+            .where(
+                Conversation.account_id == account_id,
+                Conversation.tg_chat_id == chat_id,
+                Message.created_at >= since - timedelta(days=2),
+            )
+        )
+        known: set[int] = set()
+        for tg_id, extra in rows.all():
+            if tg_id:
+                known.add(int(tg_id))
+            known.update(int(value) for value in (extra or []))
+    return known
 
 
 async def _known_tg_ids(account_id: int, chat_id: int) -> set[int]:
