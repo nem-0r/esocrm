@@ -53,3 +53,10 @@ desktop-chats.jpeg
 deploy/.releases
 deploy/.resource-plan.previous
 deploy/.deploy.lock
+
+# Посторонние файлы в корне рабочей папки — не часть CRM. В FinanceBot_ready лежат чеки
+# клиентов (имя папки оканчивается пробелом, поэтому шаблон со звёздочкой); репозиторий
+# публичный, им здесь не место.
+/FinanceBot_ready*/
+/ok/
+/robokassa_snapshot_*.md
