@@ -70,6 +70,12 @@ restore_plan() {
     python3 deploy/resource_plan.py --env-file "$ENV_FILE" --restore "$PLAN_PREVIOUS" >/dev/null 2>&1 || rc=$?
     [[ "$rc" == 0 || "$rc" == 10 ]]
 }
+# Дамп базы перед тем, как её менять; путь к нему — последняя строка вывода backup.sh.
+take_backup() {
+    BACKUP_FILE="$(./deploy/backup.sh --db-only | tail -n 1)"
+    [[ -s "$BACKUP_FILE" ]] || fail "бэкап базы не получился — выкатку не начинаю"
+    log "бэкап: $BACKUP_FILE"
+}
 # Любая остановка выкатки идёт через откат: код на сервере возвращается на
 # прошлый коммит, чтобы рабочая копия совпадала с тем, что реально запущено.
 fail() { rollback "$*"; }
@@ -280,9 +286,7 @@ if [[ -n "$db_rev" && "$db_rev" != "$head_rev" ]] \
     log "схема базы ($db_rev) новее этой версии ($head_rev) — возврат на прошлую версию, миграции не трогаю"
 elif [[ "$db_rev" != "$head_rev" ]]; then
     log "в новой версии миграции (${db_rev:-нет} → $head_rev) — сначала бэкап базы"
-    BACKUP_FILE="$(./deploy/backup.sh --db-only | tail -n 1)"
-    [[ -s "$BACKUP_FILE" ]] || fail "бэкап базы не получился — выкатку не начинаю"
-    log "бэкап: $BACKUP_FILE"
+    take_backup
 else
     log "миграций нет (схема $db_rev) — бэкап не нужен"
 fi
@@ -312,6 +316,13 @@ if [[ -f deploy/resource_plan.py ]] && command -v python3 >/dev/null 2>&1; then
             ;;
         *)  log "план ресурсов не применился (код $plan_rc) — иду с прежними значениями" ;;
     esac
+    # Новый план пересоздаст базу (10–30 с). Данные на её томе не меняются, но миграций в
+    # этой выкатке может не быть — тогда шаг 3 бэкап не делал, а страховка нужна. При
+    # возврате на прошлую версию (SCHEMA_AHEAD) базу ниже не трогают — бэкап не нужен.
+    if [[ "$PLAN_CHANGED" == true && "$SCHEMA_AHEAD" != true && -z "$BACKUP_FILE" ]]; then
+        log "база пересоздастся с новыми настройками — сначала бэкап"
+        take_backup
+    fi
 else
     log "план ресурсов пропущен (нет deploy/resource_plan.py или python3)"
 fi

@@ -11,9 +11,10 @@
 #                                              # (для запуска при загрузке сервера)
 #   ./deploy/apply-resources.sh --dry-run      # только показать
 #
-# Что делает: пересчитывает план → записывает блок в .env → `docker compose up -d`
-# пересоздаёт только сервисы, у которых значения изменились (база — 10–30 с простоя) →
-# ждёт здоровья. Не вышло — возвращает прежний блок и прежние значения.
+# Что делает: пересчитывает план → записывает блок в .env → снимает бэкап базы →
+# `docker compose up -d` пересоздаёт только сервисы, у которых значения изменились (база —
+# 10–30 с простоя) → ждёт здоровья. Успех — бэкап удаляется. Не вышло — возвращает прежний
+# блок и прежние значения, бэкап остаётся.
 #
 # Параллельно с выкаткой не работает: обе берут одну блокировку.
 
@@ -27,7 +28,7 @@ HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-180}"
 PLAN_PREVIOUS="$PROJECT_DIR/deploy/.resource-plan.previous"
 # Сервисы, которые пересоздаёт и проверяет скрипт. Меняются только на репетиции
 # (там поднимают не весь стек): `RESOURCE_SERVICES="db cache" HEALTH_SERVICES=db
-# HEALTH_URL=- RESTART_NGINX=false`.
+# HEALTH_URL=- RESTART_NGINX=false BACKUP_BEFORE_APPLY=false`.
 RESOURCE_SERVICES="${RESOURCE_SERVICES:-db cache storage api gateway scheduler web}"
 HEALTH_SERVICES="${HEALTH_SERVICES:-api web nginx}"
 RESTART_NGINX="${RESTART_NGINX:-true}"
@@ -117,6 +118,20 @@ if ! dc config -q >/dev/null 2>&1; then
     exit 1
 fi
 
+# Страховка: ниже база пересоздаётся с новыми настройками. Данные на её томе не меняются,
+# но дамп перед пересозданием — привычная осторожность. Успех — дамп удаляется, как после
+# выкатки; сбой — остаётся. На репетиции отключается: BACKUP_BEFORE_APPLY=false.
+BACKUP_FILE=""
+if [[ "${BACKUP_BEFORE_APPLY:-true}" == true ]]; then
+    if BACKUP_FILE="$(./deploy/backup.sh --db-only | tail -n 1)" && [[ -s "$BACKUP_FILE" ]]; then
+        log "бэкап базы: $BACKUP_FILE"
+    else
+        log "бэкап базы не получился — возвращаю прежний план, ничего не пересоздаю"
+        plan --restore "$PLAN_PREVIOUS" >/dev/null || true
+        exit 1
+    fi
+fi
+
 log "применяю: пересоздаются только сервисы с изменившимися значениями"
 # Список сервисов нарочно разбивается на слова:
 # shellcheck disable=SC2086
@@ -126,10 +141,15 @@ dc up -d --no-build --no-deps $RESOURCE_SERVICES
 
 if wait_healthy; then
     log "готово: сервисы здоровы, $HEALTH_URL отвечает"
+    if [[ -n "$BACKUP_FILE" ]]; then
+        rm -f "$BACKUP_FILE"
+        log "бэкап этого применения удалён — страховка больше не нужна"
+    fi
     exit 0
 fi
 
 log "СЕРВИСЫ НЕ СТАЛИ ЗДОРОВЫМИ — возвращаю прежний план"
+[[ -z "$BACKUP_FILE" ]] || log "бэкап базы до применения сохранён: $BACKUP_FILE"
 plan --restore "$PLAN_PREVIOUS" >/dev/null || true
 # shellcheck disable=SC2086
 dc up -d --no-build --no-deps $RESOURCE_SERVICES || true
