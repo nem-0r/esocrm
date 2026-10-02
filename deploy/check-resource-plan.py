@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -44,11 +45,15 @@ def to_bytes(value: object) -> int:
     return int(text[:-1]) * units[text[-1].upper()]
 
 
-def compose_config(env_path: str) -> dict:
+def compose_config(project_dir: str) -> dict:
+    """`docker compose config` в каталоге, где лежат только копия compose-файла и `.env` —
+    как на сервере. В репозитории `.env` нет (он секретный), а `env_file: [.env]` у сервисов
+    требует его присутствия, поэтому на чистой машине (CI) запуск из корня репозитория падал."""
     result = subprocess.run(
-        ["docker", "compose", "-f", os.path.join(ROOT, "docker-compose.prod.yml"),
-         "--env-file", env_path, "config", "--format", "json"],
-        capture_output=True, text=True, cwd=ROOT,
+        ["docker", "compose", "--project-directory", project_dir,
+         "-f", os.path.join(project_dir, "docker-compose.prod.yml"),
+         "--env-file", os.path.join(project_dir, ".env"), "config", "--format", "json"],
+        capture_output=True, text=True, cwd=project_dir,
     )
     if result.returncode != 0:
         raise SystemExit(f"compose отверг конфигурацию: {result.stderr}")
@@ -61,12 +66,13 @@ def limit(service: dict) -> int:
 
 def main() -> int:
     with tempfile.TemporaryDirectory() as tmp:
+        shutil.copy(os.path.join(ROOT, "docker-compose.prod.yml"), tmp)
         env_path = os.path.join(tmp, ".env")
 
         print("Без плана: значения ровно нынешние")
         with open(env_path, "w") as handle:
             handle.write(BASE_ENV)
-        services = compose_config(env_path)["services"]
+        services = compose_config(tmp)["services"]
         check("база: потолок 2 ГБ, веса и защита от OOM заданы",
               limit(services["db"]) == 2 * 1024**3 and str(services["db"]["cpu_shares"]) == "2048"
               and str(services["db"]["oom_score_adj"]) == "-500", services["db"].get("deploy"))
@@ -95,7 +101,7 @@ def main() -> int:
             )
             check("план посчитан и записан", code.returncode == rp.EXIT_CHANGED, code.stderr or code.stdout[-200:])
             plan = rp.compute(cores, ram, rp.DEFAULT_ACCOUNTS)
-            services = compose_config(env_path)["services"]
+            services = compose_config(tmp)["services"]
             for service, key in (("db", "ASTRA_DB_MEMORY"), ("api", "ASTRA_API_MEMORY"),
                                  ("gateway", "ASTRA_GATEWAY_MEMORY"), ("storage", "ASTRA_STORAGE_MEMORY"),
                                  ("cache", "ASTRA_CACHE_MEMORY")):
@@ -114,8 +120,13 @@ def main() -> int:
                   int(services["db"]["cpu_shares"]) > int(services["api"]["cpu_shares"]) > int(services["gateway"]["cpu_shares"]))
             check("шлюзу, а не базе, достаётся при нехватке памяти",
                   int(services["gateway"]["oom_score_adj"]) > 0 > int(services["db"]["oom_score_adj"]))
+            # Штамп читает страница состояния сервера: он должен быть в окружении сервиса
+            # api (compose подмешивает туда env_file), а не только лежать в .env.
+            api_env = services["api"].get("environment") or {}
+            stamp = {k: v for k, v in api_env.items() if k.startswith("ASTRA_PLAN")}
             check("штамп плана доезжает до контейнеров api (для страницы состояния)",
-                  "ASTRA_PLAN_CORES" in open(env_path).read())
+                  stamp.get("ASTRA_PLAN_CORES") == str(cores) and stamp.get("ASTRA_PLAN_RAM_MB") == str(ram),
+                  stamp)
     print(f"\nИтог: {'всё сошлось' if not failed else str(len(failed)) + ' не сошлось'}")
     return 1 if failed else 0
 
