@@ -210,7 +210,9 @@ def test_gateway_workers_explicit_override_wins(monkeypatch):
     ("cores", "workers", "expected"),
     [(4, 2, 2), (4, 4, 1), (16, 8, 2), (2, 2, 1), (8, 3, 2)],
 )
-def test_ffmpeg_parallelism_shrinks_when_api_workers_multiply(monkeypatch, cores, workers, expected):
+def test_ffmpeg_parallelism_shrinks_when_api_workers_multiply(
+    monkeypatch, cores, workers, expected
+):
     from app.core import hostinfo
     from app.services import media
 
@@ -227,5 +229,6 @@ def test_ffmpeg_runs_niced():
 
     if shutil.which("nice") is None:
         pytest.skip("нет nice")
-    out = asyncio.run(media._run(["sh", "-c", "cat /proc/self/stat | cut -d' ' -f19"], 5, stdout=True))
+    command = ["sh", "-c", "cat /proc/self/stat | cut -d' ' -f19"]
+    out = asyncio.run(media._run(command, 5, stdout=True))
     assert out.strip() == b"10", out

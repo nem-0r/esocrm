@@ -1,5 +1,5 @@
-"""Самоограничение шлюза по нагрузке хоста — по двум показателям сразу:
-загрузке процессора и занятости памяти.
+"""Самоограничение шлюза по нагрузке — по трём показателям сразу: загрузке процессора
+хоста, занятости памяти хоста и занятости потолка памяти самого контейнера.
 
 Зачем. Несколько процессов шлюза делят один сервер (docs/07-architecture.md
 §2: аренда рассчитана именно на несколько воркеров), и число процессов теперь
@@ -15,12 +15,16 @@
 придерживает рост, но не отпускает уже арендованное (обрывать на полпути
 отправку хуже, чем временно не расти).
 
-Оба показателя — ХОСТА в целом, а не cgroup-метрика контейнера: вопрос именно
-в том, занят ли сервер целиком, потому что на нём же обычно крутятся
-api/db/redis. Несколько процессов, независимо читающих одни и те же числа,
-не мешают друг другу — `SKIP LOCKED` в самой аренде (`lease.claim_accounts`)
-и так не даст двум воркерам забрать один аккаунт; здесь только верхняя
-граница того, сколько новых один воркер попробует взять за этот заход.
+Процессор и память — ХОСТА в целом: вопрос в том, занят ли сервер целиком, потому
+что на нём же крутятся api/db/redis. Третий показатель — занятость потолка памяти
+САМОГО контейнера шлюза (без кеша файлов): этот потолок задан Docker и не растёт сам,
+а когда контейнер до него доходит, ядро убивает его целиком — все аккаунты разом.
+Так шлюз сам измеряет, сколько на деле занимает один аккаунт, и перестаёт брать новые
+до того, как упрётся, а не по заранее вписанному числу.
+Несколько процессов, независимо читающих одни и те же числа, не мешают друг другу —
+`SKIP LOCKED` в самой аренде (`lease.claim_accounts`) и так не даст двум воркерам
+забрать один аккаунт; здесь только верхняя граница того, сколько новых один воркер
+попробует взять за этот заход.
 
 Порог — доля занятости (0..1), а не абсолютное число: одна и та же логика
 верна и на сервере с 4 ГБ, и на сервере с 64 ГБ, без перенастройки при
@@ -28,7 +32,7 @@ api/db/redis. Несколько процессов, независимо чит
 к порогу.
 """
 
-import os
+from app.core import hostinfo
 
 # Ниже этой доли занятости — считаем, что хост свободен, берём весь
 # настроенный лимит. Выше верхней отметки — хост загружен, новых аккаунтов
@@ -36,46 +40,36 @@ import os
 LOW_WATERMARK = 0.6
 HIGH_WATERMARK = 0.9
 MIN_CAPACITY = 1
+# Контейнер упирается в свой потолок раньше, чем хост — и ядро убивает его целиком,
+# со всеми аккаунтами сразу. Поэтому его потолок памяти считается осторожнее:
+# сдерживаться начинаем с 70 %, останавливаемся на 88 %.
+CONTAINER_LOW_WATERMARK = 0.70
+CONTAINER_HIGH_WATERMARK = 0.88
 
 
-def _load_ratio() -> float | None:
-    """Доля занятости процессора: минутный load average на число ядер.
+def _scaled(ratio: float, low: float, high: float) -> float:
+    """Приводит долю к общей шкале: 0.6 — «начинаем сдерживаться», 0.9 — «стоп»."""
+    if ratio <= low:
+        return min(ratio, LOW_WATERMARK)
+    if ratio >= high:
+        return max(ratio, HIGH_WATERMARK)
+    return LOW_WATERMARK + (ratio - low) / (high - low) * (HIGH_WATERMARK - LOW_WATERMARK)
 
-    `None`, если посчитать нечем (платформа без `getloadavg`, например
-    Windows) — на такой шлюз в проде не запускают, но падать из-за этого
-    нет причины: просто не сработает самоограничение по этому показателю.
+
+def pressure() -> float | None:
+    """Худшая из долей занятости, приведённая к общей шкале (0.6 / 0.9).
+
+    `None`, если посчитать нечем (платформа без `/proc`, например Mac вне Docker) —
+    тогда самоограничение по нагрузке просто не включается.
     """
-    try:
-        load1, _, _ = os.getloadavg()
-    except (OSError, AttributeError):
-        return None
-    cores = os.cpu_count() or 1
-    return load1 / cores
-
-
-def _memory_ratio() -> float | None:
-    """Доля занятой памяти хоста: 1 − доступно/всего, по `/proc/meminfo`.
-
-    `MemAvailable`, не `MemFree` — то, что ядро само считает реально
-    свободным с учётом вытесняемого кэша; то же самое число показывает
-    `free -h` в столбце «available». `None` на платформе без этого файла
-    (не Linux) — тогда сработает только показатель по процессору.
-    """
-    try:
-        values: dict[str, int] = {}
-        with open("/proc/meminfo") as f:
-            for line in f:
-                key, _, rest = line.partition(":")
-                if key in ("MemTotal", "MemAvailable"):
-                    values[key] = int(rest.split()[0])  # значение в килобайтах
-                if len(values) == 2:
-                    break
-    except OSError:
-        return None
-    total = values.get("MemTotal")
-    if not total:
-        return None
-    return 1 - values.get("MemAvailable", 0) / total
+    ratios: list[float] = []
+    for value in (hostinfo.host_load_ratio(), hostinfo.host_memory_ratio()):
+        if value is not None:
+            ratios.append(value)
+    container = hostinfo.container_memory_ratio()
+    if container is not None:
+        ratios.append(_scaled(container, CONTAINER_LOW_WATERMARK, CONTAINER_HIGH_WATERMARK))
+    return max(ratios) if ratios else None
 
 
 def effective_capacity(base_capacity: int) -> int:
@@ -83,17 +77,16 @@ def effective_capacity(base_capacity: int) -> int:
 
     Не имеет отношения к уже удержанным — `lease.claim_accounts` сам
     учитывает разницу с уже занятым; это только верхняя граница НОВОГО.
-    Берётся худший из двух показателей: свободный процессор не спасает,
+    Берётся худший из показателей: свободный процессор не спасает,
     если кончается память, и наоборот.
     """
     if base_capacity <= 0:
         # Оператор явно попросил не брать новых — не отменяем это решение
         # только потому, что хост сейчас свободен.
         return 0
-    ratios = [r for r in (_load_ratio(), _memory_ratio()) if r is not None]
-    if not ratios:
+    ratio = pressure()
+    if ratio is None:
         return base_capacity
-    ratio = max(ratios)
     if ratio <= LOW_WATERMARK:
         return base_capacity
     if ratio >= HIGH_WATERMARK:

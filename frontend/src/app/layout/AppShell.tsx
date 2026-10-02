@@ -22,6 +22,7 @@ import { useRealtimeSync } from '@/shared/hooks/useRealtime'
 import { cn } from '@/shared/lib/cn'
 import { Avatar, Toaster } from '@/shared/ui'
 import { useCounters } from '@/features/chats/queries'
+import { ServerAlertBanner } from '@/features/system/ServerAlertBanner'
 
 interface NavItem {
   to: string
@@ -99,6 +100,7 @@ export function AppShell() {
       </nav>
 
       <main className="flex min-h-0 min-w-0 flex-1 flex-col">
+        <ServerAlertBanner enabled={me?.role === 'admin'} />
         <Outlet />
       </main>
 

@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.command_bus import serve as serve_commands
 from app.core.config import settings
 from app.core.db import SessionLocal
-from app.gateway import backfill, handlers, lease, load, outbox, topology
+from app.gateway import backfill, governor, handlers, lease, load, outbox, topology
 from app.gateway.provider import get_provider
 from app.models import (
     TelegramAccount,
@@ -133,7 +133,7 @@ async def _lease_loop(worker_id: str, hostname: str, stop: asyncio.Event) -> Non
     while not stop.is_set():
         try:
             async with SessionLocal() as db:
-                await lease.heartbeat(db, worker_id)
+                await lease.heartbeat(db, worker_id, hostname, settings.gateway_capacity)
                 capacity = load.effective_capacity(settings.gateway_capacity)
                 if capacity < settings.gateway_capacity:
                     log.info(
@@ -142,7 +142,9 @@ async def _lease_loop(worker_id: str, hostname: str, stop: asyncio.Event) -> Non
                         capacity,
                         settings.gateway_capacity,
                     )
-                claimed = await lease.claim_accounts(db, worker_id, capacity)
+                claimed = await lease.claim_accounts(
+                    db, worker_id, capacity, settings.gateway_claim_batch
+                )
             # Набор пересобираем из базы, а не копим: аккаунт могли отобрать,
             # отключить или удалить, и тогда команды по нему не наши.
             new_held = await handlers.held_account_ids(worker_id)
@@ -208,6 +210,7 @@ async def run() -> None:
             _lease_loop(worker_id, hostname, stop),
             outbox.outbox_loop(worker_id, stop, held_from_db),
             backfill.backfill_loop(stop, _held_now),
+            governor.metrics_loop(stop, worker_id, held_from_db),
             serve_commands(handlers.handle, lambda account_id: account_id in _held, stop),
         )
     finally:

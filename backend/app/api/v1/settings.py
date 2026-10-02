@@ -28,6 +28,7 @@ class SettingsPatch(BaseModel):
     timezone: str | None = None
     history_sync_days: int | None = None
     history_sync_from: str | None = None
+    history_media_policy: str | None = None
 
 
 def _check_minutes(name: str, value: int, label: str) -> None:
@@ -84,6 +85,15 @@ def validate(payload: dict[str, Any]) -> dict[str, Any]:
         raise Invalid(
             "Глубина импорта: допустимо от 1 до 3650 дней",
             field="history_sync_days",
+        )
+    if (value := payload.get("history_media_policy")) is not None and value not in (
+        "all",
+        "light",
+        "minimal",
+    ):
+        raise Invalid(
+            "Файлы из истории: выберите один из вариантов списка",
+            field="history_media_policy",
         )
     return payload
 

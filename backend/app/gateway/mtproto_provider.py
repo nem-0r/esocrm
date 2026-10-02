@@ -801,6 +801,8 @@ class MTProtoProvider:
           файл качался (и шифровался на процессоре), а потом выбрасывался как дубль —
           переподключение аккаунта заново скачивало всё медиа переписки.
         """
+        from app.gateway import governor
+
         client = await self._guarded(account)
         async for dialog in client.iter_dialogs():
             if not dialog.is_user or dialog.entity.bot:
@@ -861,8 +863,9 @@ class MTProtoProvider:
                     account.id,
                 )
                 continue
-            # Пауза между диалогами: ровный темп дешевле, чем запрет на час.
-            await asyncio.sleep(DIALOG_PAUSE_SECONDS)
+            # Пауза между диалогами: ровный темп дешевле, чем запрет на час. Растёт, когда
+            # сервер занят, — подтяжка уступает менеджерам (governor.dialog_pause).
+            await asyncio.sleep(governor.dialog_pause())
 
     # ------------------------------------------------------------ соединение
 
@@ -920,10 +923,6 @@ class MTProtoProvider:
         if peer is not None and peer.access_hash is not None:
             return InputPeerUser(user_id=chat_id, access_hash=peer.access_hash)
         return await client.get_input_entity(chat_id)
-
-
-# Пауза между диалогами при подтяжке истории, секунд.
-DIALOG_PAUSE_SECONDS = 0.4
 
 
 def _dialog_older_than(dialog: Any, since: datetime) -> bool:

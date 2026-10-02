@@ -18,7 +18,7 @@ import os
 
 from app.core.hostinfo import cgroup_memory_limit_mb, detected_cores
 
-__all__ = ["detected_cores", "expected_workers", "worker_count"]
+__all__ = ["detected_cores", "expected_workers", "sync_slots", "worker_count"]
 
 RESERVED_CORES = 1
 MIN_WORKERS = 1
@@ -73,3 +73,16 @@ def expected_workers() -> int:
     """
     raw = os.environ.get("GATEWAY_EXPECTED_WORKERS", "").strip()
     return int(raw) if raw.isdigit() and int(raw) >= MIN_WORKERS else 1
+
+
+def sync_slots() -> int:
+    """Сколько аккаунтов могут одновременно подтягивать историю на весь сервер.
+
+    Не больше нескольких: по решению D-21 аккаунты вводятся в строй постепенно, а
+    Telegram не любит десять сессий, разом читающих всю переписку; к тому же это самая
+    тяжёлая для сервера работа. Растёт с ядрами, но медленно. `GATEWAY_MAX_SYNCS` — явное число.
+    """
+    raw = os.environ.get("GATEWAY_MAX_SYNCS", "").strip()
+    if raw.isdigit() and int(raw) >= 1:
+        return int(raw)
+    return max(2, min(6, detected_cores() - RESERVED_CORES))

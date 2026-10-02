@@ -196,6 +196,29 @@ export function SettingsPage() {
               onChange={(event) => set('history_sync_from', event.target.value)}
             />
           </Field>
+          <Field
+            label="Файлы из истории"
+            hint="Что скачивать из старой переписки. Файлы занимают почти весь диск сервера: ≈ 1,7 ГБ в месяц на аккаунт, две трети — видео. Свежие сообщения клиентов всегда приходят с файлами"
+            error={fields.history_media_policy}
+          >
+            <Select
+              value={form.history_media_policy}
+              onChange={(value) => set('history_media_policy', value as Settings['history_media_policy'])}
+              options={[
+                { value: 'all', label: 'Скачивать всё', hint: 'Фото, голосовые, видео и документы' },
+                {
+                  value: 'light',
+                  label: 'Без видео и тяжёлых файлов',
+                  hint: 'Видео и файлы больше 5 МБ откроются в Telegram',
+                },
+                {
+                  value: 'minimal',
+                  label: 'Только фото, голосовые и стикеры',
+                  hint: 'Остальное откроется в Telegram',
+                },
+              ]}
+            />
+          </Field>
         </Card>
 
         {error && <InlineError message={error} />}

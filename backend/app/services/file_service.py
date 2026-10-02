@@ -208,8 +208,26 @@ def is_upload_key(key: object, prefixes: tuple[str, ...] = ("uploads", "voice"))
     return match is not None and match.group(1) in prefixes
 
 
+def _ensure_disk_space() -> None:
+    """Не принимать файлы, когда на диске почти не осталось места.
+
+    На том же диске лежит база: полный диск — остановка всей CRM. Загрузка менеджера
+    весит мало по сравнению с историей клиентов, поэтому её закрываем последней,
+    только на уровне «критично» (`governor.DiskLevel.CRITICAL`).
+    """
+    from app.gateway import governor
+
+    # Свежий замер, а не из кеша на несколько секунд: загрузок мало, а ошибиться здесь дорого.
+    if governor.signals(force=True).disk_level >= governor.DiskLevel.CRITICAL:
+        raise Invalid(
+            "На сервере почти закончилось место на диске — файлы пока нельзя загрузить. "
+            "Сообщите руководителю."
+        )
+
+
 async def upload(file: UploadFile) -> UploadResult:
     """Проверить, изучить, сохранить в хранилище и вернуть ключ для отправки."""
+    _ensure_disk_space()
     file_name = _safe_name(file.filename)
     ext = media.extension(file_name)
     if not file_name or ext not in ALLOWED_EXTENSIONS:
@@ -249,6 +267,7 @@ async def upload_voice(file: UploadFile) -> UploadResult:
     Браузер записывает что умеет — WebM, Ogg или MP4, — поэтому на входе
     не расширение важно, а то, что внутри есть звук.
     """
+    _ensure_disk_space()
     workdir = tempfile.mkdtemp(prefix="astra-voice-")
     try:
         source = os.path.join(workdir, "recording")

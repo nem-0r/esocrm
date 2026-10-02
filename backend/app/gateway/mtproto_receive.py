@@ -227,9 +227,16 @@ def _file_meta(message: Any, kind: str) -> dict[str, Any]:
 
 
 async def read_media(
-    client: TelegramClient, message: Any, account_id: int
+    client: TelegramClient, message: Any, account_id: int, *, live: bool = True
 ) -> tuple[str | None, list[dict[str, Any]]]:
-    """Вид сообщения и вложения. Большие файлы — на фоновую докачку."""
+    """Вид сообщения и вложения. Большие файлы — на фоновую докачку.
+
+    Что именно скачивать сейчас, решает регулятор (`governor.decide_media`): при
+    нехватке места на диске и по настройке «Файлы из истории» файл не скачивается, а
+    сообщение всё равно появляется — менеджер видит, что клиент что-то прислал.
+    """
+    from app.gateway import governor
+
     kind = media_kind(message)
     if kind is None:
         return None, []
@@ -243,6 +250,26 @@ async def read_media(
     if size > max_download_bytes():
         log.info("Файл %s байт больше лимита CRM — только упоминание", size)
         item["status"] = "too_large"
+        return kind, [item]
+    decision = governor.decide_media(
+        kind=kind,
+        size=size,
+        live=live,
+        policy=await governor.history_policy(),
+        level=governor.disk_level(),
+    )
+    if decision.choice == governor.MediaChoice.SKIP:
+        # Руководитель выбрал не скачивать такое из истории: только упоминание, файл
+        # открывается в Telegram.
+        item["status"] = "too_large"
+        item["error"] = decision.reason
+        return kind, [item]
+    if decision.choice == governor.MediaChoice.DEFER:
+        # Нет места: файл встанет в очередь докачки и скачается сам, когда оно появится.
+        item["status"] = "pending"
+        item["source"] = source
+        item["error"] = decision.reason
+        item["paused"] = "disk"
         return kind, [item]
     if size > SYNC_DOWNLOAD_BYTES:
         item["status"] = "pending"
@@ -264,6 +291,9 @@ async def read_media(
     item["body"] = body
     item["size"] = len(body)
     item["status"] = "ready"
+    if not live:
+        # Из истории качаем не быстрее, чем позволяет нагрузка сервера.
+        await governor.pace_media(len(body))
     return kind, [item]
 
 
@@ -292,7 +322,9 @@ async def to_inbound(
         is_bot=bool(partner.bot),
     )
     # Правка не несёт новых файлов: скачивать их второй раз незачем.
-    kind, attachments = (None, []) if is_edit else await read_media(client, message, account_id)
+    kind, attachments = (
+        (None, []) if is_edit else await read_media(client, message, account_id, live=live)
+    )
     text = message.message or None
     described, meta = describe_media(message)
     if described and not text:

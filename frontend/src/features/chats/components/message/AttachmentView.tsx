@@ -97,15 +97,17 @@ export function AttachmentView({ file }: { file: AttachmentRef }) {
 
 function UnavailableFile({ file }: { file: AttachmentRef }) {
   const status = file.status ?? 'ready'
+  // Причину (нет места на диске, настройка «Файлы из истории») показываем как есть:
+  // без неё менеджер видел бы вечное «Загружается…» или «слишком большой».
   const label =
     status === 'pending'
-      ? 'Загружается из Telegram…'
+      ? (file.error ?? 'Загружается из Telegram…')
       : status === 'too_large'
-        ? 'Слишком большой для CRM — откройте в Telegram'
+        ? (file.error ?? 'Слишком большой для CRM — откройте в Telegram')
         : `Не удалось скачать${file.error ? `: ${file.error}` : ''} — откройте в Telegram`
   return (
     <div className="flex items-center gap-2 rounded bg-black/25 px-2.5 py-2">
-      {status === 'pending' ? (
+      {status === 'pending' && !file.error ? (
         <Loader2 className="size-4 shrink-0 animate-spin text-accent-text" aria-hidden />
       ) : (
         <AlertCircle className="size-4 shrink-0 text-warning" aria-hidden />

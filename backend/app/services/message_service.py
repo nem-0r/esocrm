@@ -86,7 +86,13 @@ def attachment_out(att: Attachment) -> AttachmentOut:
         title=extra.get("title"),
         performer=extra.get("performer"),
         emoji=extra.get("emoji"),
-        error=extra.get("error"),
+        # У докачиваемого файла причину отдаём, только если он ждёт места на диске:
+        # ошибки очередных попыток докачки менеджеру ни к чему — там «Загружается…».
+        error=(
+            extra.get("error")
+            if (att.status or "ready") != "pending" or extra.get("paused")
+            else None
+        ),
     )
 
 

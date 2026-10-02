@@ -569,6 +569,32 @@ export interface Settings {
   /** Формат ГГГГ-ММ-ДД. Реально управляет подтяжкой истории — приоритетнее
    *  history_sync_days на бэкенде, поэтому в форме только это поле. */
   history_sync_from: string
+  /** Что скачивать из истории при подключении аккаунта (свежие сообщения — всегда всё). */
+  history_media_policy: 'all' | 'light' | 'minimal'
+}
+
+/** Состояние сервера для руководителя (`GET /system/status`). */
+export interface SystemAlert {
+  level: 'info' | 'warning' | 'critical'
+  text: string
+}
+
+export interface SystemStatus {
+  disk: { free_gb: number; total_gb: number; level: number; label: string }
+  pressure: number | null
+  cores: number
+  memory_mb: number | null
+  gateway: { workers: number; accounts: number; unassigned: number }
+  plan: {
+    applied: boolean
+    cores: number
+    ram_mb: number | null
+    plan_cores?: number
+    plan_ram_mb?: number
+    stale: boolean
+  }
+  history_media_policy: string
+  alerts: SystemAlert[]
 }
 
 export interface CursorPage<T> {

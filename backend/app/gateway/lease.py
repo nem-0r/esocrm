@@ -32,13 +32,34 @@ async def register_worker(db: AsyncSession, worker_id: str, hostname: str, capac
     await db.commit()
 
 
-async def heartbeat(db: AsyncSession, worker_id: str) -> None:
-    """Отметка процесса и продление аренды его аккаунтов."""
+async def heartbeat(
+    db: AsyncSession, worker_id: str, hostname: str | None = None, capacity: int | None = None
+) -> None:
+    """Отметка процесса и продление аренды его аккаунтов.
+
+    Если строки процесса в `gateway_workers` нет (её убрали уборкой или восстановлением
+    базы), она создаётся заново: иначе живой процесс считался бы мёртвым — «живых нет»
+    ломает справедливую долю аккаунтов и показывается руководителю как «шлюз не запущен».
+    """
     now = datetime.now(UTC)
     lease_until = now + timedelta(seconds=settings.gateway_lease_seconds)
-    await db.execute(
-        update(GatewayWorker).where(GatewayWorker.id == worker_id).values(heartbeat_at=now)
-    )
+    if hostname is not None:
+        stmt = pg_insert(GatewayWorker).values(
+            id=worker_id,
+            hostname=hostname,
+            capacity=capacity or settings.gateway_capacity,
+            heartbeat_at=now,
+            started_at=now,
+        )
+        await db.execute(
+            stmt.on_conflict_do_update(
+                index_elements=[GatewayWorker.id], set_={"heartbeat_at": now}
+            )
+        )
+    else:
+        await db.execute(
+            update(GatewayWorker).where(GatewayWorker.id == worker_id).values(heartbeat_at=now)
+        )
     await db.execute(
         update(TelegramAccount)
         .where(TelegramAccount.worker_id == worker_id, TelegramAccount.deleted_at.is_(None))
@@ -107,12 +128,18 @@ async def _held_count(db: AsyncSession, worker_id: str) -> int:
     return len(rows.all())
 
 
-async def claim_accounts(db: AsyncSession, worker_id: str, capacity: int) -> list[int]:
+async def claim_accounts(
+    db: AsyncSession, worker_id: str, capacity: int, batch: int | None = None
+) -> list[int]:
     """Забрать свободные аккаунты сверх уже удержанных, но не больше вместимости
     и не больше справедливой доли (`fair_share`): так аккаунты расходятся по
     всем живым процессам, а не оседают на первом пришедшем."""
     limit = min(capacity, await fair_share(db, worker_id))
     remaining = limit - await _held_count(db, worker_id)
+    if batch is not None:
+        # Пачками: десять аккаунтов, подключённых разом, — и нагрузка на память, и
+        # десять входов в Telegram за секунды (D-21 требует вводить постепенно).
+        remaining = min(remaining, batch)
     if remaining <= 0:
         return []
 

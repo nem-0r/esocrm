@@ -417,7 +417,26 @@ async def _history_since(db, raw: str | None) -> datetime:
 
 async def _sync_history(account_id: int, since: datetime) -> None:
     """Подтяжка переписки. Идёт фоном и сообщает о ходе событиями: на большом
-    аккаунте это минуты, и держать на это время открытый запрос нельзя."""
+    аккаунте это минуты, и держать на это время открытый запрос нельзя.
+
+    Одновременно на весь сервер идёт не больше нескольких подтяжек (`governor.SyncSlot`):
+    остальные ждут своей очереди. Массовое подключение аккаунтов или перезапуск шлюза
+    после выкатки (у каждого аккаунта `catch_up`) не превращается в десять разом
+    читающих всю переписку сессий — это и нагрузка на сервер, и риск для аккаунтов.
+    """
+    from app.gateway import governor
+
+    async def queued() -> None:
+        async with SessionLocal() as db:
+            await emit_to_account(
+                db, account_id, "account.sync", {"account_id": account_id, "state": "queued"}
+            )
+
+    async with governor.SyncSlot(account_id, on_wait=queued):
+        await _sync_history_now(account_id, since)
+
+
+async def _sync_history_now(account_id: int, since: datetime) -> None:
     from app.gateway.provider import get_provider
 
     provider = get_provider()

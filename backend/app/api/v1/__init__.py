@@ -15,6 +15,7 @@ from app.api.v1 import (
     services,
     settings,
     stats,
+    system,
     templates,
     users,
     ws,
@@ -38,4 +39,5 @@ api_router.include_router(notifications.router, prefix="/notifications", tags=["
 api_router.include_router(payments.router, prefix="/payments", tags=["оплаты (провайдер)"])
 api_router.include_router(settings.router, prefix="/settings", tags=["настройки"])
 api_router.include_router(files.router, prefix="/files", tags=["файлы"])
+api_router.include_router(system.router, prefix="/system", tags=["сервер"])
 api_router.include_router(ws.router, tags=["живые обновления"])

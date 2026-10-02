@@ -25,6 +25,7 @@ from sqlalchemy import Integer, select
 
 from app.core import storage
 from app.core.db import SessionLocal
+from app.gateway import governor
 from app.gateway.provider import MediaGone, get_provider
 from app.models import Attachment, AttachmentStatus, Message, TelegramAccount
 from app.realtime.events import emit_to_conversation
@@ -39,24 +40,26 @@ IDLE_SECONDS = 5.0
 BATCH = 3
 
 
-async def _due(account_ids: list[int]) -> list[int]:
-    """Вложения аккаунтов этого процесса, которые пора докачать."""
+async def _due(account_ids: list[int], max_size: int | None = None) -> list[int]:
+    """Вложения аккаунтов этого процесса, которые пора докачать.
+
+    `max_size` — когда на диске тесно, берём только небольшие файлы (`governor`):
+    крупные подождут, пока место появится.
+    """
     if not account_ids:
         return []
     now = datetime.now(UTC).isoformat()
     async with SessionLocal() as db:
-        rows = await db.execute(
-            select(Attachment.id)
-            .where(
-                Attachment.status == AttachmentStatus.PENDING.value,
-                Attachment.deleted_at.is_(None),
-                Attachment.meta["source"]["account_id"].astext.cast(Integer).in_(account_ids),
-                (Attachment.meta["next_at"].astext.is_(None))
-                | (Attachment.meta["next_at"].astext <= now),
-            )
-            .order_by(Attachment.id)
-            .limit(BATCH)
+        stmt = select(Attachment.id).where(
+            Attachment.status == AttachmentStatus.PENDING.value,
+            Attachment.deleted_at.is_(None),
+            Attachment.meta["source"]["account_id"].astext.cast(Integer).in_(account_ids),
+            (Attachment.meta["next_at"].astext.is_(None))
+            | (Attachment.meta["next_at"].astext <= now),
         )
+        if max_size is not None:
+            stmt = stmt.where(Attachment.size_bytes <= max_size)
+        rows = await db.execute(stmt.order_by(Attachment.id).limit(BATCH))
         return [row[0] for row in rows.all()]
 
 
@@ -80,6 +83,8 @@ async def fetch_one(attachment_id: int) -> None:
         if attachment is None or attachment.status != AttachmentStatus.PENDING.value:
             return
         meta = dict(attachment.meta or {})
+        # Дошла очередь — «ждёт места на диске» больше не про этот файл.
+        meta.pop("paused", None)
         source = meta.get("source") or {}
         account = await db.get(TelegramAccount, int(source.get("account_id") or 0))
         chat_id = source.get("chat_id")
@@ -147,7 +152,10 @@ async def backfill_loop(
 ) -> None:
     while not stop.is_set():
         try:
-            due = await _due(await held_account_ids())
+            # На диске мало места или сервер занят — фоновая докачка ждёт: файлы остаются
+            # в очереди и скачаются сами, когда станет можно (governor).
+            limit = governor.backfill_limit()
+            due = [] if limit == 0 else await _due(await held_account_ids(), limit)
             for attachment_id in due:
                 if stop.is_set():
                     break

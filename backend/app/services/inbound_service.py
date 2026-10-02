@@ -355,7 +355,9 @@ async def _save_attachments(
         elif status == AttachmentStatus.READY.value:
             status = AttachmentStatus.PENDING.value
         extra = {
-            name: item[name] for name in ("title", "performer", "emoji") if item.get(name)
+            name: item[name]
+            for name in ("title", "performer", "emoji", "error", "paused")
+            if item.get(name)
         }
         if status == AttachmentStatus.PENDING.value and item.get("source"):
             extra["source"] = item["source"]
