@@ -20,6 +20,8 @@ from typing import Any
 
 import httpx
 from sqlalchemy import text
+from websockets.asyncio.client import ClientConnection, connect
+from websockets.exceptions import ConnectionClosed, InvalidStatus
 
 from app.core.crypto import token_hash
 from app.core.db import SessionLocal
@@ -28,10 +30,17 @@ from tests.support import ADMIN, BASE, MANAGER, Checks
 RUN = secrets.token_hex(3)
 PREFIX = f"qa-reset-{RUN}"
 PASS1, PASS2, PASS3, PASS_C = "Qa-first-1234", "Qa-second-5678", "Qa-third-9012", "Qa-carol-3456"
+# Русская парольная фраза: 47 символов, но 88 байт — больше предела bcrypt (72 байта).
+LONG_PHRASE = "Очень длинная парольная фраза для проверки сети"
+WS_URL = BASE.replace("http", "ws", 1) + "/ws"
 THROTTLE_IP = (
     f"203.0.113.{int(RUN, 16) % 200 + 20}"  # документационный диапазон, не настоящий адрес
 )
 OTHER_IP = f"198.51.100.{int(RUN, 16) % 200 + 20}"
+# Все остальные запросы прогона — со своего адреса: неверные ссылки считаются по
+# адресу, и счётчик прогона не должен копиться у 127.0.0.1 между запусками (после
+# 20 неудач за 15 минут повторный прогон получил бы 429 вместо 404).
+ANON_IP = f"192.0.2.{int(RUN, 16) % 200 + 20}"
 
 
 def email(tag: str) -> str:
@@ -46,8 +55,7 @@ def err(response: httpx.Response) -> dict[str, Any]:
 
 
 def new_client(ip: str | None = None) -> httpx.AsyncClient:
-    headers = {"X-Forwarded-For": ip} if ip else None
-    return httpx.AsyncClient(timeout=60, headers=headers)
+    return httpx.AsyncClient(timeout=60, headers={"X-Forwarded-For": ip or ANON_IP})
 
 
 async def sql_one(query: str, **params: Any) -> Any:
@@ -103,9 +111,9 @@ async def cleanup() -> None:
         await db.execute(
             text(
                 "delete from login_attempts where email like 'qa-reset-%@example.test' "
-                "or email in (:a, :b)"
+                "or email in (:a, :b, :c)"
             ),
-            {"a": f"reset:{THROTTLE_IP}", "b": f"reset:{OTHER_IP}"},
+            {"a": f"reset:{THROTTLE_IP}", "b": f"reset:{OTHER_IP}", "c": f"reset:{ANON_IP}"},
         )
         await db.commit()
 
@@ -118,22 +126,72 @@ async def make_member(admin: httpx.AsyncClient, tag: str, password: str | None) 
     )
     created.raise_for_status()
     body = created.json()
-    member: dict[str, Any] = {"id": body["id"], "email": email(tag), "name": f"QA Сброс {tag}"}
+    member: dict[str, Any] = {
+        "id": body["id"],
+        "email": email(tag),
+        "name": f"QA Сброс {tag}",
+        "invite_token": body["invite_url"].rsplit("/", 1)[1],
+    }
     if password:
         session = new_client()
         accepted = await session.post(
             f"{BASE}/auth/accept-invite",
-            json={"token": body["invite_url"].rsplit("/", 1)[1], "password": password},
+            json={"token": member["invite_token"], "password": password},
         )
         accepted.raise_for_status()
         member["session"] = session
+        member["token"] = accepted.json()["token"]
     return member
+
+
+def token_from_link(link: str) -> str:
+    """Токен из ссылки `/reset#<токен>` (или полной `https://сайт/reset#<токен>`)."""
+    return link.split("#", 1)[1] if "#" in link else ""
 
 
 async def issue(admin: httpx.AsyncClient, user_id: int) -> tuple[httpx.Response, str]:
     response = await admin.post(f"{BASE}/users/{user_id}/reset-password")
-    token = response.json()["link"].rsplit("/", 1)[1] if response.status_code == 200 else ""
+    token = token_from_link(response.json()["link"]) if response.status_code == 200 else ""
     return response, token
+
+
+async def check_link(client: httpx.AsyncClient, token: str) -> httpx.Response:
+    """Проверка ссылки так, как это делает интерфейс: токен в теле, не в адресе."""
+    return await client.post(f"{BASE}/auth/reset-password/check", json={"token": token})
+
+
+async def ws_open(session_token: str) -> ClientConnection:
+    return await connect(WS_URL, additional_headers={"Cookie": f"astra_session={session_token}"})
+
+
+async def ws_ping(sock: ClientConnection) -> str:
+    """Отправить ping и дождаться ответа: «pong», «closed:<код>» или «timeout».
+
+    События (присутствие и т. п.) между делом пропускаются — нужен именно ответ.
+    """
+    try:
+        await sock.send(json.dumps({"type": "ping"}))
+        async with asyncio.timeout(15):
+            while True:
+                if json.loads(await sock.recv()).get("type") == "pong":
+                    return "pong"
+    except ConnectionClosed as exc:
+        return f"closed:{exc.rcvd.code if exc.rcvd else None}"
+    except TimeoutError:
+        return "timeout"
+
+
+async def ws_connect_result(session_token: str) -> str:
+    """Подключиться и пингануть. Отказ на этапе подключения (сессии нет) сервер
+    отдаёт HTTP 403 — так ASGI-сервер передаёт закрытие до `accept`."""
+    try:
+        sock = await ws_open(session_token)
+    except InvalidStatus as exc:
+        return f"refused:{exc.response.status_code}"
+    try:
+        return await ws_ping(sock)
+    finally:
+        await sock.close()
 
 
 def run_cli(
@@ -235,8 +293,8 @@ async def run() -> int:
         c.check("руководитель выдаёт ссылку", ok, r.text[:160])
         body = r.json() if ok else {}
         c.check(
-            "ссылка — относительный путь /reset/<токен>, как у приглашений",
-            str(body.get("link", "")).startswith("/reset/") and len(token1) >= 43,
+            "ссылка — относительная /reset#<токен>: токен во фрагменте, на сервер не уходит",
+            str(body.get("link", "")) == f"/reset#{token1}" and len(token1) >= 43,
             str(body)[:120],
         )
         expires = datetime.fromisoformat(body["expires_at"]) if ok else None
@@ -273,9 +331,9 @@ async def run() -> int:
         c.section("Проверка ссылки (публичная)")
         anon = new_client()
         opened.append(anon)
-        r = await anon.get(f"{BASE}/auth/reset-password/{token1}")
+        r = await check_link(anon, token1)
         c.check(
-            "живая ссылка → 200 и имя сотрудника",
+            "живая ссылка (POST /check, токен в теле) → 200 и имя сотрудника",
             r.status_code == 200 and r.json().get("full_name") == a["name"],
             r.text[:160],
         )
@@ -289,7 +347,13 @@ async def run() -> int:
             "no-store" in r.headers.get("cache-control", ""),
             str(r.headers),
         )
-        unknown = await anon.get(f"{BASE}/auth/reset-password/{secrets.token_urlsafe(32)}")
+        legacy = await anon.get(f"{BASE}/auth/reset-password/{token1}")
+        c.check(
+            "прежняя ручка GET с токеном в пути работает (совместимость со старой сборкой)",
+            legacy.status_code == 200 and legacy.json() == r.json(),
+            legacy.text[:160],
+        )
+        unknown = await check_link(anon, secrets.token_urlsafe(32))
         c.check(
             "неизвестная ссылка → 404, нейтральный текст",
             unknown.status_code == 404
@@ -297,6 +361,10 @@ async def run() -> int:
             and "Попросите руководителя" in err(unknown).get("message", ""),
             unknown.text[:160],
         )
+        empty = await check_link(anon, "")
+        c.check("пустой токен → тот же 404", empty.json() == unknown.json(), empty.text[:160])
+        no_body = await anon.post(f"{BASE}/auth/reset-password/check", json={})
+        c.check("без токена в теле → 422", no_body.status_code == 422, str(no_body.status_code))
 
         # ------------------------------------------------- блокировка и новый пароль
         c.section("Новый пароль: сессии, блокировка, одноразовость")
@@ -316,6 +384,12 @@ async def run() -> int:
             "до сброса старая сессия сотрудника жива",
             (await a0.get(f"{BASE}/auth/me")).status_code == 200,
         )
+        a0_ws = await ws_open(a["token"])
+        c.check(
+            "живое соединение (WebSocket) старой сессии отвечает на ping",
+            (got := await ws_ping(a0_ws)) == "pong",
+            got,
+        )
 
         short = await anon.post(
             f"{BASE}/auth/reset-password", json={"token": token1, "password": "short"}
@@ -325,9 +399,37 @@ async def run() -> int:
             short.status_code == 422 and "не короче 8" in err(short).get("message", ""),
             short.text[:160],
         )
+        too_long = await anon.post(
+            f"{BASE}/auth/reset-password", json={"token": token1, "password": LONG_PHRASE}
+        )
+        c.check(
+            "пароль длиннее 72 байт (русская фраза) → 422 «слишком длинный», а не 500",
+            too_long.status_code == 422
+            and "Пароль слишком длинный" in err(too_long).get("message", ""),
+            too_long.text[:200],
+        )
         c.check(
             "отказ по паролю ссылку не сжигает",
-            (await anon.get(f"{BASE}/auth/reset-password/{token1}")).status_code == 200,
+            (await check_link(anon, token1)).status_code == 200,
+        )
+        long_invite = await anon.post(
+            f"{BASE}/auth/accept-invite",
+            json={"token": pending["invite_token"], "password": LONG_PHRASE},
+        )
+        c.check(
+            "приглашение с паролем длиннее 72 байт → 422, а не 500",
+            long_invite.status_code == 422
+            and "слишком длинный" in err(long_invite).get("message", ""),
+            long_invite.text[:200],
+        )
+        long_change = await a0.patch(
+            f"{BASE}/auth/me", json={"current_password": PASS1, "new_password": LONG_PHRASE}
+        )
+        c.check(
+            "смена пароля в профиле на длиннее 72 байт → 422, а не 500",
+            long_change.status_code == 422
+            and "слишком длинный" in err(long_change).get("message", ""),
+            long_change.text[:200],
         )
 
         a1 = new_client()
@@ -350,6 +452,17 @@ async def run() -> int:
         )
         c.check("новая сессия работает", (await a1.get(f"{BASE}/auth/me")).status_code == 200)
         c.check("старая сессия отозвана", (await a0.get(f"{BASE}/auth/me")).status_code == 401)
+        c.check(
+            "и её открытое соединение (WebSocket) закрыто кодом 4401 на следующем ping",
+            (got := await ws_ping(a0_ws)) == "closed:4401",
+            got,
+        )
+        await a0_ws.close()
+        c.check(
+            "заново подключиться с отозванной сессией нельзя (отказ при подключении)",
+            (got := await ws_connect_result(a["token"])) == "refused:403",
+            got,
+        )
         old_pw = await anon.post(
             f"{BASE}/auth/login", json={"email": a["email"], "password": PASS1}
         )
@@ -382,7 +495,7 @@ async def run() -> int:
         )
         c.check(
             "и проверка ссылки теперь 404",
-            (await anon.get(f"{BASE}/auth/reset-password/{token1}")).status_code == 404,
+            (await check_link(anon, token1)).status_code == 404,
         )
         c.check(
             "пароль от повторной попытки не установлен",
@@ -422,11 +535,11 @@ async def run() -> int:
         _, link_new = await issue(admin, a["id"])
         c.check(
             "прежняя ссылка после повторной выдачи не работает",
-            (await anon.get(f"{BASE}/auth/reset-password/{link_old}")).status_code == 404,
+            (await check_link(anon, link_old)).status_code == 404,
         )
         c.check(
             "новая работает",
-            (await anon.get(f"{BASE}/auth/reset-password/{link_new}")).status_code == 200,
+            (await check_link(anon, link_new)).status_code == 200,
         )
         changed = await a1.patch(
             f"{BASE}/auth/me", json={"current_password": PASS2, "new_password": PASS3}
@@ -436,7 +549,36 @@ async def run() -> int:
         )
         c.check(
             "после этого выданная ссылка сброса погашена",
-            (await anon.get(f"{BASE}/auth/reset-password/{link_new}")).status_code == 404,
+            (await check_link(anon, link_new)).status_code == 404,
+        )
+
+        # ------------------------------------------------ вход по паролю гасит ссылку
+        c.section("Вход по паролю гасит выданную ссылку")
+        _, link_login = await issue(admin, a["id"])
+        wrong = await anon.post(
+            f"{BASE}/auth/login", json={"email": a["email"], "password": "wrong-pass-2"}
+        )
+        c.check("неверный пароль → 401", wrong.status_code == 401, str(wrong.status_code))
+        c.check(
+            "неудачный вход ссылку не трогает",
+            (await check_link(anon, link_login)).status_code == 200,
+        )
+        logged = await anon.post(
+            f"{BASE}/auth/login", json={"email": a["email"], "password": PASS3}
+        )
+        c.check("сотрудник вспомнил пароль и вошёл", logged.status_code == 200, logged.text[:120])
+        c.check(
+            "после успешного входа выданная ссылка погашена (404)",
+            (await check_link(anon, link_login)).status_code == 404,
+        )
+        gone = await sql_one(
+            "select password_reset_token_hash, password_reset_issued_at from users where id = :i",
+            i=a["id"],
+        )
+        c.check(
+            "в базе токена нет, след выдачи остался",
+            gone and gone[0] is None and gone[1] is not None,
+            str(gone),
         )
 
         # ----------------------------------------------------------------- срок
@@ -447,7 +589,7 @@ async def run() -> int:
             "where id = :i",
             i=a["id"],
         )
-        expired = await anon.get(f"{BASE}/auth/reset-password/{link_exp}")
+        expired = await check_link(anon, link_exp)
         c.check("просроченная → 404", expired.status_code == 404, str(expired.status_code))
         c.check(
             "ответ просроченной неотличим от неизвестной",
@@ -473,26 +615,51 @@ async def run() -> int:
             done_c.status_code == 200 and done_c.json().get("email") == carol["email"],
             done_c.text[:160],
         )
+        # Сначала ссылка, потом вход: успешный вход её гасит (см. раздел выше)
         c.check(
-            "пароль другого сотрудника не изменился",
+            "ссылка другого сотрудника по-прежнему жива",
+            (await check_link(anon, link_a)).status_code == 200,
+        )
+        c.check(
+            "и его пароль не изменился",
             (
                 await anon.post(f"{BASE}/auth/login", json={"email": a["email"], "password": PASS3})
             ).status_code
             == 200,
         )
+        long_login = await anon.post(
+            f"{BASE}/auth/login", json={"email": carol["email"], "password": LONG_PHRASE * 2}
+        )
         c.check(
-            "и его ссылка по-прежнему жива",
-            (await anon.get(f"{BASE}/auth/reset-password/{link_a}")).status_code == 200,
+            "вход с паролем длиннее 72 байт — обычный 401, а не 500",
+            long_login.status_code == 401,
+            str(long_login.status_code),
         )
 
         # ------------------------------------------------------------ отключение
         c.section("Отключённый сотрудник")
+        _, link_off = await issue(admin, a["id"])
+        c.check(
+            "перед отключением ссылка жива", (await check_link(anon, link_off)).status_code == 200
+        )
+        a1_ws = await ws_open(done.json()["token"])
+        c.check(
+            "соединение (WebSocket) сотрудника открыто",
+            (got := await ws_ping(a1_ws)) == "pong",
+            got,
+        )
         off = await admin.patch(f"{BASE}/users/{a['id']}", json={"is_active": False})
         c.check("сотрудник отключён", off.status_code == 200, off.text[:120])
         c.check(
             "при отключении ссылка погашена",
-            (await anon.get(f"{BASE}/auth/reset-password/{link_a}")).status_code == 404,
+            (await check_link(anon, link_off)).status_code == 404,
         )
+        c.check(
+            "открытое соединение отключённого закрыто кодом 4401 на следующем ping",
+            (got := await ws_ping(a1_ws)) == "closed:4401",
+            got,
+        )
+        await a1_ws.close()
         r, _ = await issue(admin, a["id"])
         c.check(
             "отключённому ссылку не выдать (422)",
@@ -504,18 +671,63 @@ async def run() -> int:
         c.section("Команда на сервере: python -m app.cli reset-password")
         dave = await make_member(admin, "dave", PASS_C)
         opened.append(dave["session"])
-        proc = await asyncio.to_thread(run_cli, "reset-password", "--email", dave["email"])
-        found = re.search(r"/reset/([A-Za-z0-9_-]{43})", proc.stdout)
+        proc = await asyncio.to_thread(
+            run_cli,
+            "reset-password",
+            "--email",
+            dave["email"],
+            "--site",
+            "https://crm.example.test/",
+        )
         c.check(
-            "команда печатает ссылку",
-            proc.returncode == 0 and found is not None,
+            "с --site печатается полная ссылка https://сайт/reset#<токен>",
+            proc.returncode == 0
+            and re.search(r"https://crm\.example\.test/reset#[A-Za-z0-9_-]{43}\s", proc.stdout)
+            is not None,
+            proc.stdout[-300:],
+        )
+        proc = await asyncio.to_thread(run_cli, "reset-password", "--email", dave["email"])
+        found = re.search(r"(\S*)/reset#([A-Za-z0-9_-]{43})\s", proc.stdout)
+        c.check(
+            "команда печатает ссылку в новом формате: адрес сайта + /reset#<токен>",
+            proc.returncode == 0 and found is not None and found.group(1).startswith("http"),
             (proc.stdout + proc.stderr)[-300:],
         )
+        c.check(
+            "токена нет в пути ссылки (только после «#»)",
+            "/reset/" not in proc.stdout,
+            proc.stdout[-300:],
+        )
         if found:
+            cli_token = found.group(2)
             c.check(
-                "ссылка из команды открывается",
-                (await anon.get(f"{BASE}/auth/reset-password/{found.group(1)}")).status_code == 200,
+                "ссылка из команды открывается (проверка, как у страницы)",
+                (await check_link(anon, cli_token)).status_code == 200,
             )
+            dave_new = new_client()
+            opened.append(dave_new)
+            by_cli = await dave_new.post(
+                f"{BASE}/auth/reset-password", json={"token": cli_token, "password": PASS3}
+            )
+            c.check(
+                "по ссылке из команды задаётся пароль и сразу вход",
+                by_cli.status_code == 200 and by_cli.json().get("email") == dave["email"],
+                by_cli.text[:160],
+            )
+            c.check(
+                "новый пароль из ссылки команды входит",
+                (
+                    await anon.post(
+                        f"{BASE}/auth/login", json={"email": dave["email"], "password": PASS3}
+                    )
+                ).status_code
+                == 200,
+            )
+            c.check(
+                "прежняя сессия dave отозвана",
+                (await dave["session"].get(f"{BASE}/auth/me")).status_code == 401,
+            )
+            dave["session"] = dave_new  # дальше — с новой сессией
             sys_row = await sql_one(
                 "select actor_kind::text, actor_id, after::text from event_log "
                 "where action = 'user.password_reset_issued' and entity_id = :i "
@@ -528,7 +740,7 @@ async def run() -> int:
                 and sys_row[0] == "system"
                 and sys_row[1] is None
                 and '"cli"' in sys_row[2]
-                and found.group(1) not in sys_row[2],
+                and cli_token not in sys_row[2],
                 str(sys_row),
             )
         proc = await asyncio.to_thread(run_cli, "reset-password", "--email", pending["email"])
@@ -567,12 +779,9 @@ async def run() -> int:
         _, link_ok = await issue(admin, carol["id"])
         thr = new_client(THROTTLE_IP)
         opened.append(thr)
-        codes = [
-            (await thr.get(f"{BASE}/auth/reset-password/{secrets.token_urlsafe(32)}")).status_code
-            for _ in range(20)
-        ]
+        codes = [(await check_link(thr, secrets.token_urlsafe(32))).status_code for _ in range(20)]
         c.check("первые 20 неверных ссылок — обычный 404", set(codes) == {404}, str(set(codes)))
-        blocked = await thr.get(f"{BASE}/auth/reset-password/{secrets.token_urlsafe(32)}")
+        blocked = await check_link(thr, secrets.token_urlsafe(32))
         c.check(
             "21-я с того же адреса — 429",
             blocked.status_code == 429 and err(blocked).get("code") == "rate_limited",
@@ -580,6 +789,10 @@ async def run() -> int:
         )
         c.check(
             "и верная ссылка с этого адреса на время закрыта",
+            (await check_link(thr, link_ok)).status_code == 429,
+        )
+        c.check(
+            "прежняя ручка GET под тем же ограничением",
             (await thr.get(f"{BASE}/auth/reset-password/{link_ok}")).status_code == 429,
         )
         c.check(
@@ -596,7 +809,7 @@ async def run() -> int:
         opened.append(other)
         c.check(
             "с другого адреса та же ссылка работает",
-            (await other.get(f"{BASE}/auth/reset-password/{link_ok}")).status_code == 200,
+            (await check_link(other, link_ok)).status_code == 200,
         )
 
         # ------------------------------------------------- телефон сотрудника (L1)
@@ -645,6 +858,43 @@ async def run() -> int:
             "карточка сотрудника: null очищает",
             st_clear.status_code == 200 and st_clear.json()["phone"] is None,
             st_clear.text[:160],
+        )
+        # Скобки и точки у сотрудника не отказ, а приведение к принятому виду: до L1
+        # телефон сотрудника не проверялся, и в базе есть номера со скобками.
+        st_br = await admin.patch(
+            f"{BASE}/users/{dave['id']}", json={"phone": "+7 (900) 000-00-03"}
+        )
+        c.check(
+            "карточка сотрудника: «+7 (900) 000-00-03» → сохранён как «+7 900 000-00-03»",
+            st_br.status_code == 200 and st_br.json()["phone"] == "+7 900 000-00-03",
+            st_br.text[:160],
+        )
+        me_dots = await dave["session"].patch(f"{BASE}/auth/me", json={"phone": "8.900.000.00.04"})
+        c.check(
+            "профиль: «8.900.000.00.04» → «8 900 000 00 04»",
+            me_dots.status_code == 200 and me_dots.json()["phone"] == "8 900 000 00 04",
+            me_dots.text[:160],
+        )
+        # Как ведёт себя прежняя сборка интерфейса: шлёт сохранённый телефон при
+        # каждом сохранении карточки. Номер старого формата не должен мешать.
+        await sql_exec("update users set phone = '+7 (900) 000-00-05' where id = :i", i=dave["id"])
+        legacy_save = await admin.patch(
+            f"{BASE}/users/{dave['id']}",
+            json={"full_name": "QA Сброс dave", "phone": "+7 (900) 000-00-05", "role": "manager"},
+        )
+        c.check(
+            "старый номер со скобками в базе не мешает сохранить карточку (200, номер приведён)",
+            legacy_save.status_code == 200 and legacy_save.json()["phone"] == "+7 900 000-00-05",
+            legacy_save.text[:200],
+        )
+        await sql_exec("update users set phone = '+7 (900) 000-00-06' where id = :i", i=dave["id"])
+        legacy_me = await dave["session"].patch(
+            f"{BASE}/auth/me", json={"full_name": "QA Сброс dave", "phone": "+7 (900) 000-00-06"}
+        )
+        c.check(
+            "и в профиле — тоже (200, номер приведён)",
+            legacy_me.status_code == 200 and legacy_me.json()["phone"] == "+7 900 000-00-06",
+            legacy_me.text[:200],
         )
         inv_bad = await admin.post(
             f"{BASE}/users",
@@ -728,6 +978,12 @@ async def run() -> int:
         c.check("телефон «abc» → 422, как и раньше", fail_info(r) == (422, "phone"), r.text[:200])
         r = await admin.patch(url, json={"phone": "1" * 40})
         c.check("слишком длинный телефон → 422", r.status_code == 422, r.text[:160])
+        r = await admin.patch(url, json={"phone": "+7 (916) 200-10-09"})
+        c.check(
+            "у клиента скобки по-прежнему отклоняются (мягкое правило — только у сотрудника)",
+            fail_info(r) == (422, "phone"),
+            r.text[:200],
+        )
         r = await admin.patch(url, json={"phone": "  +7   916  200--10-09 "})
         c.check(
             "телефон нормализуется (повторы схлопнуты)",
@@ -786,9 +1042,10 @@ async def run() -> int:
             "select (select count(*) from users where email like 'qa-reset-%@example.test'), "
             "(select count(*) from clients where display_name like 'qa-reset-%'), "
             "(select count(*) from login_attempts where email like 'reset:%' "
-            "and (email = :a or email = :b))",
+            "and (email = :a or email = :b or email = :c))",
             a=f"reset:{THROTTLE_IP}",
             b=f"reset:{OTHER_IP}",
+            c=f"reset:{ANON_IP}",
         )
         c.section("Уборка")
         c.check(

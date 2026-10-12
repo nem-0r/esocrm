@@ -51,7 +51,8 @@ export function Sheet({
           // гасим закрытие окна здесь; список после этого закроет обработчик
           // самого поля (он получит то же нажатие следующим, в фазе всплытия).
           onEscapeKeyDown={(event) => {
-            const target = event.target as HTMLElement | null
+            // Не всякая цель — элемент: синтетическое событие на document `closest` не имеет.
+            const target = event.target instanceof Element ? event.target : null
             if (target?.closest('[role="combobox"][aria-expanded="true"]')) {
               event.preventDefault()
             }
@@ -101,7 +102,18 @@ export function Sheet({
             </Dialog.Close>
           </div>
 
-          <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-4">{children}</div>
+          {/* Без footer тело — последнее в окне, и оно садится на нижний край экрана: на
+              iPhone последняя строка упёрлась бы в home-индикатор. Поэтому отступ снизу —
+              не меньше 1rem и не меньше выреза (как у footer: `pb-safe-3`). С footer
+              низ окна занимает он, тут хватает обычных 1rem. */}
+          <div
+            className={cn(
+              'min-h-0 flex-1 overflow-y-auto px-4',
+              footer ? 'pb-4' : 'pb-[max(1rem,env(safe-area-inset-bottom))] desk:pb-4',
+            )}
+          >
+            {children}
+          </div>
 
           {footer && (
             <div className="shrink-0 border-t border-line bg-surface px-4 pt-3 pb-safe-3 desk:pb-3">

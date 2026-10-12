@@ -6,7 +6,7 @@ from fastapi import APIRouter, Query
 from pydantic import BaseModel, Field
 
 from app.core.deps import CurrentUser, Db
-from app.services import search_service
+from app.services import name_match, search_service
 
 router = APIRouter()
 
@@ -21,7 +21,9 @@ class HistoryEntry(BaseModel):
 async def search(
     db: Db,
     user: CurrentUser,
-    q: Annotated[str, Query(description="Запрос, от двух символов")] = "",
+    q: Annotated[
+        str, Query(max_length=name_match.MAX_QUERY_LENGTH, description="Запрос, от двух символов")
+    ] = "",
     types: Annotated[str | None, Query(description="clients,deals,chats,files")] = None,
     limit: Annotated[int, Query(ge=1, le=50, description="Строк в группе")] = 5,
 ) -> dict[str, Any]:

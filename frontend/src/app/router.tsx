@@ -75,7 +75,10 @@ export function AppRoutes() {
     <Routes>
       <Route path="/login" element={<LoginPage />} />
       <Route path="/invite/:token" element={<AcceptInvitePage />} />
-      {/* D-38: новый пароль по одноразовой ссылке руководителя; публичная, как приглашение. */}
+      {/* D-38: новый пароль по одноразовой ссылке руководителя; публичная, как приглашение.
+          Ссылка — /reset#<токен> (токен после «#» не уходит на сервер); /reset/:token —
+          прежний вид, чтобы уже выданные ссылки продолжали работать. */}
+      <Route path="/reset" element={<ResetPasswordPage />} />
       <Route path="/reset/:token" element={<ResetPasswordPage />} />
       {/* Редиректы Робокассы: клиент не сотрудник CRM, страницы без авторизации
           и без обращений к бэкенду (docs/11-payments-architecture.md, §5). */}

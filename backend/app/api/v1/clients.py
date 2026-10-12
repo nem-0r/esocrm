@@ -24,6 +24,7 @@ from app.schemas.client import (
 from app.schemas.common import CursorPage, Ok
 from app.services import client_service
 from app.services.export_format import content_disposition
+from app.services.period import check_period
 from app.services.worktime import local_zone
 
 router = APIRouter()
@@ -50,6 +51,10 @@ async def export_clients(
     ] = None,
     date_to: Annotated[date | None, Query(description="Конец периода, включительно")] = None,
 ) -> StreamingResponse:
+    # Период проверяется ДО начала потока: после отправки заголовков ошибку уже не
+    # вернуть 422-м, а клиент получил бы оборванный файл (год вне 1900–2100 падал
+    # в расчёте границ дня; «с» позже «по» молча давало пустую выгрузку).
+    check_period(date_from, date_to)
     today = datetime.now(UTC).astimezone(await local_zone(db)).date()
     day = (date_to or today).isoformat()
     return StreamingResponse(

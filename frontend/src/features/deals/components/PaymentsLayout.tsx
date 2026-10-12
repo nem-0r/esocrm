@@ -200,9 +200,11 @@ export function PaymentsLayout({
 
         <div className="min-h-0 flex-1 overflow-y-auto">
           {periodError ? (
+            // Причину не повторяем: её уже озвучивает подсказка под полями дат (role="alert"
+            // в PeriodPicker) — единственный озвучиваемый источник. Здесь только итог.
             <EmptyState
-              title={periodError}
-              hint="Поправьте даты в блоке «Период» над списком — оплаты появятся сразу."
+              title="Оплаты не показаны — период указан неверно"
+              hint="Что поправить, написано под полями дат над списком. Оплаты появятся сразу, как только даты будут верны."
             />
           ) : list.isLoading ? (
             <ListSkeleton rows={8} />

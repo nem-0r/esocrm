@@ -2,7 +2,7 @@ import { Ban, Check, Search } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 
 import type { Conversation, Message } from '@/entities/types'
-import { hasNoLink } from '@/features/chats/accountLink'
+import { hasNoLink, isAccountOffline } from '@/features/chats/accountLink'
 import { FUNNEL_LABEL } from '@/features/profile/lib'
 import { useConversations, useForwardMessages } from '@/features/chats/queries'
 import { ApiError } from '@/shared/api/client'
@@ -105,6 +105,9 @@ export function ForwardSheet({
       onOpenChange(false)
     } catch (cause) {
       setError(cause instanceof ApiError ? cause.message : 'Не удалось переслать')
+      // Аккаунт получателя оказался без связи: чат в списке уже обновляется и станет
+      // недоступным, а выбранным не должен оставаться — кнопка вела бы к тому же отказу.
+      if (isAccountOffline(cause)) setTarget(null)
     }
   }
 

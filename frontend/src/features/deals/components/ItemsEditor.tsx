@@ -5,8 +5,8 @@ import { Link } from 'react-router-dom'
 import type { Service } from '@/entities/types'
 import {
   activeItems,
-  amountFieldError,
   amountInput,
+  amountLiveError,
   canRemoveItem,
   newItemDraft,
   normalizeServiceName,
@@ -43,6 +43,8 @@ export function ItemsEditor({
   // Поля, из которых уже уходили: пустую сумму ругаем, только когда человек её миновал,
   // а не в тот момент, когда он только открыл окно.
   const [visited, setVisited] = useState<ReadonlySet<string>>(new Set())
+  // Поле суммы, в котором сейчас курсор: пока человек печатает «4500,», это не ошибка.
+  const [editing, setEditing] = useState<string | null>(null)
   // «Убрать» есть, пока активных строк больше одной, — пустой состав сервер не примет.
   const removable = canRemoveItem(items)
 
@@ -103,7 +105,9 @@ export function ItemsEditor({
           )
         }
         const amountProblem =
-          item.amount.trim() !== '' || visited.has(item.key) ? amountFieldError(item.amount) : null
+          item.amount.trim() !== '' || visited.has(item.key)
+            ? amountLiveError(item.amount, editing === item.key)
+            : null
         const linked = catalog.find((service) => service.id === item.serviceId) ?? null
         // Позиция ссылается на услугу, которой нет среди продающихся: значит
         // её сняли с продажи или удалили уже ПОСЛЕ того, как её выбрали в
@@ -156,7 +160,11 @@ export function ItemsEditor({
               invalid={amountProblem !== null}
               aria-invalid={amountProblem !== null}
               onChange={(event) => patch(index, { amount: event.target.value })}
-              onBlur={() => setVisited((current) => new Set(current).add(item.key))}
+              onFocus={() => setEditing(item.key)}
+              onBlur={() => {
+                setEditing((current) => (current === item.key ? null : current))
+                setVisited((current) => new Set(current).add(item.key))
+              }}
               trailing={
                 <span className="tnum text-micro text-ink-faint">
                   {amount ? money(amount) : ''}

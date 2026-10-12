@@ -19,7 +19,8 @@ ADMIN_PASSWORD — тогда команда ничего не спрашива�
     docker compose -f docker-compose.prod.yml exec api \\
         python -m app.cli reset-password --email you@company.ru
 
-Команда печатает одноразовую ссылку на новый пароль (24 часа, один раз); открыв
+Команда печатает одноразовую ссылку на новый пароль вида `https://сайт/reset#<токен>`
+(24 часа, один раз; токен после «#» не уходит на сервер и не попадает в журналы); открыв
 её, человек задаёт пароль и входит, все его прежние сессии завершаются. Работает
 для любого активного сотрудника, принявшего приглашение, — не только руководителя.
 """
@@ -104,6 +105,12 @@ def _site_origin(explicit: str | None) -> str | None:
     return chosen.rstrip("/") if chosen else None
 
 
+def full_link(origin: str | None, path: str) -> str:
+    """Полная ссылка для сотрудника: `https://сайт/reset#<токен>`. Без адреса сайта —
+    относительная, её дополняет человек."""
+    return f"{origin}{path}" if origin else path
+
+
 async def reset_password(email: str, site: str | None) -> int:
     email = normalize_email(validate_email_format(email))
 
@@ -121,7 +128,7 @@ async def reset_password(email: str, site: str | None) -> int:
             return 1
 
     origin = _site_origin(site)
-    link = f"{origin}{issued.link}" if origin else issued.link
+    link = full_link(origin, issued.link)
     print(
         f"Одноразовая ссылка для нового пароля — {user.full_name} <{email}>.\n"
         "Действует 24 часа и срабатывает один раз; прежняя ссылка, если была, отключена.\n\n"

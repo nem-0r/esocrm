@@ -13,7 +13,7 @@ from pydantic import Field, field_validator, model_validator
 
 from app.models import FunnelStage, UserRole
 from app.schemas.common import ApiModel
-from app.schemas.validators import optional_phone
+from app.schemas.validators import optional_staff_phone
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 TIME_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
@@ -26,9 +26,20 @@ def validate_email_format(value: str) -> str:
     return value
 
 
+# bcrypt учитывает не больше 72 байт пароля, а на большем падает (была ошибка 500).
+# Считаем байты UTF-8, а не символы: русская буква — два байта, то есть до 36 букв.
+PASSWORD_MIN_LENGTH = 8
+PASSWORD_MAX_BYTES = 72
+PW_TOO_LONG_MESSAGE = (
+    "Пароль слишком длинный: не больше 72 латинских букв и цифр (русская буква считается за две)"
+)
+
+
 def validate_password_strength(value: str) -> str:
-    if len(value) < 8:
-        raise ValueError("Пароль должен быть не короче 8 символов")
+    if len(value) < PASSWORD_MIN_LENGTH:
+        raise ValueError(f"Пароль должен быть не короче {PASSWORD_MIN_LENGTH} символов")
+    if len(value.encode("utf-8")) > PASSWORD_MAX_BYTES:
+        raise ValueError(PW_TOO_LONG_MESSAGE)
     return value
 
 
@@ -158,7 +169,7 @@ class UserCreateIn(ApiModel):
     @field_validator("phone")
     @classmethod
     def _phone(cls, value: str | None) -> str | None:
-        return optional_phone(value)
+        return optional_staff_phone(value)
 
 
 class UserCreateOut(UserOut):
@@ -189,7 +200,7 @@ class UserUpdateIn(ApiModel):
     @field_validator("phone")
     @classmethod
     def _phone(cls, value: str | None) -> str | None:
-        return optional_phone(value)
+        return optional_staff_phone(value)
 
     @field_validator("email")
     @classmethod
@@ -206,8 +217,9 @@ class PasswordResetOut(ApiModel):
 
     link: str = Field(
         description=(
-            "Относительная ссылка `/reset/{token}`, как `invite_url` у приглашений: полный "
-            "адрес собирает интерфейс по адресу сайта. Токена нет нигде, кроме этого ответа."
+            "Относительная ссылка `/reset#{token}`: полный адрес собирает интерфейс по "
+            "адресу сайта, как у `invite_url`. Токен после «#» браузер не отправляет на "
+            "сервер (не попадает в журналы и Referer). Токена нет нигде, кроме этого ответа."
         )
     )
     expires_at: datetime = Field(description="Когда ссылка перестанет работать (через 24 часа).")

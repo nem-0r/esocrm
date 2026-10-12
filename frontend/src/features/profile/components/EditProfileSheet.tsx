@@ -49,15 +49,15 @@ export function EditProfileSheet({
     const problems: Record<string, string> = {}
     const nameProblem = textError(fullName, NAME_MAX_LENGTH, 'Имя')
     if (nameProblem) problems.full_name = nameProblem
-    const phoneProblem = phoneError(phone)
+    // Телефон проверяем и отправляем, только если его меняли: ранее сохранённое значение
+    // в старом формате (например, со скобками) не должно мешать поменять имя.
+    const phoneChanged = normalizePhone(phone) !== normalizePhone(me.phone ?? '')
+    const phoneProblem = phoneChanged ? phoneError(phone) : null
     if (phoneProblem) problems.phone = phoneProblem
     if (Object.keys(problems).length > 0) {
       setFields(problems)
       return
     }
-    // Телефон отправляем, только если его меняли: ранее сохранённое значение в
-    // старом формате не должно мешать поменять имя.
-    const phoneChanged = normalizePhone(phone) !== (me.phone ?? '')
     try {
       await update.mutateAsync({
         full_name: fullName.trim(),

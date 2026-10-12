@@ -55,8 +55,23 @@ def test_tokens_are_unique() -> None:
     assert len({pr.issue_token(user, NOW) for _ in range(50)}) == 50
 
 
-def test_reset_path_is_relative_like_invites() -> None:
-    assert pr.reset_path("abc_DEF-123") == "/reset/abc_DEF-123"
+def test_reset_link_keeps_the_token_in_the_fragment() -> None:
+    # Всё после «#» браузер не отправляет на сервер: токен не попадает ни в
+    # журналы nginx, ни в заголовок Referer. Путь относительный, как у приглашений.
+    link = pr.reset_path("abc_DEF-123")
+    assert link == "/reset#abc_DEF-123"
+    path, _, fragment = link.partition("#")
+    assert path == "/reset"
+    assert fragment == "abc_DEF-123"
+
+
+def test_cli_prints_a_full_link_in_the_new_format() -> None:
+    from app import cli
+
+    assert cli.full_link("https://esocrm.com", "/reset#tok") == "https://esocrm.com/reset#tok"
+    # Без адреса сайта — относительная ссылка, её дополнит человек
+    assert cli.full_link(None, "/reset#tok") == "/reset#tok"
+    assert cli._site_origin("https://esocrm.com/") == "https://esocrm.com"
 
 
 # ------------------------------------------------------------------ проверка
@@ -192,6 +207,60 @@ def test_new_password_follows_the_same_policy_as_invites() -> None:
     with pytest.raises(ValidationError) as caught:
         ResetPasswordIn(**short)
     assert "не короче 8" in str(caught.value)
+
+
+# Длинная русская парольная фраза: 47 символов, но 88 байт в UTF-8. bcrypt
+# принимает не больше 72 байт и на большем падал ошибкой 500.
+LONG_RU = "Очень длинная парольная фраза для проверки сети"
+
+
+def test_long_password_is_measured_in_utf8_bytes() -> None:
+    assert len(LONG_RU) < 72 < len(LONG_RU.encode("utf-8"))
+
+
+def test_password_longer_than_72_bytes_is_rejected_everywhere() -> None:
+    from app.schemas.auth import AcceptInviteIn, MeUpdateIn
+    from app.schemas.user import validate_password_strength
+
+    for model, fields in (
+        (ResetPasswordIn, {"token": "t", "password": LONG_RU}),
+        (AcceptInviteIn, {"token": "t", "password": LONG_RU}),
+        (MeUpdateIn, {"current_password": "old-pass-1", "new_password": LONG_RU}),
+    ):
+        with pytest.raises(ValidationError) as caught:
+            model(**fields)
+        assert "Пароль слишком длинный" in str(caught.value), model.__name__
+    with pytest.raises(ValueError, match="слишком длинный"):
+        validate_password_strength("a" * 73)
+
+
+def test_password_up_to_72_bytes_is_accepted() -> None:
+    from app.schemas.user import validate_password_strength
+
+    assert validate_password_strength("a" * 72) == "a" * 72
+    assert validate_password_strength("я" * 36) == "я" * 36  # 36 букв = 72 байта
+    with pytest.raises(ValueError):
+        validate_password_strength("я" * 37)  # 74 байта
+
+
+async def test_hashing_a_too_long_password_is_a_clear_422_not_a_crash() -> None:
+    # Вторая линия: если длинный пароль дойдёт до хеширования в обход схемы
+    # (команда на сервере, будущий код), ответ — понятный отказ, а не 500.
+    from app.services.auth_service import hash_password
+
+    with pytest.raises(Invalid) as caught:
+        await hash_password(LONG_RU)
+    assert "слишком длинный" in caught.value.message
+    assert (await hash_password("я" * 36)).startswith("$2")
+
+
+def test_link_check_takes_the_token_in_the_body() -> None:
+    from app.schemas.auth import ResetPasswordCheckIn
+
+    body = {"token": "abc"}
+    assert ResetPasswordCheckIn(**body).token == body["token"]
+    with pytest.raises(ValidationError):
+        ResetPasswordCheckIn()  # type: ignore[call-arg]
 
 
 # ----------------------------------------------------------- ограничение частоты

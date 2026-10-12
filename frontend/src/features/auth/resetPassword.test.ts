@@ -2,9 +2,37 @@ import { describe, expect, it } from 'vitest'
 
 import { ApiError } from '@/shared/api/client'
 
-import { MIN_PASSWORD_LENGTH, passwordProblem, resetFailure } from './resetPassword'
+import {
+  MAX_PASSWORD_BYTES,
+  MIN_PASSWORD_LENGTH,
+  passwordBytes,
+  passwordProblem,
+  resetFailure,
+  tokenFromLocation,
+} from './resetPassword'
+
+// Русская парольная фраза: 47 символов, но 88 байт — больше предела bcrypt (72 байта).
+const LONG_RU = 'Очень длинная парольная фраза для проверки сети'
 
 describe('пароль на странице «Новый пароль»', () => {
+  it('длина считается в байтах UTF-8, как на сервере', () => {
+    expect(MAX_PASSWORD_BYTES).toBe(72)
+    expect(LONG_RU.length).toBeLessThan(72)
+    expect(passwordBytes(LONG_RU)).toBe(88)
+    expect(passwordBytes('я')).toBe(2)
+  })
+
+  it('длиннее 72 байт — «слишком длинный», хотя символов меньше 72', () => {
+    expect(passwordProblem(LONG_RU, LONG_RU)).toContain('Пароль слишком длинный')
+    expect(passwordProblem('a'.repeat(73), 'a'.repeat(73))).toContain('слишком длинный')
+    expect(passwordProblem('я'.repeat(37), 'я'.repeat(37))).toContain('слишком длинный')
+  })
+
+  it('ровно 72 байта — можно', () => {
+    expect(passwordProblem('a'.repeat(72), 'a'.repeat(72))).toBeNull()
+    expect(passwordProblem('я'.repeat(36), 'я'.repeat(36))).toBeNull()
+  })
+
   it('короче восьми символов — ошибка с числом', () => {
     expect(passwordProblem('1234567', '1234567')).toContain(String(MIN_PASSWORD_LENGTH))
   })
@@ -20,6 +48,24 @@ describe('пароль на странице «Новый пароль»', () =>
 
   it('длина проверяется раньше совпадения: одно сообщение за раз', () => {
     expect(passwordProblem('abc', 'abd')).toContain('не короче')
+  })
+})
+
+describe('токен из адреса', () => {
+  it('новая ссылка /reset#<токен>: токен из фрагмента', () => {
+    expect(tokenFromLocation('#abc_DEF-123')).toBe('abc_DEF-123')
+    expect(tokenFromLocation('#  abc  ')).toBe('abc')
+  })
+
+  it('прежняя ссылка /reset/<токен>: токен из пути', () => {
+    expect(tokenFromLocation('', 'abc_DEF-123')).toBe('abc_DEF-123')
+  })
+
+  it('фрагмент важнее пути; без токена — пустая строка', () => {
+    expect(tokenFromLocation('#fromHash', 'fromPath')).toBe('fromHash')
+    expect(tokenFromLocation('')).toBe('')
+    expect(tokenFromLocation('#')).toBe('')
+    expect(tokenFromLocation('', undefined)).toBe('')
   })
 })
 

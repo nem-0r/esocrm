@@ -2,25 +2,31 @@
  * Страница «Новый пароль» по одноразовой ссылке руководителя (D-38).
  *
  * Почты в системе служебные, писем нет: сотрудник, забывший пароль, получает
- * от руководителя ссылку `/reset/{токен}`, задаёт здесь новый пароль и сразу
+ * от руководителя ссылку `/reset#{токен}`, задаёт здесь новый пароль и сразу
  * входит. Ссылка живёт 24 часа и срабатывает один раз — любая причина отказа
  * (просрочена, использована, выдана заново, не существует) показывается одинаково.
+ *
+ * Токен — после «#»: браузер не отправляет его на сервер. Страница запоминает
+ * токен и сразу стирает его из адресной строки (в истории браузера его не
+ * остаётся), а на сервер отправляет только в теле запроса. Прежние ссылки
+ * `/reset/{токен}` тоже работают — токен из пути стирается так же.
  */
 
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { useState, type FormEvent } from 'react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
+import { useLayoutEffect, useState, type FormEvent } from 'react'
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 
 import { api, ApiError } from '@/shared/api/client'
 import { useAuth } from '@/shared/hooks/useAuth'
 import { dateTimeFull } from '@/shared/lib/format'
 import { Button, EmptyState, ErrorState, Field, InlineError, Input, LoadingState } from '@/shared/ui'
 import {
-  MIN_PASSWORD_LENGTH,
+  PASSWORD_LENGTH_HINT,
   RESET_LINK_INVALID_HINT,
   RESET_LINK_INVALID_TITLE,
   passwordProblem,
   resetFailure,
+  tokenFromLocation,
 } from '@/features/auth/resetPassword'
 
 interface ResetPreview {
@@ -28,8 +34,15 @@ interface ResetPreview {
   expires_at: string
 }
 
+/** Адрес страницы без токена — то, что остаётся в адресной строке и истории. */
+const CLEAN_PATH = '/reset'
+
 export function ResetPasswordPage() {
-  const { token = '' } = useParams<{ token: string }>()
+  const params = useParams<{ token: string }>()
+  const location = useLocation()
+  // Токен читается один раз, из состояния роутера (не из window.location: его мы
+  // сейчас перепишем). Дальше он живёт только в памяти страницы.
+  const [token] = useState(() => tokenFromLocation(location.hash, params.token))
   const { me, logout } = useAuth()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
@@ -42,10 +55,23 @@ export function ResetPasswordPage() {
   // Пароль сохранён, идёт переход в систему: показывать в этот момент «Вы уже вошли» нельзя.
   const [done, setDone] = useState(false)
 
+  // До первой отрисовки и до любых запросов: убрать токен из адресной строки.
+  // replaceState, а не переход роутера — страница не перерисовывается, а в истории
+  // браузера остаётся чистый адрес. Состояние истории сохраняем: на нём держится
+  // навигация роутера «назад/вперёд».
+  useLayoutEffect(() => {
+    const { pathname, hash } = window.location
+    if (hash.length > 1 || pathname.startsWith(`${CLEAN_PATH}/`)) {
+      window.history.replaceState(window.history.state, '', CLEAN_PATH)
+    }
+  }, [])
+
   const preview = useQuery({
     queryKey: ['reset-preview', token],
-    queryFn: ({ signal }) =>
-      api.get<ResetPreview>(`/auth/reset-password/${encodeURIComponent(token)}`, undefined, signal),
+    // Токен — в теле запроса, а не в адресе: адреса оседают в журналах сервера.
+    queryFn: () => api.post<ResetPreview>('/auth/reset-password/check', { token }),
+    // Без токена спрашивать нечего: сразу экран «ссылка недействительна».
+    enabled: token !== '',
     retry: false,
     // Ссылка не должна пережить страницу в кэше: она одноразовая.
     gcTime: 0,
@@ -78,7 +104,8 @@ export function ResetPasswordPage() {
     }
   }
 
-  const linkFailure = dead ? 'invalid' : preview.error ? resetFailure(preview.error) : null
+  const linkFailure =
+    dead || token === '' ? 'invalid' : preview.error ? resetFailure(preview.error) : null
 
   async function leaveAndContinue() {
     await logout()
@@ -151,7 +178,7 @@ export function ResetPasswordPage() {
             </header>
 
             <form onSubmit={onSubmit} className="flex flex-col gap-4" aria-label="Новый пароль">
-              <Field label="Новый пароль" hint={`Не короче ${MIN_PASSWORD_LENGTH} символов`}>
+              <Field label="Новый пароль" hint={PASSWORD_LENGTH_HINT}>
                 <Input
                   type="password"
                   value={password}

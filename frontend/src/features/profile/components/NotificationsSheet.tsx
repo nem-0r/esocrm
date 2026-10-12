@@ -104,6 +104,8 @@ export function NotificationsSheet({
                 <>
                   {isUnread && <Dot tone="accent" />}
                   <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                    {/* Точка и цвет фона видны только глазам — диктору то же самое говорит текст. */}
+                    {isUnread && <span className="sr-only">Не прочитано.</span>}
                     <span className="text-sm text-ink">{row.title}</span>
                     <span className="break-words text-xs text-ink-muted">{row.text}</span>
                     <span className="text-micro text-ink-faint">{dateTimeFull(row.created_at)}</span>

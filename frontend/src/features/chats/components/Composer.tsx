@@ -17,10 +17,11 @@ import {
   isRecordingSupported,
   useVoiceRecorder,
 } from '@/features/chats/components/composer/useVoiceRecorder'
+import { blockedAttachText, blockedPlaceholder } from '@/features/chats/accountLink'
 import { useSendMessage, useTemplates } from '@/features/chats/queries'
 import { ApiError } from '@/shared/api/client'
 import { cn } from '@/shared/lib/cn'
-import { Button, IconButton, InlineError, Sheet, Textarea } from '@/shared/ui'
+import { Button, IconButton, InlineError, Sheet, Textarea, toast } from '@/shared/ui'
 
 const MAX_LENGTH = 4096
 
@@ -65,7 +66,11 @@ export const Composer = forwardRef<
   ComposerHandle,
   {
     conversationId: number
-    /** Почему писать нельзя (аккаунт без связи, D-37). Есть причина — всё поле выключено. */
+    /**
+     * Почему клиенту писать нельзя (аккаунт без связи, D-37). Есть причина — закрыты обычные
+     * сообщения, вложения и голосовые. Служебная заметка остаётся: в Telegram она не уходит,
+     * и сервер принимает её и без связи.
+     */
     disabledReason?: string | null
   }
 >(function Composer({ conversationId, disabledReason }, ref) {
@@ -89,18 +94,29 @@ export const Composer = forwardRef<
   // Голосовое, которое нужно отправить, как только оно загрузится на сервер.
   const [autoSend, setAutoSend] = useState(false)
 
-  // Выключено целиком: поле, вложения, заметка, голосовое и «Отправить». Работающая
-  // кнопка, которую сервер всё равно отклонит, была бы кнопкой-обманкой.
+  // Нет связи с аккаунтом: вложения и голосовые закрыты совсем (клиенту они не уйдут), а
+  // обычное сообщение — пока не включена служебная заметка. Работающая кнопка, которую
+  // сервер всё равно отклонит, была бы кнопкой-обманкой; заметку сервер принимает.
   const blocked = Boolean(disabledReason)
+  const regularBlocked = blocked && !internal
   const recording = recorder.state === 'recording' || recorder.state === 'requesting'
   const hasContent = text.trim().length > 0 || queue.items.length > 0
   const canSend =
-    hasContent && !blocked && !send.isPending && !queue.uploading && !queue.failed && !recording
+    hasContent &&
+    !regularBlocked &&
+    !send.isPending &&
+    !queue.uploading &&
+    !queue.failed &&
+    !recording
   const canRecord = isRecordingSupported() && !blocked
 
   function addFiles(files: File[]) {
-    // Файлы бросают и на всё окно чата, и вставляют из буфера — туда же закрыто.
-    if (blocked || !files.length) return
+    if (!files.length) return
+    // Файлы бросают и на всё окно чата, и вставляют из буфера: молча терять их нельзя.
+    if (blocked) {
+      toast(blockedAttachText(disabledReason ?? ''))
+      return
+    }
     setError(queue.add(files))
   }
 
@@ -108,7 +124,10 @@ export const Composer = forwardRef<
 
   async function submit() {
     if (!canSend) {
-      if (queue.failed && !blocked) {
+      if (regularBlocked) {
+        // Сюда попадаем не кнопкой (она выключена), а, например, записанным голосовым.
+        if (hasContent) setError(`${disabledReason}: сообщение не отправлено. Заметку отправить можно`)
+      } else if (queue.failed) {
         setError('Один из файлов не загрузился — повторите загрузку или уберите его')
       }
       return
@@ -122,7 +141,9 @@ export const Composer = forwardRef<
       })
       setText('')
       queue.clear()
-      setInternal(false)
+      // Без связи заметка — единственное, что можно написать: режим не сбрасываем,
+      // иначе после каждой заметки поле снова выключалось бы.
+      if (!blocked) setInternal(false)
       textarea.current?.focus()
     } catch (cause) {
       setError(cause instanceof ApiError ? cause.message : 'Не удалось отправить')
@@ -209,12 +230,15 @@ export const Composer = forwardRef<
               </IconButton>
             )}
 
+            {/* Замочек работает и без связи: служебная заметка клиенту не уходит. */}
             <IconButton
               label={internal ? 'Обычное сообщение' : 'Служебная заметка'}
               active={internal}
-              onClick={() => setInternal((v) => !v)}
-              disabled={blocked}
-              className="disabled:cursor-not-allowed disabled:opacity-45"
+              onClick={() => {
+                setInternal((v) => !v)
+                // Подсказка «заметку отправить можно» сделала своё дело.
+                if (blocked) setError(null)
+              }}
             >
               <Lock className="size-5" aria-hidden />
             </IconButton>
@@ -227,14 +251,18 @@ export const Composer = forwardRef<
               onChange={(e) => setText(e.target.value)}
               onKeyDown={onKeyDown}
               onPaste={onPaste}
-              disabled={blocked}
+              disabled={regularBlocked}
               placeholder={
-                disabledReason ?? (internal ? 'Заметка для команды…' : 'Написать сообщение…')
+                internal
+                  ? 'Заметка для команды…'
+                  : regularBlocked
+                    ? blockedPlaceholder(disabledReason ?? '')
+                    : 'Написать сообщение…'
               }
               className={cn(
                 'max-h-40 min-h-10 flex-1 py-2.5',
                 internal && 'border-warning/50 bg-warning-soft/40',
-                blocked && 'cursor-not-allowed opacity-60',
+                regularBlocked && 'cursor-not-allowed opacity-60',
               )}
             />
           </>

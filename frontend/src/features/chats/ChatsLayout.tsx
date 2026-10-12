@@ -1,6 +1,6 @@
 import { AlertTriangle, ChevronRight, Search, X } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 
 import { useMe } from '@/shared/hooks/useAuth'
 import { cn } from '@/shared/lib/cn'
@@ -21,14 +21,18 @@ import { SectionActions } from '@/app/layout/SectionActions'
 import { ChatListItem } from '@/features/chats/components/ChatListItem'
 import { useConversations, useCounters, useNextConversation, type ChatFilter } from '@/features/chats/queries'
 import {
+  MAX_SEARCH,
   QUEUE_DONE,
+  chatPath,
   clearTaken,
   loadFilter,
   loadTaken,
   overFilterLabel,
-  pushTaken,
+  queueDoneText,
   saveFilter,
   saveTaken,
+  searchFromParams,
+  withSearch,
 } from '@/features/chats/replyQueue'
 
 export function ChatsLayout({
@@ -47,13 +51,33 @@ export function ChatsLayout({
     setFilterState(next)
     saveFilter(next)
   }
-  const [search, setSearch] = useState('')
-  const [debounced, setDebounced] = useState('')
+
+  // Текст поиска живёт в адресе (`?q=`): раздел пересобирается при первом открытии чата, и
+  // состояние компонента терялось бы, а адрес переживает и пересборку, и «Назад» на телефоне.
+  // Список строится по адресу, поле — по набранному тексту (чтобы не отставать от пальцев).
+  const [params, setParams] = useSearchParams()
+  const debounced = searchFromParams(params)
+  const [search, setSearch] = useState(debounced)
+  // Что в адрес записали мы сами. Адрес стал другим — его поменяли снаружи (кнопка «Чаты»,
+  // «Назад»), и поле должно пойти за ним, а не затереть его при следующей записи.
+  const written = useRef(debounced)
 
   useEffect(() => {
-    const timer = setTimeout(() => setDebounced(search.trim()), 300)
+    if (debounced !== written.current) {
+      written.current = debounced
+      setSearch(debounced)
+    }
+  }, [debounced])
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      const next = search.trim().slice(0, MAX_SEARCH)
+      if (next === written.current) return
+      written.current = next
+      setParams((prev) => withSearch(prev, next), { replace: true })
+    }, 300)
     return () => clearTimeout(timer)
-  }, [search])
+  }, [search, setParams])
 
   const { data: counters } = useCounters()
   const list = useConversations({ filter, q: debounced })
@@ -80,16 +104,20 @@ export function ChatsLayout({
   // «Взять первого»: уже взятые в этой сессии чаты уходят серверу в `skip`, поэтому
   // повторное нажатие ведёт к следующему, а не к тому же самому чату.
   async function takeFirst() {
-    const taken = loadTaken(me.id)
     try {
-      const conversation = await takeNext.mutateAsync(taken)
-      saveTaken(me.id, pushTaken(taken, conversation.id))
-      navigate(`/chats/${conversation.id}`)
+      // Взятые, которые написали снова, мутация сама убирает из списка (takeNextInQueue).
+      const { conversation, taken } = await takeNext.mutateAsync({
+        taken: loadTaken(me.id),
+        someoneWaits: (counters?.awaiting ?? 1) > 0,
+      })
+      saveTaken(me.id, taken)
+      // Поиск в адресе остаётся: список слева не должен меняться от того, что открыли чат.
+      navigate(chatPath(conversation.id, debounced))
     } catch (error) {
       if (error instanceof ApiError && error.code === QUEUE_DONE) {
         // Все ждущие уже взяты: говорим об этом и начинаем круг заново
         clearTaken(me.id)
-        toast('Больше нет чатов в очереди. Нажмите ещё раз — начнём с самого давнего.')
+        toast(queueDoneText(counters?.awaiting ?? 0))
       } else if (error instanceof ApiError && error.isNotFound) {
         toast(error.message)
       } else {
@@ -231,6 +259,7 @@ export function ChatsLayout({
                   key={conversation.id}
                   conversation={conversation}
                   active={conversation.id === selectedId}
+                  search={debounced}
                 />
               ))}
               {list.hasNextPage && (

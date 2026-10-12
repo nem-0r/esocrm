@@ -61,6 +61,8 @@ const STAFF = [
   member(2, { full_name: 'Анна Менеджер', phone: '+7 916 200-10-03' }),
   member(3, { full_name: 'Дмитрий Новичок', invite_pending: true }),
   member(4, { full_name: 'Ирина Отключена', is_active: false }),
+  // Телефон сохранён до проверки L1 — в формате, который форма сейчас не примет
+  member(5, { full_name: 'Ольга Старый номер', phone: '+7 (916) 200-10-05' }),
 ]
 
 function respond(status: number, body: unknown): Response {
@@ -90,7 +92,7 @@ beforeEach(() => {
             error: { code: 'reset_inactive', message: 'Сотрудник отключён', details: {} },
           })
         }
-        return respond(200, { link: '/reset/TOKEN-ABC', expires_at: '2026-10-13T12:00:00Z' })
+        return respond(200, { link: '/reset#TOKEN-ABC', expires_at: '2026-10-13T12:00:00Z' })
       }
       if (method === 'PATCH' && url.pathname === '/api/v1/users/2') return respond(200, STAFF[1])
       return respond(200, {})
@@ -198,7 +200,8 @@ describe('карточка сотрудника: сбросить пароль',
     await click(byText('button', 'Сбросить пароль'))
     await click(byText('button', 'Выдать ссылку'))
     expect(resets()).toEqual([{ method: 'POST', path: '/api/v1/users/2/reset-password', body: undefined }])
-    expect(text()).toContain(`${window.location.origin}/reset/TOKEN-ABC`)
+    // Токен — после «#»: браузер не отправит его на сервер, в журналы он не попадёт
+    expect(text()).toContain(`${window.location.origin}/reset#TOKEN-ABC`)
     expect(text()).toContain('Передайте ссылку сотруднику лично, например в Telegram')
     expect(text()).toContain('Действует 24 часа')
     expect(text()).toContain('работает один раз')
@@ -212,7 +215,7 @@ describe('карточка сотрудника: сбросить пароль',
     await click(byText('button', 'Сбросить пароль'))
     await click(byText('button', 'Выдать ссылку'))
     expect(text()).toContain('Сотрудник отключён')
-    expect(text()).not.toContain('/reset/')
+    expect(text()).not.toContain('/reset')
   })
 })
 
@@ -253,6 +256,24 @@ describe('телефон сотрудника в форме', () => {
     await save()
     const patch = calls.find((c) => c.method === 'PATCH')
     expect((patch!.body as { phone: string }).phone).toBe('+7 916 200-10-09')
+  })
+
+  it('старый номер со скобками не мешает сохранить карточку: без ошибки, телефон не уходит', async () => {
+    await openMember('Ольга Старый номер')
+    expect(phoneInput().value).toBe('+7 (916) 200-10-05')
+    await save()
+    expect(text()).not.toContain('Проверьте формат телефона')
+    const patch = calls.find((c) => c.method === 'PATCH' && c.path === '/api/v1/users/5')
+    expect(patch).toBeDefined()
+    expect(patch!.body).not.toHaveProperty('phone')
+  })
+
+  it('но если старый номер начали править — новое значение проверяется', async () => {
+    await openMember('Ольга Старый номер')
+    await type(phoneInput(), '+7 (916) 200-10-0')
+    await save()
+    expect(text()).toContain('Проверьте формат телефона')
+    expect(writes().filter((c) => c.method === 'PATCH')).toHaveLength(0)
   })
 
   it('очистка телефона уходит как null — поле действительно очищается', async () => {

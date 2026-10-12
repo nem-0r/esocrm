@@ -29,7 +29,7 @@ from app.models import (
     User,
 )
 from app.schemas.auth import ResetPasswordPreviewOut
-from app.schemas.user import MeOut
+from app.schemas.user import PASSWORD_MAX_BYTES, PW_TOO_LONG_MESSAGE, MeOut
 from app.services import audit, password_reset
 
 
@@ -39,6 +39,10 @@ def normalize_email(email: str) -> str:
 
 
 async def hash_password(password: str) -> str:
+    # Схемы уже не пропускают пароль длиннее 72 байт; это вторая линия на случай
+    # пути в обход схемы — bcrypt на таком пароле падает, и вышла бы ошибка 500.
+    if len(password.encode("utf-8")) > PASSWORD_MAX_BYTES:
+        raise Invalid(PW_TOO_LONG_MESSAGE, code="password_too_long", field="password")
     return await asyncio.to_thread(_hash_password_sync, password)
 
 
@@ -142,6 +146,9 @@ async def _authenticate(db: AsyncSession, request: Request, email: str, password
 
 async def login(db: AsyncSession, request: Request, email: str, password: str) -> tuple[User, str]:
     user = await _authenticate(db, request, email, password)
+    # Вошёл по паролю — значит, его помнит: выданная ссылка сброса больше не нужна
+    # и не должна остаться рабочей (как и после смены пароля в профиле).
+    password_reset.clear_token(user)
     raw_token, _session = _new_session(db, user, request)
     await audit.log_event(
         db, action="user.logged_in", entity_type="user", entity_id=user.id,

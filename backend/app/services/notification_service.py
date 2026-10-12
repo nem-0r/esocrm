@@ -5,14 +5,18 @@
 В MVP это оплаты и назначение-снятие менеджера на аккаунт.
 """
 
+import asyncio
+import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, select, update
+from sqlalchemy import event, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session
 
 from app.models import (
     AccountManager,
+    FunnelStage,
     Notification,
     NotificationKind,
     TelegramAccount,
@@ -22,6 +26,8 @@ from app.models import (
 from app.realtime.events import emit
 from app.schemas.common import CursorPage, decode_cursor, encode_cursor
 from app.services.money import format_rubles
+
+log = logging.getLogger("astra.notifications")
 
 
 def render(notification: Notification) -> tuple[str, str]:
@@ -150,6 +156,88 @@ async def mark_read(db: AsyncSession, user: User, ids: list[int] | None) -> int:
     return result.rowcount or 0
 
 
+# --- событие «пришло уведомление» уходит только после коммита ---------------------
+#
+# Экран, получив `notification.new`, сразу перезапрашивает число непрочитанных.
+# Если событие ушло раньше коммита вызывающего, перезапрос не видит новую строку и
+# бейдж остаётся со старым числом. `notify` вызывается в чужой транзакции и не
+# знает, когда её закоммитят, поэтому событие откладывается в `session.info`, а
+# публикуют его хуки сессии:
+#
+# * `after_commit` — коммит корневой транзакции (освобождение точки сохранения
+#   тоже шлёт `after_commit`, но это ещё не коммит — его пропускаем);
+# * откат точки сохранения убирает события, записанные внутри неё; откат или конец
+#   корневой транзакции — все оставшиеся.
+#
+# Публикация идёт отдельной задачей: хук синхронный, а Redis — асинхронный.
+
+_PENDING = "notification_events_pending"
+_background: set["asyncio.Task[None]"] = set()
+
+
+def _defer_events(session: Session, items: list[tuple[int, dict[str, Any]]]) -> None:
+    nested = session.get_nested_transaction()
+    pending: list[Any] = session.info.setdefault(_PENDING, [])
+    pending.extend((nested, user_id, body) for user_id, body in items)
+
+
+async def _emit_all(items: list[tuple[int, dict[str, Any]]]) -> None:
+    for user_id, body in items:
+        try:
+            await emit("notification.new", {"notification": body}, [user_id])
+        except Exception:
+            log.exception("Не отправил событие notification.new пользователю %s", user_id)
+
+
+@event.listens_for(Session, "after_commit")
+def _publish_after_commit(session: Session) -> None:
+    if session.in_nested_transaction():
+        return  # закрыли точку сохранения; корневая транзакция ещё не зафиксирована
+    pending = session.info.pop(_PENDING, None)
+    if not pending:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        log.warning("Нет работающего цикла: событие notification.new не отправлено")
+        return
+    task = loop.create_task(_emit_all([(user_id, body) for _, user_id, body in pending]))
+    _background.add(task)
+    task.add_done_callback(_background.discard)
+
+
+def _inside(transaction: Any, rolled_back: Any) -> bool:
+    """Записано внутри `rolled_back` — прямо или в более глубокой точке сохранения."""
+    while transaction is not None:
+        if transaction is rolled_back:
+            return True
+        transaction = transaction.parent
+    return False
+
+
+@event.listens_for(Session, "after_soft_rollback")
+def _drop_after_rollback(session: Session, previous_transaction: Any) -> None:
+    pending = session.info.get(_PENDING)
+    if not pending:
+        return
+    if previous_transaction.parent is None:
+        session.info.pop(_PENDING, None)
+        return
+    kept = [item for item in pending if not _inside(item[0], previous_transaction)]
+    if kept:
+        session.info[_PENDING] = kept
+    else:
+        session.info.pop(_PENDING, None)
+
+
+@event.listens_for(Session, "after_transaction_end")
+def _forget_after_transaction(session: Session, transaction: Any) -> None:
+    """Корневая транзакция кончилась (после коммита события уже ушли; значит,
+    всё, что осталось, не зафиксировано): чужим коммитом это не публикуем."""
+    if transaction.parent is None:
+        session.info.pop(_PENDING, None)
+
+
 async def notify(
     db: AsyncSession,
     *,
@@ -159,7 +247,12 @@ async def notify(
     entity_id: int,
     payload: dict[str, Any],
 ) -> None:
-    """Создаёт уведомления и шлёт событие. Транзакцию не закрывает — коммитит вызывающий."""
+    """Создаёт уведомления. Транзакцию не закрывает — коммитит вызывающий.
+
+    Событие `notification.new` уходит не сразу, а после коммита вызывающего:
+    иначе экран успевает перезапросить счётчик раньше, чем строка зафиксирована.
+    Откатили транзакцию — события нет, как нет и уведомления.
+    """
     unique_ids = sorted(set(user_ids))
     if not unique_ids:
         return
@@ -175,8 +268,7 @@ async def notify(
     ]
     db.add_all(rows)
     await db.flush()
-    for row in rows:
-        await emit("notification.new", {"notification": to_out(row)}, [row.user_id])
+    _defer_events(db.sync_session, [(row.user_id, to_out(row)) for row in rows])
 
 
 # --- аккаунт потерял связь (D-37) ---------------------------------------------
@@ -197,22 +289,29 @@ async def notify_account_error(
 ) -> None:
     """Аккаунт потерял связь: сообщить всем руководителям и менеджерам аккаунта.
 
+    Менеджерам — только тех аккаунтов, которые им видны. Аккаунты этапа «Бот»
+    (`warmup`) для менеджера не существуют (см. `deps.visible_account_ids`): ни
+    чатов, ни самого аккаунта в списках. Уведомление о таком аккаунте раскрыло бы
+    ему то, что скрыто везде, поэтому о боте узнают только руководители.
+
     Вызывается ровно один раз на переход в `error` (решает `account_link.entered_error`),
     в той же транзакции, что и смена статуса. Транзакцию не закрывает.
     """
-    admins = select(User.id).where(
+    recipients = select(User.id).where(
         User.role == UserRole.ADMIN, User.is_active.is_(True), User.deleted_at.is_(None)
     )
-    managers = (
-        select(User.id)
-        .join(AccountManager, AccountManager.user_id == User.id)
-        .where(
-            AccountManager.account_id == account.id,
-            User.is_active.is_(True),
-            User.deleted_at.is_(None),
+    if account.funnel_stage != FunnelStage.WARMUP:
+        managers = (
+            select(User.id)
+            .join(AccountManager, AccountManager.user_id == User.id)
+            .where(
+                AccountManager.account_id == account.id,
+                User.is_active.is_(True),
+                User.deleted_at.is_(None),
+            )
         )
-    )
-    user_ids = list((await db.execute(admins.union(managers))).scalars().all())
+        recipients = recipients.union(managers)
+    user_ids = list((await db.execute(recipients)).scalars().all())
     await notify(
         db,
         user_ids=user_ids,

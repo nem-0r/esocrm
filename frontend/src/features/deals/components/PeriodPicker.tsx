@@ -51,6 +51,7 @@ export function PeriodPicker({
               min={MIN_PERIOD_DATE}
               max={range.to || MAX_PERIOD_DATE}
               invalid={error !== null}
+              aria-invalid={error !== null}
               onChange={(e) => onRangeChange({ ...range, from: e.target.value })}
             />
           </Field>
@@ -61,6 +62,7 @@ export function PeriodPicker({
               min={range.from || MIN_PERIOD_DATE}
               max={MAX_PERIOD_DATE}
               invalid={error !== null}
+              aria-invalid={error !== null}
               onChange={(e) => onRangeChange({ ...range, to: e.target.value })}
             />
           </Field>

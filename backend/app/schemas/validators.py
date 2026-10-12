@@ -69,6 +69,25 @@ def optional_phone(value: str | None) -> str | None:
     return normalize_phone(value)
 
 
+# Скобки и точки в номере сотрудника: «+7 (900) 123-45-67», «8.900.123.45.67».
+_STAFF_PHONE_SEPARATORS = re.compile(r"[().]")
+
+
+def optional_staff_phone(value: str | None) -> str | None:
+    """Телефон сотрудника: то же правило, что у клиента, но скобки и точки не
+    отклоняются, а заменяются пробелами (`+7 (900) 123-45-67` → `+7 900 123-45-67`).
+
+    До проверки L1 телефон сотрудника не проверялся вовсе, и в базе лежат номера
+    в таком виде. Прежняя сборка интерфейса присылает сохранённый телефон при
+    каждом сохранении карточки, и строгая проверка ответила бы 422 на правку
+    графика или роли. Мусор (`++--1234567`, буквы, мало цифр) по-прежнему отказ.
+    У клиента правило строгое — `optional_phone`.
+    """
+    if value is None or not value.strip():
+        return None
+    return normalize_phone(_STAFF_PHONE_SEPARATORS.sub(" ", value))
+
+
 def clean_text(value: str | None, *, max_len: int, label: str) -> str | None:
     """Короткий текст: пробелы по краям срезаны, длина ограничена.
 

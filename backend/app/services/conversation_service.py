@@ -250,9 +250,30 @@ def _preview(
     return f"Вы: {body}" if direction == Direction.OUT else body
 
 
+def can_see_account_reason(user: User) -> bool:
+    """Причину обрыва связи аккаунта видит только руководитель.
+
+    Рядом с ней у руководителя кнопка «Переподключить»; менеджеру нужен сам факт
+    («аккаунт отключён, сообщите руководителю»), а не технические подробности.
+    """
+    return user.role == UserRole.ADMIN
+
+
+def _account_brief(account: TelegramAccount, *, reveal_reason: bool) -> AccountBrief:
+    brief = AccountBrief.model_validate(account)
+    return brief if reveal_reason else brief.model_copy(update={"status_reason": None})
+
+
 def _row_data(
-    row: Any, deal_amount: int | None, now: datetime, hours: worktime.WorkHours | None = None
+    row: Any,
+    deal_amount: int | None,
+    now: datetime,
+    hours: worktime.WorkHours | None = None,
+    *,
+    reveal_reason: bool = False,
 ) -> dict[str, Any]:
+    """Данные строки. Причина обрыва аккаунта по умолчанию скрыта (`reveal_reason`
+    включают только там, где ответ получает руководитель)."""
     conv, responsible, text, direction, kind, attachment_kind, last_id, last_status, internal = row
     awaiting = conv.awaiting_reply_since
     # Плашку не показываем, если менеджер уже открывал чат после начала ожидания.
@@ -262,7 +283,7 @@ def _row_data(
     return {
         "id": conv.id,
         "client": ClientBrief.model_validate(conv.client),
-        "account": AccountBrief.model_validate(conv.account),
+        "account": _account_brief(conv.account, reveal_reason=reveal_reason),
         "last_message_at": conv.last_message_at,
         "last_message_preview": _preview(text, direction, kind, attachment_kind),
         "last_message_id": last_id,
@@ -344,7 +365,11 @@ async def list_conversations(
     deals = await _awaiting_deal_amounts(db, [row[0].id for row in rows])
     now = datetime.now(UTC)
     hours = await worktime.load(db)
-    items = [ConversationRow(**_row_data(row, deals.get(row[0].id), now, hours)) for row in rows]
+    reveal = can_see_account_reason(user)
+    items = [
+        ConversationRow(**_row_data(row, deals.get(row[0].id), now, hours, reveal_reason=reveal))
+        for row in rows
+    ]
     last = rows[-1][0] if rows else None
     next_cursor = (
         encode_cursor(last.awaiting_reply_since if by_waiting else last.last_message_at, last.id)
@@ -440,7 +465,14 @@ async def next_in_queue(
             raise NotFound(QUEUE_DONE, code="queue_done")
         raise NotFound("Нет чатов в работе")
     deals = await _awaiting_deal_amounts(db, [row[0].id])
-    return ConversationRow(**_row_data(row, deals.get(row[0].id), datetime.now(UTC)))
+    return ConversationRow(
+        **_row_data(
+            row,
+            deals.get(row[0].id),
+            datetime.now(UTC),
+            reveal_reason=can_see_account_reason(user),
+        )
+    )
 
 
 async def load_visible(db: AsyncSession, user: User, conversation_id: int) -> Conversation:
@@ -474,11 +506,16 @@ async def lock_for_write(db: AsyncSession, conversation_id: int) -> None:
 
 async def get_detail(db: AsyncSession, user: User, conversation_id: int) -> ConversationDetail:
     await load_visible(db, user, conversation_id)
-    return await build_detail(db, conversation_id)
+    return await build_detail(db, conversation_id, reveal_reason=can_see_account_reason(user))
 
 
-async def build_detail(db: AsyncSession, conversation_id: int) -> ConversationDetail:
-    """Карточка чата с данными рождения и итогами оплат клиента."""
+async def build_detail(
+    db: AsyncSession, conversation_id: int, *, reveal_reason: bool = False
+) -> ConversationDetail:
+    """Карточка чата с данными рождения и итогами оплат клиента.
+
+    Причина обрыва аккаунта в ней по умолчанию пуста: `reveal_reason=True` ставят
+    только при ответе руководителю (`can_see_account_reason`)."""
     row = (await db.execute(_row_stmt().where(Conversation.id == conversation_id))).unique().first()
     if row is None:
         raise NotFound("Чат не найден")
@@ -500,7 +537,7 @@ async def build_detail(db: AsyncSession, conversation_id: int) -> ConversationDe
             )
         )
     ).one()
-    data = _row_data(row, deals.get(conv.id), datetime.now(UTC))
+    data = _row_data(row, deals.get(conv.id), datetime.now(UTC), reveal_reason=reveal_reason)
     data["client"] = ClientInChat.model_validate(conv.client)
     return ConversationDetail(
         **data, client_paid_amount=paid_amount, client_paid_count=paid_count
@@ -512,9 +549,15 @@ async def emit_updated(db: AsyncSession, detail: ConversationDetail) -> None:
 
     В `counters.updated` не числа: счётчики зависят от прав получателя,
     поэтому событие — сигнал перезапросить `/conversations/counters`.
+
+    Тело одно на всю аудиторию (руководители и менеджер аккаунта), поэтому причина
+    обрыва аккаунта в него не попадает никогда — даже если `detail` собран для
+    руководителя. Экран, которому она нужна, получает её обычным запросом карточки.
     """
     audience = await conversation_audience(db, detail.id)
-    await emit("conversation.updated", {"conversation": detail.model_dump(mode="json")}, audience)
+    body = detail.model_dump(mode="json")
+    body["account"]["status_reason"] = None
+    await emit("conversation.updated", {"conversation": body}, audience)
     await emit("counters.updated", {"conversation_id": detail.id, "stale": True}, audience)
 
 
@@ -559,7 +602,7 @@ async def mark_read(db: AsyncSession, user: User, conversation_id: int) -> Conve
                     timeout=10,
                 )
 
-    detail = await build_detail(db, conversation_id)
+    detail = await build_detail(db, conversation_id, reveal_reason=can_see_account_reason(user))
     await emit_updated(db, detail)
     return detail
 
@@ -596,6 +639,6 @@ async def transfer(
         after={"responsible_id": target.id},
     )
     await db.commit()
-    detail = await build_detail(db, conversation_id)
+    detail = await build_detail(db, conversation_id, reveal_reason=can_see_account_reason(user))
     await emit_updated(db, detail)
     return detail

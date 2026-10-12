@@ -43,6 +43,11 @@ interface Call {
 
 let calls: Call[]
 let items: AppNotification[]
+// Вторая страница ленты: если задана, первая отдаёт курсор `p2`, а запрос с ним — эти строки.
+let secondPage: AppNotification[] | null
+// Пока не вызван, ответ на запрос второй страницы не приходит (видно «Загружаем…»).
+let releaseSecondPage: (() => void) | null
+let secondPageGate: Promise<void> | null
 let unread: number
 let root: Root
 let host: HTMLElement
@@ -64,6 +69,9 @@ function respond(body: unknown): Response {
 beforeEach(() => {
   calls = []
   items = []
+  secondPage = null
+  releaseSecondPage = null
+  secondPageGate = null
   unread = 0
   closed = 0
   location = ''
@@ -77,7 +85,13 @@ beforeEach(() => {
       calls.push({ method, path: url.pathname + url.search, body })
       if (url.pathname === '/api/v1/notifications/unread-count') return respond({ count: unread })
       if (url.pathname === '/api/v1/notifications/read') return respond({ updated: 1 })
-      if (url.pathname === '/api/v1/notifications') return respond({ items, next_cursor: null })
+      if (url.pathname === '/api/v1/notifications') {
+        if (secondPage && url.searchParams.get('cursor') === 'p2') {
+          await secondPageGate
+          return respond({ items: secondPage, next_cursor: null })
+        }
+        return respond({ items, next_cursor: secondPage ? 'p2' : null })
+      }
       return respond({})
     }),
   )
@@ -252,5 +266,139 @@ describe('NotificationsSheet', () => {
     expect(document.body.textContent).not.toContain('Событие 4')
     await click(rowButton('Развернуть все') as HTMLButtonElement)
     expect(document.body.textContent).toContain('Событие 5')
+  })
+})
+
+const feedCalls = () =>
+  calls.filter((c) => c.method === 'GET' && c.path.startsWith('/api/v1/notifications?'))
+
+function events(from: number, to: number): AppNotification[] {
+  const out: AppNotification[] = []
+  for (let id = from; id <= to; id += 1) out.push(note({ id, title: `Событие ${id}` }))
+  return out
+}
+
+describe('NotificationsSheet: «Показать ещё» и вторая страница ленты', () => {
+  it('«+» в подписи говорит, что на сервере есть ещё; «Показать ещё» — только в раскрытом списке', async () => {
+    items = events(1, 5)
+    secondPage = events(6, 7)
+    await show(true)
+
+    expect(rowButton('Развернуть все · ещё 2+')).not.toBeNull()
+    expect(rowButton('Показать ещё')).toBeNull()
+
+    await click(rowButton('Развернуть все') as HTMLButtonElement)
+    expect(document.body.textContent).toContain('Событие 5')
+    expect(rowButton('Показать ещё')).not.toBeNull()
+    // Раскрыть — не значит подгрузить: вторую страницу сервер ещё не отдавал.
+    expect(feedCalls()).toHaveLength(1)
+    expect(document.body.textContent).not.toContain('Событие 6')
+  })
+
+  it('«Показать ещё» запрашивает вторую страницу по курсору и добавляет строки в конец', async () => {
+    items = events(1, 5)
+    secondPage = events(6, 7)
+    await show(true)
+    await click(rowButton('Развернуть все') as HTMLButtonElement)
+    await click(rowButton('Показать ещё') as HTMLButtonElement)
+
+    expect(feedCalls()).toHaveLength(2)
+    expect(feedCalls()[1].path).toContain('cursor=p2')
+    const text = document.body.textContent ?? ''
+    for (const id of [1, 5, 6, 7]) expect(text).toContain(`Событие ${id}`)
+    expect(text.indexOf('Событие 5')).toBeLessThan(text.indexOf('Событие 6'))
+    // Страниц больше нет: кнопка исчезла, а у списка остался только «Свернуть».
+    expect(rowButton('Показать ещё')).toBeNull()
+    expect(rowButton('Свернуть')).not.toBeNull()
+  })
+
+  it('пока вторая страница грузится, кнопка выключена и пишет «Загружаем…», повторный клик не шлёт запрос', async () => {
+    items = events(1, 5)
+    secondPage = events(6, 7)
+    secondPageGate = new Promise<void>((resolve) => {
+      releaseSecondPage = resolve
+    })
+    await show(true)
+    await click(rowButton('Развернуть все') as HTMLButtonElement)
+    await click(rowButton('Показать ещё') as HTMLButtonElement)
+
+    const loading = rowButton('Загружаем…') as HTMLButtonElement
+    expect(loading).not.toBeNull()
+    expect(loading.disabled).toBe(true)
+    await click(loading)
+    expect(feedCalls()).toHaveLength(2)
+
+    await act(async () => releaseSecondPage?.())
+    await settle()
+    expect(document.body.textContent).toContain('Событие 7')
+    expect(rowButton('Загружаем…')).toBeNull()
+  })
+
+  it('одна страница: ни «+», ни «Показать ещё»', async () => {
+    items = events(1, 5)
+    await show(true)
+    expect(rowButton('Развернуть все · ещё 2')?.textContent).not.toContain('+')
+    await click(rowButton('Развернуть все') as HTMLButtonElement)
+    expect(rowButton('Показать ещё')).toBeNull()
+  })
+
+  it('закрытие окна сворачивает список: к следующему открытию он снова на три строки', async () => {
+    items = events(1, 5)
+    await show(true)
+    await click(rowButton('Развернуть все') as HTMLButtonElement)
+    expect(document.body.textContent).toContain('Событие 5')
+
+    // Хозяин окна в этом тесте его не закрывает — видно только то, что окно сбросило само.
+    await click(document.body.querySelector('[aria-label="Закрыть"]') as HTMLElement)
+    expect(closed).toBe(1)
+    expect(document.body.textContent).not.toContain('Событие 5')
+    expect(rowButton('Развернуть все')).not.toBeNull()
+  })
+})
+
+describe('NotificationsSheet: доступность', () => {
+  it('непрочитанное названо словами для диктора, прочитанное — нет', async () => {
+    items = [
+      note({ id: 1, title: 'Новая оплата' }),
+      note({ id: 2, title: 'Старая оплата', read_at: '2026-10-10T10:00:00Z' }),
+    ]
+    unread = 1
+    await show(true)
+
+    const fresh = rowButton('Новая оплата') as HTMLButtonElement
+    const old = rowButton('Старая оплата') as HTMLButtonElement
+    expect(fresh.querySelector('.sr-only')?.textContent).toBe('Не прочитано.')
+    // Слова стоят первыми — это часть названия кнопки, которое читает диктор.
+    expect(fresh.textContent?.startsWith('Не прочитано.')).toBe(true)
+    expect(old.querySelector('.sr-only')).toBeNull()
+    expect(old.textContent).not.toContain('Не прочитано')
+  })
+
+  it('и у строки без ссылки (обычный текст) непрочитанное названо словами', async () => {
+    items = [
+      note({ id: 3, entity_type: null, entity_id: null, title: 'Без ссылки' }),
+      note({
+        id: 4,
+        entity_type: null,
+        entity_id: null,
+        title: 'Без ссылки, прочитано',
+        read_at: '2026-10-10T10:00:00Z',
+      }),
+    ]
+    await show(true)
+    const rows = Array.from(document.body.querySelectorAll('li'))
+    expect(rows).toHaveLength(2)
+    expect(rows[0].querySelector('.sr-only')?.textContent).toBe('Не прочитано.')
+    expect(rows[1].querySelector('.sr-only')).toBeNull()
+  })
+
+  it('окно — диалог с названием «Уведомления», кнопка закрытия подписана', async () => {
+    items = [note({ id: 5 })]
+    await show(true)
+    const dialog = document.body.querySelector('[role="dialog"]')
+    expect(dialog).not.toBeNull()
+    const labelledBy = dialog?.getAttribute('aria-labelledby')
+    expect(document.getElementById(labelledBy ?? '')?.textContent).toBe('Уведомления')
+    expect(dialog?.querySelector('[aria-label="Закрыть"]')).not.toBeNull()
   })
 })

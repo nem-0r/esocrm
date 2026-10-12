@@ -179,3 +179,77 @@ describe('ItemsEditor: у ошибки суммы своя причина под
     expect(spaces(text())).toContain('4 900,50 ₽')
   })
 })
+
+async function enter(index: number) {
+  await act(async () => {
+    amountInputs()[index].dispatchEvent(new FocusEvent('focusin', { bubbles: true }))
+  })
+}
+
+const alertText = () => document.body.querySelector('[role="alert"]')?.textContent ?? null
+
+describe('ItemsEditor: «4500,» в процессе набора — не ошибка, пока курсор в поле', () => {
+  it('на каждом нажатии по пути к «4500,50» красное сообщение не появляется', async () => {
+    await show([newItemDraft()])
+    await enter(0)
+    for (const typed of ['4', '45', '450', '4500', '4500,', '4500,5', '4500,50']) {
+      await typeAmount(0, typed)
+      expect(alertText(), typed).toBeNull()
+      expect(amountInputs()[0].getAttribute('aria-invalid'), typed).toBe('false')
+    }
+  })
+
+  it('точка вместо запятой и пробел в тысячах — то же', async () => {
+    await show([newItemDraft()])
+    await enter(0)
+    await typeAmount(0, '4500.')
+    expect(alertText()).toBeNull()
+    await typeAmount(0, '4 500,')
+    expect(alertText()).toBeNull()
+  })
+
+  it('ушли из поля с «4500,» — это ошибка, сообщение появляется один раз', async () => {
+    await show([newItemDraft()])
+    await enter(0)
+    await typeAmount(0, '4500,')
+    expect(alertText()).toBeNull()
+
+    await leave(0)
+    expect(alertText()).toBe('Введите сумму цифрами, например 4500 или 4500,50')
+    expect(amountInputs()[0].getAttribute('aria-invalid')).toBe('true')
+    expect(document.body.querySelectorAll('[role="alert"]')).toHaveLength(1)
+  })
+
+  it('вернулись в поле и дописали — ошибка уходит', async () => {
+    await show([newItemDraft()])
+    await enter(0)
+    await typeAmount(0, '4500,')
+    await leave(0)
+    expect(alertText()).not.toBeNull()
+
+    await enter(0)
+    await typeAmount(0, '4500,5')
+    expect(alertText()).toBeNull()
+  })
+
+  it('снова печатают «4500,» после ухода из поля — сообщение не вспыхивает заново', async () => {
+    await show([newItemDraft()])
+    await enter(0)
+    await typeAmount(0, '4500')
+    await leave(0)
+    await enter(0)
+    await typeAmount(0, '4500,')
+    expect(alertText()).toBeNull()
+  })
+
+  it('настоящие ошибки видны сразу, даже пока курсор в поле', async () => {
+    await show([newItemDraft()])
+    await enter(0)
+    await typeAmount(0, 'абв')
+    expect(alertText()).toBe('Введите сумму цифрами, например 4500 или 4500,50')
+    await typeAmount(0, '4500,,')
+    expect(alertText()).toBe('Введите сумму цифрами, например 4500 или 4500,50')
+    await typeAmount(0, '10.555')
+    expect(alertText()).toBe('Не больше двух знаков после запятой')
+  })
+})

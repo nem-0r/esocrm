@@ -155,6 +155,10 @@ async def write_status(account_id: int, status: str, reason: str | None) -> None
             # по уведомлению. Второй дождётся первого и увидит уже `error`.
             account = await _account(db, account_id, lock=True)
             previous = account.status
+            if previous == AccountStatus(status) and account.status_reason == reason:
+                # Шлюз повторяет «аккаунт мёртв» на каждое сообщение. Ничего не
+                # изменилось — ни записи в журнал, ни события, ни коммита.
+                return
             account.status = AccountStatus(status)
             account.status_reason = reason
             await log_event(

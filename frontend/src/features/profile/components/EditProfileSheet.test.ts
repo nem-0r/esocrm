@@ -75,7 +75,7 @@ async function settle() {
   }
 }
 
-async function show() {
+async function show(me: typeof ME = ME) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   await act(async () => {
     root.render(
@@ -83,7 +83,7 @@ async function show() {
         QueryClientProvider,
         { client: queryClient },
         createElement(EditProfileSheet, {
-          me: ME,
+          me,
           open: true,
           onOpenChange: (open: boolean) => {
             if (!open) closed = true
@@ -136,6 +136,15 @@ describe('профиль: имя и телефон', () => {
   it('телефон не меняли — в запрос он не попадает', async () => {
     await show()
     await save()
+    expect(patches()).toHaveLength(1)
+    expect(patches()[0].body).toEqual({ full_name: 'Марина Менеджер' })
+    expect(closed).toBe(true)
+  })
+
+  it('старый телефон со скобками не мешает поменять имя и не отправляется', async () => {
+    await show({ ...ME, phone: '+7 (916) 200-10-02' })
+    await save()
+    expect(text()).not.toContain('Проверьте формат телефона')
     expect(patches()).toHaveLength(1)
     expect(patches()[0].body).toEqual({ full_name: 'Марина Менеджер' })
     expect(closed).toBe(true)

@@ -245,6 +245,20 @@ async def run() -> int:
         )
         filename_checks("Клиенты", clients, f"Клиенты {today}.csv")
 
+        # Период проверяется до начала потока: 422 с причиной, а не оборванный файл.
+        for title, params in (
+            ("«с» позже «по»", {"date_from": "2026-10-08", "date_to": "2026-10-07"}),
+            ("год 0001", {"date_from": "0001-01-01"}),
+            ("год 9999", {"date_to": "9999-12-31"}),
+        ):
+            response = await admin.get("/clients/export", params=params)
+            body = response.json() if response.status_code == 422 else {}
+            check(
+                f"выгрузка клиентов: {title} → 422 invalid",
+                body.get("error", {}).get("code") == "invalid",
+                f"статус {response.status_code}",
+            )
+
         # ── Файл совпадает с экраном ──────────────────────────────────────
         print("\nФайл совпадает с тем, что человек видит на экране")
         for client, who in ((admin, "руководитель"), (manager, "менеджер")):

@@ -13,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy.dialects import postgresql
 from telethon.errors import (
     AuthKeyUnregisteredError,
     FloodWaitError,
@@ -43,8 +44,14 @@ from app.models import (
     Outbox,
     OutboxStatus,
     TelegramAccount,
+    UserRole,
 )
-from app.schemas.conversation import AccountBrief, ConversationRow
+from app.schemas.conversation import (
+    AccountBrief,
+    ClientInChat,
+    ConversationDetail,
+    ConversationRow,
+)
 from app.services import account_link, conversation_service, notification_service
 
 NOW = datetime(2026, 10, 11, 12, 0, tzinfo=UTC)
@@ -199,16 +206,18 @@ def test_chat_without_messages_has_empty_last_message_fields() -> None:
     assert row.last_message_preview is None
 
 
+def _row_with_dead_account() -> tuple:
+    return _row(
+        direction=Direction.OUT,
+        status=MessageStatus.SENT,
+        account_status=AccountStatus.ERROR,
+        account_reason="Сессия отозвана",
+    )
+
+
 def test_row_exposes_account_status_for_the_banner() -> None:
     data = conversation_service._row_data(
-        _row(
-            direction=Direction.OUT,
-            status=MessageStatus.SENT,
-            account_status=AccountStatus.ERROR,
-            account_reason="Сессия отозвана",
-        ),
-        None,
-        NOW,
+        _row_with_dead_account(), None, NOW, reveal_reason=True
     )
     row = ConversationRow(**data)
     assert row.account.status == AccountStatus.ERROR
@@ -216,6 +225,58 @@ def test_row_exposes_account_status_for_the_banner() -> None:
     dumped = row.model_dump(mode="json")
     assert dumped["account"]["status"] == "error"
     assert dumped["last_message_status"] == "sent"
+
+
+def test_account_reason_is_hidden_unless_the_caller_is_a_head() -> None:
+    """Причина обрыва — для руководителя (там же кнопка «Переподключить»). Менеджеру
+    нужен сам факт обрыва: статус остаётся, причина — пусто. По умолчанию причина
+    скрыта: забытый флаг не должен открывать её всем."""
+    data = conversation_service._row_data(_row_with_dead_account(), None, NOW)
+    row = ConversationRow(**data)
+    assert row.account.status == AccountStatus.ERROR
+    assert row.account.status_reason is None
+    assert row.model_dump(mode="json")["account"]["status_reason"] is None
+
+
+@pytest.mark.parametrize(
+    ("role", "sees_reason"),
+    [(UserRole.ADMIN, True), (UserRole.MANAGER, False)],
+)
+def test_only_admin_sees_account_reason(role: UserRole, sees_reason: bool) -> None:
+    assert conversation_service.can_see_account_reason(SimpleNamespace(role=role)) is sees_reason
+
+
+async def test_broadcast_event_never_carries_the_account_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`conversation.updated` уходит сразу руководителям и менеджеру аккаунта —
+    одним и тем же телом, поэтому причина в нём недопустима, даже если карточка,
+    переданная в рассылку, собрана для руководителя."""
+    sent: list[tuple[str, dict]] = []
+
+    async def fake_audience(_db: object, _conversation_id: int) -> list[int]:
+        return [1, 2]
+
+    async def fake_emit(event: str, data: dict, _users: list[int]) -> None:
+        sent.append((event, data))
+
+    monkeypatch.setattr(conversation_service, "conversation_audience", fake_audience)
+    monkeypatch.setattr(conversation_service, "emit", fake_emit)
+    data = conversation_service._row_data(
+        _row_with_dead_account(), None, NOW, reveal_reason=True
+    )
+    data["client"] = ClientInChat(id=3, name="Ксения", data_complete=False, first_contact_at=NOW)
+    detail = ConversationDetail(**data, client_paid_amount=0, client_paid_count=0)
+    assert detail.account.status_reason == "Сессия отозвана"
+
+    await conversation_service.emit_updated(object(), detail)  # type: ignore[arg-type]
+
+    event, data = sent[0]
+    assert event == "conversation.updated"
+    assert data["conversation"]["account"]["status"] == "error"
+    assert data["conversation"]["account"]["status_reason"] is None
+    # Сама карточка у вызывающего осталась как была (в ответ руководителю причина нужна).
+    assert detail.account.status_reason == "Сессия отозвана"
 
 
 def test_new_fields_are_optional_for_old_clients_and_stored_events() -> None:
@@ -411,6 +472,78 @@ def test_account_error_notification_without_reason_still_reads() -> None:
     assert text == "Марина · допы · нет связи"
 
 
+class _IdsResult:
+    def __init__(self, ids: list[int]) -> None:
+        self._ids = ids
+
+    def scalars(self) -> "_IdsResult":
+        return self
+
+    def all(self) -> list[int]:
+        return self._ids
+
+
+class _RecipientsDb:
+    """Отвечает на запрос «кому сообщить» и запоминает, в какие таблицы он смотрел."""
+
+    def __init__(self, ids: list[int]) -> None:
+        self.ids = ids
+        self.sql: list[str] = []
+
+    async def execute(self, stmt: object) -> _IdsResult:
+        self.sql.append(str(stmt.compile(dialect=postgresql.dialect())))  # type: ignore[attr-defined]
+        return _IdsResult(self.ids)
+
+
+@pytest.fixture
+def sent_notifications(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
+    calls: list[dict] = []
+
+    async def fake_notify(_db: object, **kwargs: object) -> None:
+        calls.append(kwargs)
+
+    monkeypatch.setattr(notification_service, "notify", fake_notify)
+    return calls
+
+
+def _account(stage: FunnelStage) -> TelegramAccount:
+    return TelegramAccount(
+        id=2, title="Марина · допы", funnel_stage=stage, status=AccountStatus.ERROR
+    )
+
+
+async def test_account_error_goes_to_heads_and_managers_of_a_working_account(
+    sent_notifications: list[dict],
+) -> None:
+    db = _RecipientsDb([1, 2])
+    await notification_service.notify_account_error(
+        db,  # type: ignore[arg-type]
+        _account(FunnelStage.SALES),
+        "Сессия отозвана",
+    )
+    assert "account_managers" in db.sql[0]
+    assert sent_notifications[0]["user_ids"] == [1, 2]
+    assert sent_notifications[0]["kind"] == NotificationKind.ACCOUNT_ERROR
+    assert sent_notifications[0]["entity_id"] == 2
+
+
+async def test_account_error_of_a_bot_stage_account_does_not_reach_managers(
+    sent_notifications: list[dict],
+) -> None:
+    """Аккаунты этапа «Бот» (прогрев) менеджерам не существуют: ни чатов, ни
+    клиентов, ни самого аккаунта в списках. Уведомление о нём раскрыло бы им
+    существование аккаунта — его получают только руководители."""
+    db = _RecipientsDb([1])
+    await notification_service.notify_account_error(
+        db,  # type: ignore[arg-type]
+        _account(FunnelStage.WARMUP),
+        "Сессия отозвана",
+    )
+    assert "account_managers" not in db.sql[0]
+    assert "users.role" in db.sql[0]
+    assert sent_notifications[0]["user_ids"] == [1]
+
+
 class _StatusDb:
     """Подмена сессии базы для write_status: один аккаунт и счёт коммитов."""
 
@@ -444,14 +577,14 @@ def status_env(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         status=AccountStatus.CONNECTED,
     )
     db = _StatusDb(account)
-    env = SimpleNamespace(db=db, account=account, notified=[], emitted=[])
+    env = SimpleNamespace(db=db, account=account, notified=[], emitted=[], logged=[])
 
     @asynccontextmanager
     async def fake_session():  # noqa: ANN202
         yield db
 
-    async def fake_log_event(*_args: object, **_kwargs: object) -> None:
-        return None
+    async def fake_log_event(*_args: object, **kwargs: object) -> None:
+        env.logged.append(kwargs.get("action"))
 
     async def fake_emit(_db: object, account_id: int, event: str, data: dict) -> None:
         env.emitted.append((account_id, event, data["status"]))
@@ -488,6 +621,37 @@ async def test_write_status_notifies_once_per_transition_to_error(
     assert [reason for _, reason in status_env.notified] == ["Сессия отозвана", "Снова отозвали"]
 
 
+async def test_repeated_identical_report_writes_and_publishes_nothing(
+    status_env: SimpleNamespace,
+) -> None:
+    """Шлюз повторяет отчёт «аккаунт мёртв» на каждое сообщение. Ничего не изменилось —
+    значит, ни записи в журнал, ни события, ни коммита."""
+    await handlers.write_status(2, "error", "Сессия отозвана")
+    assert status_env.logged == ["account.status_changed"]
+    assert len(status_env.emitted) == 1
+    commits = status_env.db.commits
+
+    for _ in range(3):
+        await handlers.write_status(2, "error", "Сессия отозвана")
+    assert status_env.logged == ["account.status_changed"]
+    assert len(status_env.emitted) == 1
+    assert status_env.db.commits == commits
+    assert len(status_env.notified) == 1
+
+    # Другая причина того же обрыва — уже изменение: фиксируем и показываем.
+    await handlers.write_status(2, "error", "Сеанс завершён в Telegram")
+    assert len(status_env.logged) == 2
+    assert len(status_env.emitted) == 2
+    assert status_env.account.status_reason == "Сеанс завершён в Telegram"
+    assert len(status_env.notified) == 1
+
+    # Живой аккаунт, о котором снова сказали «подключён», — тоже не событие.
+    await handlers.write_status(2, "connected", None)
+    count = len(status_env.logged)
+    await handlers.write_status(2, "connected", None)
+    assert len(status_env.logged) == count
+
+
 async def test_write_status_other_statuses_do_not_notify(status_env: SimpleNamespace) -> None:
     await handlers.write_status(2, "disconnected", None)
     await handlers.write_status(2, "connected", None)
@@ -509,3 +673,74 @@ async def test_failed_notification_does_not_lose_the_status(
     assert status_env.db.commits == 1
     assert status_env.db.rollbacks == 0
     assert status_env.emitted == [(2, "account.status", "error")]
+
+
+# --- причина обрыва в списке и в очереди -------------------------------------
+
+
+class _Rows:
+    """Ответ базы на запрос строк: `.unique().all()` / `.unique().first()` / `.all()`."""
+
+    def __init__(self, rows: list) -> None:
+        self._rows = rows
+
+    def unique(self) -> "_Rows":
+        return self
+
+    def all(self) -> list:
+        return self._rows
+
+    def first(self) -> object | None:
+        return self._rows[0] if self._rows else None
+
+
+class _ListDb:
+    """Первый запрос — строки диалогов, остальные (суммы сделок) — пусто."""
+
+    def __init__(self, rows: list) -> None:
+        self._rows = rows
+        self.calls = 0
+
+    async def execute(self, _stmt: object) -> _Rows:
+        self.calls += 1
+        return _Rows(self._rows if self.calls == 1 else [])
+
+
+@pytest.fixture
+def no_scope(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def everything(_db: object, _user: object) -> None:
+        return None
+
+    async def no_hours(_db: object) -> None:
+        return None
+
+    monkeypatch.setattr(conversation_service, "visible_account_ids", everything)
+    monkeypatch.setattr(conversation_service.worktime, "load", no_hours)
+
+
+@pytest.mark.parametrize(
+    ("role", "expected"),
+    [(UserRole.ADMIN, "Сессия отозвана"), (UserRole.MANAGER, None)],
+)
+async def test_chat_list_gives_account_reason_only_to_a_head(
+    no_scope: None, role: UserRole, expected: str | None
+) -> None:
+    db = _ListDb([_row_with_dead_account()])
+    user = SimpleNamespace(id=1, role=role)
+    page = await conversation_service.list_conversations(db, user)  # type: ignore[arg-type]
+    assert page.items[0].account.status == AccountStatus.ERROR
+    assert page.items[0].account.status_reason == expected
+
+
+@pytest.mark.parametrize(
+    ("role", "expected"),
+    [(UserRole.ADMIN, "Сессия отозвана"), (UserRole.MANAGER, None)],
+)
+async def test_next_in_queue_gives_account_reason_only_to_a_head(
+    no_scope: None, role: UserRole, expected: str | None
+) -> None:
+    db = _ListDb([_row_with_dead_account()])
+    user = SimpleNamespace(id=1, role=role)
+    row = await conversation_service.next_in_queue(db, user)  # type: ignore[arg-type]
+    assert row.account.status == AccountStatus.ERROR
+    assert row.account.status_reason == expected

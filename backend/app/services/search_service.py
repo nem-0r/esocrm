@@ -36,6 +36,12 @@ HISTORY_LOCK = 7301  # пространство advisory-замка: один п
 SNIPPET_LENGTH = 160
 # Больше целого bigint в запрос не отдаём: иначе драйвер падает, а не отвечает «не найдено».
 MAX_EXACT_DIGITS = 18
+# Выражение полнотекстового поиска по сообщениям — ДОСЛОВНО то же, на котором
+# построен индекс `ix_messages_text_fts` (см. модель `Message`): GIN-индекс
+# подхватывается, только если выражение совпало до последнего символа. Без
+# `coalesce` Postgres перебирал бы все сообщения. Если меняете одно — меняйте
+# и другое (это сторожит tests/unit/test_search_review.py).
+MESSAGE_FTS = "to_tsvector('russian', coalesce(m.text, ''))"
 
 
 def _numeric(query: str) -> int | None:
@@ -102,15 +108,19 @@ async def search(  # noqa: PLR0912, PLR0915
         # закреплённый за коллегой клиент всплывал бы в поиске (D-26).
         match = name_match.client_match_sql(query, "cl", prefix="nm")
         assert match is not None  # слова в запросе есть — проверено выше
+        # Сумма оплат клиента режется по тем же диалогам (D-26): иначе менеджер,
+        # видящий клиента через один свой чат, видел бы суммы из чужих чатов.
+        # Тот же результат, что в «Клиентах» (client_service._deal_agg_subquery).
+        paid_scope, _ = conversation_scope_sql(user, account_ids, "pc")
         sql = text(
             f"""
             select cl.id, {client_name} as name, cl.tg_username, cl.phone,
-                   coalesce(paid.amount, 0) as paid_amount
+                   (select coalesce(sum(d.total_amount), 0)
+                    from deals d
+                    join conversations pc on pc.id = d.conversation_id
+                    where d.client_id = cl.id and d.status = 'paid'
+                    {paid_scope}) as paid_amount
             from clients cl
-            left join (
-                select client_id, sum(total_amount) as amount
-                from deals where status = 'paid' group by client_id
-            ) paid on paid.client_id = cl.id
             where cl.deleted_at is null
               and {match[0]}
               and exists (
@@ -317,7 +327,9 @@ async def _chats(
             join clients cl on cl.id = c.client_id
             join telegram_accounts a on a.id = c.account_id
             where m.deleted_at is null and m.text is not null
-              and to_tsvector('russian', m.text) @@ plainto_tsquery('russian', :q)
+              and """
+        + MESSAGE_FTS
+        + """ @@ plainto_tsquery('russian', :q)
         """
         + scope_sql
         + """

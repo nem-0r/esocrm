@@ -10,6 +10,7 @@ import {
   useMutation,
   useQuery,
   useQueryClient,
+  type QueryClient,
 } from '@tanstack/react-query'
 
 import type {
@@ -21,7 +22,25 @@ import type {
   UploadResult,
 } from '@/entities/types'
 import { api } from '@/shared/api/client'
-import { skipParam } from '@/features/chats/replyQueue'
+import { isAccountOffline } from '@/features/chats/accountLink'
+import {
+  pruneTaken,
+  pushTaken,
+  skipParam,
+  takenIds,
+  type TakenEntry,
+} from '@/features/chats/replyQueue'
+
+/**
+ * Сервер отказал «аккаунт без связи» (409 `account_offline`) — значит, чат этого не знал:
+ * событие об обрыве не дошло (связь с сервером мигнула). Не ждём его — перечитываем карточку
+ * чата и список сами, иначе баннер и выключенное поле ввода не появятся.
+ */
+function refreshOnOffline(queryClient: QueryClient, error: unknown, conversationId: number) {
+  if (!isAccountOffline(error)) return
+  queryClient.invalidateQueries({ queryKey: ['conversation', conversationId] })
+  queryClient.invalidateQueries({ queryKey: ['conversations'] })
+}
 
 /** `awaiting_over` — ждут ответа дольше порога из настроек (то же число, что в баннере). */
 export type ChatFilter = 'all' | 'awaiting' | 'awaiting_over' | 'awaiting_payment'
@@ -91,6 +110,7 @@ export function useSendMessage(conversationId: number) {
       queryClient.invalidateQueries({ queryKey: ['conversations'] })
       queryClient.invalidateQueries({ queryKey: ['counters'] })
     },
+    onError: (error) => refreshOnOffline(queryClient, error, conversationId),
   })
 }
 
@@ -117,6 +137,8 @@ export function useForwardMessages() {
       queryClient.invalidateQueries({ queryKey: ['conversations'] })
       queryClient.invalidateQueries({ queryKey: ['counters'] })
     },
+    // Отказал аккаунт чата-получателя: перечитываем его, а не чат-источник.
+    onError: (error, variables) => refreshOnOffline(queryClient, error, variables.targetId),
   })
 }
 
@@ -128,6 +150,7 @@ export function useRetryMessage(conversationId: number) {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['messages', conversationId] })
     },
+    onError: (error) => refreshOnOffline(queryClient, error, conversationId),
   })
 }
 
@@ -165,14 +188,49 @@ export function useTransfer(conversationId: number) {
   })
 }
 
+/** Сколько ждущих чатов спрашиваем у сервера, чтобы найти среди взятых тех, кто написал снова. */
+const WAITING_LOOKUP = 100
+
 /**
- * «Взять первого в очереди»: сервер сам решает, какой чат открыть. `skip` — чаты,
- * которые уже брали в этой сессии: они не повторяются, пока в очереди есть другие.
+ * «Взять первого в очереди»: сервер сам решает, какой чат открыть. `skip` — чаты, которые
+ * уже брали в этой сессии: они не повторяются, пока в очереди есть другие.
+ *
+ * Перед запросом список «взятых» очищается от тех, кто написал снова (иначе сервер
+ * пропускал бы их, пока красный баннер говорит, что клиент ждёт). Для этого нужен один
+ * лёгкий запрос списка ждущих — и только если взятые есть и кто-то вообще ждёт. Не вышло
+ * спросить — идём с тем списком, что помним: сама кнопка от этого не ломается.
+ *
+ * Возвращает чат и обновлённый список «взятых» (с этим чатом в конце) для сохранения.
  */
+export async function takeNextInQueue(
+  taken: TakenEntry[],
+  someoneWaits: boolean,
+): Promise<{ conversation: Conversation; taken: TakenEntry[] }> {
+  let fresh = taken
+  if (taken.length > 0 && someoneWaits) {
+    try {
+      const waiting = await api.get<CursorPage<Conversation>>('/conversations', {
+        filter: 'awaiting',
+        limit: WAITING_LOOKUP,
+      })
+      fresh = pruneTaken(taken, waiting.items)
+    } catch {
+      // Уточнить не удалось — не повод отказывать в самой кнопке
+    }
+  }
+  const conversation = await api.get<Conversation>('/conversations/next', {
+    skip: skipParam(takenIds(fresh)),
+  })
+  return {
+    conversation,
+    taken: pushTaken(fresh, { id: conversation.id, since: conversation.awaiting_reply_since }),
+  }
+}
+
 export function useNextConversation() {
   return useMutation({
-    mutationFn: (skip: number[] = []) =>
-      api.get<Conversation>('/conversations/next', { skip: skipParam(skip) }),
+    mutationFn: (input: { taken: TakenEntry[]; someoneWaits: boolean }) =>
+      takeNextInQueue(input.taken, input.someoneWaits),
   })
 }
 

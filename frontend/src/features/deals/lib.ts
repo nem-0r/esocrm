@@ -176,6 +176,21 @@ export function amountFieldError(input: string): string | null {
   return parsed.ok ? null : moneyIssueText(parsed.reason)
 }
 
+/** Ввод оборвался на разделителе: «4500,» или «4 500.» — человек печатает копейки. */
+const UNFINISHED_AMOUNT = /^\d[\d\s]*[.,]$/
+
+/**
+ * Ошибка суммы для показа под полем в процессе ввода. Пока курсор в поле, завершающая
+ * запятая или точка — не ошибка, а начало копеек: иначе красное сообщение (role="alert",
+ * его озвучивает экранный диктор) вспыхивало бы на каждом «4500,». Когда поле покинули,
+ * та же «4500,» — обычная ошибка: сервер такую сумму не примет. Отправка формы проверяет
+ * сумму строго (`itemsError`), эта функция её не смягчает.
+ */
+export function amountLiveError(input: string, editing: boolean): string | null {
+  if (editing && UNFINISHED_AMOUNT.test(input.trim())) return null
+  return amountFieldError(input)
+}
+
 /** «Таро» → «таро»: текст ошибки после двоеточия начинается со строчной. */
 function lowerFirst(text: string): string {
   return text.charAt(0).toLowerCase() + text.slice(1)

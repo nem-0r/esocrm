@@ -5,19 +5,23 @@ import { cn } from '@/shared/lib/cn'
 import { listTime, money, waitingLabel } from '@/shared/lib/format'
 import { Avatar, Badge } from '@/shared/ui'
 import { MessageStatusIcon } from '@/features/chats/components/MessageStatusIcon'
+import { chatPath } from '@/features/chats/replyQueue'
 
 export function ChatListItem({
   conversation,
   active,
+  search = '',
 }: {
   conversation: Conversation
   active?: boolean
+  /** Текст поиска по чатам: уходит в адрес чата, чтобы список слева не сбросился (и «Назад» на телефоне вернул его). */
+  search?: string
 }) {
   const waiting = conversation.awaiting_minutes
 
   return (
     <Link
-      to={`/chats/${conversation.id}`}
+      to={chatPath(conversation.id, search)}
       className={cn(
         'flex items-start gap-3 border-b border-line px-4 py-3 transition-colors',
         active ? 'bg-accent-soft' : 'hover:bg-surface-raised',

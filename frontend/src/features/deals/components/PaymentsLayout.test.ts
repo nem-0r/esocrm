@@ -181,8 +181,13 @@ describe('Оплаты: неверный период не уходит на с�
     await setDate('С даты', '2026-10-09')
     const sent = lists().length
 
-    // Подсказка под полями и сообщение вместо списка — обе называют причину.
-    expect((text().match(/Начало периода позже конца/g) ?? []).length).toBeGreaterThanOrEqual(2)
+    // Причина названа один раз — в подсказке под полями (она же role="alert"); вместо списка
+    // стоит итог без повтора причины, иначе диктор читал бы одно и то же дважды.
+    expect((text().match(/Начало периода позже конца/g) ?? []).length).toBe(1)
+    expect(
+      Array.from(document.body.querySelectorAll('[role="alert"]')).map((node) => node.textContent),
+    ).toEqual(['Начало периода позже конца'])
+    expect(text()).toContain('Оплаты не показаны — период указан неверно')
     expect(text()).not.toContain('Оплат за период нет')
     expect(exportButton().disabled).toBe(true)
 
@@ -201,7 +206,7 @@ describe('Оплаты: неверный период не уходит на с�
     await openCustom()
     const sent = lists().length
     await setDate('По дату', '')
-    expect(text()).toContain('Укажите обе даты периода')
+    expect((text().match(/Укажите обе даты периода/g) ?? []).length).toBe(1)
     expect(exportButton().disabled).toBe(true)
     expect(lists()).toHaveLength(sent)
   })
@@ -209,8 +214,11 @@ describe('Оплаты: неверный период не уходит на с�
   it('год вне 1900–2100 — тоже ошибка', async () => {
     await openCustom()
     await setDate('С даты', '0002-10-05')
-    expect(text()).toContain('Период должен лежать между 1900 и 2100 годами')
+    expect((text().match(/Период должен лежать между 1900 и 2100 годами/g) ?? []).length).toBe(1)
     expect(exportButton().disabled).toBe(true)
+    // Поля помечены неверными для вспомогательных технологий.
+    expect(dateField('С даты').getAttribute('aria-invalid')).toBe('true')
+    expect(dateField('По дату').getAttribute('aria-invalid')).toBe('true')
   })
 
   it('исправили даты — запросы возобновляются, кнопка снова работает, подпись вернулась', async () => {

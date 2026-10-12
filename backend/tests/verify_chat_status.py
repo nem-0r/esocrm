@@ -12,7 +12,10 @@
    чата несут статус и причину аккаунта.
 3. Уведомление `account_error`: руководителям и менеджерам аккаунта — по одному на
    переход в `error`; повторная запись `error` его не плодит; чужие менеджеры его не
-   получают; связь вернули и потеряли снова — второе уведомление.
+   получают; связь вернули и потеряли снова — второе уведомление. Событие
+   `notification.new` уходит после коммита (к его приходу строка уже в базе).
+   Тот же отчёт шлюза повторно ничего не пишет. О потере связи у аккаунта этапа «Бот»
+   узнают только руководители. Причину обрыва отдают в API только руководителю.
 4. Связь вернули: отправка снова идёт, сообщение — `queued`, превью его показывает.
    Состояния `disconnected` и `pending` отклоняют отправку так же, как `error`.
 
@@ -20,6 +23,7 @@
 """
 
 import asyncio
+import contextlib
 import random
 import sys
 import uuid
@@ -27,6 +31,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import event, text
 
+from app.core import redis_bus
 from app.core.db import SessionLocal, engine
 from app.gateway import handlers
 from app.models import (
@@ -100,6 +105,7 @@ async def run() -> int:  # noqa: PLR0915, PLR0912
     suffix = uuid.uuid4().hex[:6]
     base_id = random.randint(8_000_000_000, 8_900_000_000)  # noqa: S311
     account_id = 0
+    extra_accounts: list[int] = []  # доп. аккаунты (этап «Бот»), которые надо убрать в конце
     client_ids: list[int] = []
     conv_ids: list[int] = []
 
@@ -266,12 +272,42 @@ async def run() -> int:  # noqa: PLR0915, PLR0912
             m=marina)]
 
         reason = "Сеанс завершён в Telegram — нужен повторный вход"
+        # Событие «пришло уведомление» должно уйти ПОСЛЕ коммита (иначе экран
+        # перезапросит счётчик и увидит старое число): слушаем шину так же, как
+        # вебсокет, и в момент получения события смотрим в базу.
+        arrived: list[tuple[list[int], int, int]] = []
+
+        async def listen() -> None:
+            async for message in redis_bus.subscribe():
+                note = (message.get("data") or {}).get("notification") or {}
+                if message.get("type") == "notification.new" and note.get("entity_id") == account_id:
+                    in_db = await _scalar("select count(*) from notifications where id = :i", i=note["id"])
+                    arrived.append((message["audience"].get("user_ids", []), note["id"], in_db))
+
+        listener = asyncio.create_task(listen())
+        await asyncio.sleep(0.5)
         await handlers.write_status(account_id, "error", reason)
+        await asyncio.sleep(0.8)
+        listener.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await listener
+        c.check(
+            "событие notification.new пришло каждому получателю по одному разу",
+            sorted(u for users, _, _ in arrived for u in users) == sorted(expected_recipients),
+            arrived,
+        )
+        c.check("и к моменту события уведомление уже было в базе", all(n[2] == 1 for n in arrived), arrived)
+
         row = (await list_rows(manager)).get(main_id, {})
         c.check("в строке списка статус аккаунта error", row.get("account", {}).get("status") == "error", row.get("account"))
-        c.check("и причина", row.get("account", {}).get("status_reason") == reason, row.get("account"))
+        c.check("менеджеру причину обрыва не отдают", row.get("account", {}).get("status_reason") is None, row.get("account"))
+        row_admin = (await list_rows(admin)).get(main_id, {})
+        c.check("руководителю в строке списка — причина", row_admin.get("account", {}).get("status_reason") == reason, row_admin.get("account"))
         detail = (await manager.get(f"{BASE}/conversations/{main_id}")).json()
-        c.check("в карточке чата — то же", detail.get("account", {}).get("status") == "error", detail.get("account"))
+        c.check("в карточке чата — статус тот же", detail.get("account", {}).get("status") == "error", detail.get("account"))
+        c.check("и причины у менеджера нет", detail.get("account", {}).get("status_reason") is None, detail.get("account"))
+        detail_admin = (await admin.get(f"{BASE}/conversations/{main_id}")).json()
+        c.check("руководитель в карточке получает причину", detail_admin.get("account", {}).get("status_reason") == reason, detail_admin.get("account"))
 
         before_messages = await _scalar("select count(*) from messages where conversation_id = :c", c=main_id)
         before_outbox = await _scalar("select count(*) from outbox where conversation_id = :c", c=main_id)
@@ -327,6 +363,16 @@ async def run() -> int:  # noqa: PLR0915, PLR0912
         await handlers.write_status(account_id, "error", reason)
         c.check("повторная запись error не плодит уведомлений", await _notifications(account_id) == got, await _notifications(account_id))
 
+        # Шлюз повторяет один и тот же отчёт на каждое сообщение мёртвого аккаунта:
+        # ничего не изменилось — ни записи в журнал, ни события.
+        status_changes = (
+            "select count(*) from event_log where entity_type = 'account' "
+            "and entity_id = :a and action = 'account.status_changed'"
+        )
+        logged = await _scalar(status_changes, a=account_id)
+        await asyncio.gather(*(handlers.write_status(account_id, "error", reason) for _ in range(4)))
+        c.check("тот же отчёт ещё раз — в журнал ничего не пишется", await _scalar(status_changes, a=account_id) == logged)
+
         # ------------------------------------------------ 4. связь вернули
         c.section("4. Связь вернули и потеряли снова")
         await handlers.write_status(account_id, "connected", None)
@@ -376,9 +422,47 @@ async def run() -> int:  # noqa: PLR0915, PLR0912
                 set(third) == expected_recipients and set(third.values()) == {3}, third)
         c.check("аккаунт в итоге в error", await _scalar("select status::text from telegram_accounts where id = :a", a=account_id) == "error")
 
+        # ------------------------------------------------ 7. аккаунт этапа «Бот»
+        c.section("7. Аккаунт этапа «Бот» менеджерам не существует — и уведомления о нём им не шлют")
+        async with SessionLocal() as db:
+            warm = TelegramAccount(
+                title=f"VCS-bot-{suffix}",
+                phone=f"+7000{random.randint(1_000_000, 9_999_999)}",  # noqa: S311
+                funnel_stage=FunnelStage.WARMUP,
+                api_id=1,
+                api_hash_enc=b"x",
+                status=AccountStatus.CONNECTED,
+                is_active=False,
+            )
+            db.add(warm)
+            await db.flush()
+            warm_id = warm.id
+            extra_accounts.append(warm_id)
+            db.add(AccountManager(account_id=warm_id, user_id=marina))
+            await db.commit()
+        await handlers.write_status(warm_id, "error", "Сессия отозвана")
+        got_bot = await _notifications(warm_id)
+        c.check("руководители уведомлены", set(got_bot) == admins and set(got_bot.values()) == {1}, got_bot)
+        c.check("назначенный на «бота» менеджер — нет", marina not in got_bot, got_bot)
+        c.check("и остальные менеджеры — нет", all(u not in got_bot for u in others), got_bot)
+        feed = (await manager.get(f"{BASE}/notifications", params={"limit": 50})).json()
+        c.check("в ленте менеджера уведомления о боте нет",
+                not any(n.get("entity_id") == warm_id for n in feed.get("items", [])), feed.get("items"))
+
     finally:
         # ------------------------------------------------ уборка
         async with SessionLocal() as db:
+            for extra in extra_accounts:
+                await db.execute(
+                    text("delete from notifications where entity_type = 'account' and entity_id = :a"),
+                    {"a": extra},
+                )
+                await db.execute(
+                    text("delete from event_log where entity_type = 'account' and entity_id = :a"),
+                    {"a": extra},
+                )
+                await db.execute(text("delete from account_managers where account_id = :a"), {"a": extra})
+                await db.execute(text("delete from telegram_accounts where id = :a"), {"a": extra})
             if conv_ids:
                 await db.execute(text("delete from outbox where conversation_id = any(:c)"), {"c": conv_ids})
                 await db.execute(

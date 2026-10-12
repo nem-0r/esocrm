@@ -392,14 +392,15 @@ function MemberSheet({ member, onClose }: { member: StaffMember | null; onClose:
     if (!member) return
     setError(null)
     setFieldError({})
-    const phoneProblem = phoneError(phone)
+    // Телефон проверяется и уходит на сервер, только если его меняли: номер,
+    // сохранённый до проверки L1 (например, «+7 (900) 123-45-67»), не должен
+    // мешать поменять график или роль — ни ошибкой здесь, ни отказом сервера.
+    const phoneChanged = normalizePhone(phone) !== normalizePhone(member.phone ?? '')
+    const phoneProblem = phoneChanged ? phoneError(phone) : null
     if (phoneProblem) {
       setFieldError({ phone: phoneProblem })
       return
     }
-    // Телефон уходит на сервер, только если его меняли: сохранённое раньше
-    // значение в старом формате не должно мешать поменять график или роль.
-    const phoneChanged = normalizePhone(phone) !== (member.phone ?? '')
     try {
       await update.mutateAsync({
         userId: member.id,

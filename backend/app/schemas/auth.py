@@ -6,7 +6,7 @@ from pydantic import field_validator
 
 from app.schemas.common import ApiModel
 from app.schemas.user import MeOut, validate_email_format, validate_password_strength
-from app.schemas.validators import optional_phone
+from app.schemas.validators import optional_staff_phone
 
 
 class LoginIn(ApiModel):
@@ -54,6 +54,13 @@ class ResetPasswordIn(ApiModel):
         return validate_password_strength(value)
 
 
+class ResetPasswordCheckIn(ApiModel):
+    """Проверка ссылки сброса: токен в теле запроса, а не в адресе — так он не
+    оседает в журналах веб-сервера и прокси (ссылка вида `/reset#<токен>`)."""
+
+    token: str
+
+
 class ResetPasswordPreviewOut(ApiModel):
     """Что видит открывший ссылку: только имя для приветствия и срок. Больше ничего."""
 
@@ -78,7 +85,7 @@ class MeUpdateIn(ApiModel):
     @field_validator("phone")
     @classmethod
     def _phone(cls, value: str | None) -> str | None:
-        return optional_phone(value)
+        return optional_staff_phone(value)
 
     @field_validator("new_password")
     @classmethod

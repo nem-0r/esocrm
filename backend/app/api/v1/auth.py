@@ -13,6 +13,7 @@ from app.schemas.auth import (
     LoginIn,
     LoginOut,
     MeUpdateIn,
+    ResetPasswordCheckIn,
     ResetPasswordIn,
     ResetPasswordPreviewOut,
 )
@@ -106,11 +107,27 @@ async def accept_invite(
     return LoginOut(**me_payload.model_dump(), token=token)
 
 
+@router.post("/reset-password/check", response_model=ResetPasswordPreviewOut)
+async def reset_password_check(
+    payload: ResetPasswordCheckIn, request: Request, response: Response, db: Db
+) -> ResetPasswordPreviewOut:
+    """Публичная: жива ли ссылка сброса пароля (D-38) и как зовут сотрудника.
+
+    Токен — в теле запроса: в адресе он оседал бы в журналах веб-сервера.
+    """
+    response.headers["Cache-Control"] = "no-store"
+    return await auth_service.reset_password_preview(db, request, payload.token)
+
+
 @router.get("/reset-password/{token}", response_model=ResetPasswordPreviewOut)
 async def reset_password_preview(
     token: str, request: Request, response: Response, db: Db
 ) -> ResetPasswordPreviewOut:
-    """Публичная: жива ли ссылка сброса пароля (D-38) и как зовут сотрудника."""
+    """Публичная, для совместимости: то же, что `POST /reset-password/check`.
+
+    Интерфейс этой ручкой больше не пользуется (токен в адресе попадает в журналы);
+    оставлена, чтобы уже открытая страница прежней сборки не сломалась при выкатке.
+    """
     response.headers["Cache-Control"] = "no-store"
     return await auth_service.reset_password_preview(db, request, token)
 

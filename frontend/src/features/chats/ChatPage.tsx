@@ -12,7 +12,14 @@ import { ForwardSheet } from '@/features/chats/components/ForwardSheet'
 import { MessageBubble, canForward } from '@/features/chats/components/MessageBubble'
 import { TransferSheet } from '@/features/chats/components/TransferSheet'
 import { decidePaste } from '@/features/chats/components/composer/clipboard'
-import { OFFLINE_PLACEHOLDER, hasNoLink, offlineBannerText } from '@/features/chats/accountLink'
+import {
+  RECONNECT_HREF,
+  canReconnect,
+  hasNoLink,
+  isAccountDeleted,
+  offlineBannerText,
+  offlineReason,
+} from '@/features/chats/accountLink'
 import { copyText, formatForCopy } from '@/features/chats/components/message/copy'
 import { DealSheet } from '@/features/deals/DealSheet'
 import { FUNNEL_LABEL } from '@/features/profile/lib'
@@ -144,6 +151,7 @@ function ChatPane({ conversationId }: { conversationId: number }) {
   // Аккаунт без связи (D-37): сервер отклонит любую отправку, поэтому поле ввода
   // выключено, а над ним — причина. Менеджер узнаёт об этом сразу, а не через 35 с.
   const offline = hasNoLink(chat.account.status)
+  const deleted = isAccountDeleted(chat.account.status)
 
   function toggle(id: number) {
     setSelected((prev) => (prev.includes(id) ? prev.filter((value) => value !== id) : [...prev, id]))
@@ -397,9 +405,6 @@ function ChatPane({ conversationId }: { conversationId: number }) {
         )}
       </div>
 
-      {/* Ключ по чату: черновик, вложения и запись голосового принадлежат
-          своему чату — переключились на другого клиента, и незаконченное
-          сообщение не уедет не тому человеку. */}
       {offline && (
         <div
           role="status"
@@ -407,19 +412,21 @@ function ChatPane({ conversationId }: { conversationId: number }) {
         >
           <AlertTriangle className="size-4 shrink-0" aria-hidden />
           <div className="flex min-w-0 flex-1 flex-col">
-            <span>{offlineBannerText(chat.account.title, me.is_admin)}</span>
-            {me.is_admin && chat.account.status_reason && (
+            <span>{offlineBannerText(chat.account.title, me.is_admin, chat.account.status)}</span>
+            {/* У удалённого аккаунта причины нет: его убрали намеренно, а не потеряли связь. */}
+            {me.is_admin && !deleted && chat.account.status_reason && (
               <span className="text-micro text-ink-muted">
                 Причина: {chat.account.status_reason}
               </span>
             )}
           </div>
-          {me.is_admin && (
+          {/* Удалённого аккаунта нет в списке «Аккаунты» — вести туда нечего, кнопки не будет. */}
+          {canReconnect(chat.account.status, me.is_admin) && (
             <Button
               size="sm"
               variant="secondary"
               className="shrink-0"
-              onClick={() => navigate('/profile/accounts')}
+              onClick={() => navigate(RECONNECT_HREF)}
             >
               Переподключить
             </Button>
@@ -427,11 +434,14 @@ function ChatPane({ conversationId }: { conversationId: number }) {
         </div>
       )}
 
+      {/* Ключ по чату: черновик, вложения и запись голосового принадлежат
+          своему чату — переключились на другого клиента, и незаконченное
+          сообщение не уедет не тому человеку. */}
       <Composer
         key={conversationId}
         ref={composer}
         conversationId={conversationId}
-        disabledReason={offline ? OFFLINE_PLACEHOLDER : null}
+        disabledReason={offline ? offlineReason(chat.account.status) : null}
       />
 
       <ForwardSheet

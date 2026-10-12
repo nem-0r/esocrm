@@ -16,7 +16,13 @@ import { useAuth } from '@/shared/hooks/useAuth'
 import { useOrgToday } from '@/shared/hooks/useOrgToday'
 import { cn } from '@/shared/lib/cn'
 import { dateShort, money, plural } from '@/shared/lib/format'
-import { presetRange, rangeLabel } from '@/shared/lib/period'
+import {
+  MAX_PERIOD_DATE,
+  MIN_PERIOD_DATE,
+  presetRange,
+  rangeError,
+  rangeLabel,
+} from '@/shared/lib/period'
 import {
   Button,
   Card,
@@ -136,9 +142,11 @@ export function StatsPage() {
   const span = daysBetween(range.from, range.to)
   const dayDisabled = span > MAX_DAYS_FOR_DAILY
   const effectiveGranularity: Granularity = dayDisabled && granularity === 'day' ? 'week' : granularity
-  // Начало позже конца или пустая дата — «Применить» нечего применять: сервер такой
-  // период всё равно отклонит, а в окне было бы написано «выбрано −30 дней».
-  const draftInvalid = !draftRange.from || !draftRange.to || draftRange.from > draftRange.to
+  // Пустая дата, «с» позже «по», год вне 1900–2100 — «Применить» нечего применять: сервер
+  // такой период отклонит (422), а в окне было бы написано «выбрано −30 дней». Правило одно
+  // на «Оплаты» и «Статистику» — `rangeError` из shared/lib/period.ts, как и текст подсказки.
+  const draftError = rangeError(draftRange.from, draftRange.to)
+  const draftInvalid = draftError !== null
   const draftSpan = daysBetween(draftRange.from, draftRange.to)
   const draftDayDisabled = draftSpan > MAX_DAYS_FOR_DAILY
   // Та же подстраховка, что и у боевой гранулярности: если черновик дат
@@ -427,7 +435,10 @@ export function StatsPage() {
               <Input
                 type="date"
                 value={draftRange.from}
-                max={draftRange.to}
+                min={MIN_PERIOD_DATE}
+                max={draftRange.to || MAX_PERIOD_DATE}
+                invalid={draftInvalid}
+                aria-invalid={draftInvalid}
                 onChange={(event) =>
                   setDraftRange((prev) => ({ ...prev, from: event.target.value }))
                 }
@@ -437,7 +448,10 @@ export function StatsPage() {
               <Input
                 type="date"
                 value={draftRange.to}
-                min={draftRange.from}
+                min={draftRange.from || MIN_PERIOD_DATE}
+                max={MAX_PERIOD_DATE}
+                invalid={draftInvalid}
+                aria-invalid={draftInvalid}
                 onChange={(event) => setDraftRange((prev) => ({ ...prev, to: event.target.value }))}
               />
             </Field>
@@ -449,11 +463,9 @@ export function StatsPage() {
               dayDisabled={draftDayDisabled}
             />
           </Field>
-          {draftInvalid ? (
+          {draftError ? (
             <p className="text-xs text-danger" role="alert">
-              {!draftRange.from || !draftRange.to
-                ? 'Укажите обе даты.'
-                : 'Начало периода позже его конца — поправьте даты.'}
+              {draftError}
             </p>
           ) : (
             <p className="text-xs text-ink-faint">

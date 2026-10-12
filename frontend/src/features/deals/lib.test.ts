@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   activeItems,
   amountFieldError,
+  amountLiveError,
   canRemoveItem,
   draftTotal,
   expiryLabel,
@@ -145,6 +146,45 @@ describe('поле суммы: у каждой ошибки своя причи�
   it('не число', () => {
     expect(amountFieldError('абв')).toMatch(/цифрами/)
     expect(amountFieldError('-100')).toMatch(/цифрами/)
+  })
+})
+
+describe('amountLiveError: сумма в процессе набора', () => {
+  it('завершающая запятая или точка, пока человек в поле, — ещё не ошибка', () => {
+    expect(amountLiveError('4500,', true)).toBeNull()
+    expect(amountLiveError('4500.', true)).toBeNull()
+    expect(amountLiveError('4 500,', true)).toBeNull()
+    expect(amountLiveError(' 4500, ', true)).toBeNull()
+    // Неразрывный пробел (так форматируется «4 500») — тоже пробел.
+    expect(amountLiveError('4\u00a0500,', true)).toBeNull()
+  })
+
+  it('поле покинули — та же запись снова ошибка: сервер её не примет', () => {
+    expect(amountLiveError('4500,', false)).toMatch(/цифрами/)
+    expect(amountLiveError('4500.', false)).toMatch(/цифрами/)
+  })
+
+  it('только запятая без цифр, две запятые и мусор — ошибка и во время набора', () => {
+    expect(amountLiveError(',', true)).toMatch(/цифрами/)
+    expect(amountLiveError('4500,,', true)).toMatch(/цифрами/)
+    expect(amountLiveError('4,5,', true)).toMatch(/цифрами/)
+    expect(amountLiveError('абв,', true)).toMatch(/цифрами/)
+  })
+
+  it('остальные причины не смягчаются', () => {
+    expect(amountLiveError('10.555', true)).toBe('Не больше двух знаков после запятой')
+    expect(amountLiveError('0', true)).toBe('Стоимость должна быть больше нуля')
+    expect(spaces(amountLiveError('100000000,01', true))).toBe('Сумма не больше 100 000 000 ₽')
+    expect(amountLiveError('', true)).toBe('Введите сумму')
+  })
+
+  it('верная сумма — без ошибки в обоих режимах', () => {
+    expect(amountLiveError('4500,50', true)).toBeNull()
+    expect(amountLiveError('4500,50', false)).toBeNull()
+  })
+
+  it('отправку формы не смягчает: «4500,» по-прежнему не проходит itemsError', () => {
+    expect(itemsError([item('Таро', '4500,')])).toMatch(/цифрами/)
   })
 })
 

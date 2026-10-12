@@ -14,6 +14,10 @@
   тексту, файл — по имени файла и по имени клиента;
 * права видимости не нарушены: менеджер не видит чужих клиентов, их оплаты,
   сообщения и файлы; удалённый клиент не виден никому;
+* сумма оплат клиента в группе «Клиенты» режется по видимости (D-26): менеджер,
+  видящий клиента через один свой чат, не видит сумм из чужих чатов и из «бота»;
+* запрос длиннее 255 символов — 422; поиск по тексту сообщений идёт через индекс
+  `ix_messages_text_fts` (выражение запроса совпадает с индексным);
 * `%` и `_` в запросе — обычные символы, а не шаблон;
 * «Показать все»: `totals` честно говорит, сколько найдено, а `limit` до 50;
 * история: GET /search её не пишет; запись только через POST /search/history;
@@ -36,6 +40,7 @@ import httpx
 from sqlalchemy import text
 
 from app.core.db import SessionLocal
+from app.services.search_service import MESSAGE_FTS
 from tests.support import ADMIN, BASE, MANAGER, Checks, login
 
 LETTERS = "abcdefghjkmnpqrstuvwxyz"
@@ -43,6 +48,8 @@ ACCOUNT_MARINA = 2  # «Марина · допы» — аккаунт менед
 ACCOUNT_ANNA = 3  # аккаунт другой сотрудницы: Марина его не видит
 ACCOUNT_WARMUP = 1  # «бот» — менеджерам не существует вовсе
 MARINA, ANNA, ELENA = 2, 3, 1
+# Оплаченные сделки одного клиента в трёх чатах: чей чат — тот и считает (D-26).
+PAID_OWN, PAID_ANNA, PAID_WARMUP = 100_000, 700_000, 20_000
 
 
 def unique_tag() -> str:
@@ -167,6 +174,33 @@ class Fixture:
         self.deal[key] = deal_id
         return deal_id
 
+    async def conversation(
+        self, db: Any, key: str, account: int, *, responsible: int | None = None
+    ) -> int:
+        """Ещё один диалог того же клиента, но на другом аккаунте (один диалог на аккаунт)."""
+        return await db.scalar(
+            text(
+                "insert into conversations (client_id, account_id, tg_chat_id, responsible_id, "
+                "last_message_at) values (:c, :a, :chat, :r, now()) returning id"
+            ),
+            {
+                "c": self.ids[key],
+                "a": account,
+                "chat": 8_000_000_000 + secrets.randbelow(900_000_000),
+                "r": responsible,
+            },
+        )
+
+    async def paid_deal(self, db: Any, key: str, conversation_id: int, amount: int) -> int:
+        return await db.scalar(
+            text(
+                "insert into deals (client_id, conversation_id, created_by_id, sold_by_id, "
+                "payment_method, status, total_amount, paid_at) values (:cl, :c, :u, :u, "
+                "'requisites', 'paid', :amount, now()) returning id"
+            ),
+            {"cl": self.ids[key], "c": conversation_id, "u": ELENA, "amount": amount},
+        )
+
     async def attachment(self, db: Any, key: str, message_id: int, name: str) -> int:
         return await db.scalar(
             text(
@@ -250,6 +284,15 @@ async def run() -> int:  # noqa: PLR0915
             await fx.client(db, "und", first=f"Сто_{tag}")
             await fx.client(db, "undx", first=f"СтоЯ{tag}")
 
+            # Клиент в трёх чатах: Маринин (видит Марина), Анин и «бота» (их Марина не
+            # видит). У каждого чата — оплаченная сделка своей суммы (проверка D-26).
+            await fx.client(db, "split", first=f"Раздвоенный{tag}", responsible=MARINA)
+            anna_conv = await fx.conversation(db, "split", ACCOUNT_ANNA)
+            warm_conv = await fx.conversation(db, "split", ACCOUNT_WARMUP)
+            await fx.paid_deal(db, "split", fx.conv["split"], PAID_OWN)
+            await fx.paid_deal(db, "split", anna_conv, PAID_ANNA)
+            await fx.paid_deal(db, "split", warm_conv, PAID_WARMUP)
+
             message_id = await fx.message(db, "ksenia", f"Хочу расклад на любовь {tag}")
             await fx.message(db, "foreign", f"Секретная переписка {tag}")
             await fx.deal_for(db, "ksenia", f"Расклад{tag}")
@@ -265,7 +308,7 @@ async def run() -> int:  # noqa: PLR0915
                 await fx.client(db, f"many{index}", first=f"Масса{tag}", last=f"Номер{index}")
             await db.commit()
         ids = fx.ids
-        c.check("тестовые клиенты созданы", len(fx.client_ids) == 14 + 7 + 52, len(fx.client_ids))
+        c.check("тестовые клиенты созданы", len(fx.client_ids) == 15 + 7 + 52, len(fx.client_ids))
 
         # --------------------------------------------- имя из Telegram, без display_name
         c.section("Поиск по имени из Telegram (display_name пуст)")
@@ -470,6 +513,62 @@ async def run() -> int:  # noqa: PLR0915
         c.check(
             "у менеджера нет группы сотрудников",
             (await get_search(manager, "Марина"))["managers"] == [],
+        )
+
+        c.section("Суммы оплат в группе «Клиенты» режутся по видимости (D-26)")
+        split_name = f"Раздвоенный{tag}"
+        found_by_manager = (await get_search(manager, split_name))["clients"]
+        found_by_admin = (await get_search(admin, split_name))["clients"]
+        as_manager = next((r for r in found_by_manager if r["id"] == ids["split"]), None)
+        as_admin = next((r for r in found_by_admin if r["id"] == ids["split"]), None)
+        c.check("менеджер находит клиента через свой чат", as_manager is not None)
+        c.check(
+            "и видит сумму только по своему чату, без Аниного и «бота»",
+            bool(as_manager) and as_manager["paid_amount"] == PAID_OWN,
+            as_manager,
+        )
+        c.check(
+            "руководитель видит сумму по всем чатам клиента",
+            bool(as_admin) and as_admin["paid_amount"] == PAID_OWN + PAID_ANNA + PAID_WARMUP,
+            as_admin,
+        )
+        in_clients = next(
+            (
+                r
+                for r in (
+                    await manager.get(f"{BASE}/clients", params={"q": split_name, "limit": 50})
+                ).json()["items"]
+                if r["id"] == ids["split"]
+            ),
+            None,
+        )
+        c.check(
+            "и ровно то же число, что в разделе «Клиенты»",
+            bool(in_clients) and int(in_clients["paid_amount"]) == PAID_OWN,
+            in_clients,
+        )
+
+        c.section("Длина запроса и индекс полнотекстового поиска")
+        at_limit = await admin.get(f"{BASE}/search", params={"q": "я" * 255})
+        c.check(
+            "запрос в 255 символов принимается", at_limit.status_code == 200, at_limit.status_code
+        )
+        too_long = await admin.get(f"{BASE}/search", params={"q": "я" * 256})
+        c.check("в 256 символов — 422", too_long.status_code == 422, too_long.status_code)
+        explain = text(
+            "explain select m.id from messages m where "  # noqa: S608
+            f"{MESSAGE_FTS} @@ plainto_tsquery('russian', :q)"
+        )
+        async with SessionLocal() as db:
+            # На малой базе планировщик и с индексом может выбрать перебор, поэтому в
+            # проверочной транзакции перебор выключен: так видно, ЕСТЬ ли у запроса индекс.
+            await db.execute(text("set local enable_seqscan = off"))
+            plan = "\n".join(row[0] for row in await db.execute(explain, {"q": "расклад"}))
+            await db.rollback()
+        c.check(
+            "поиск по сообщениям использует индекс ix_messages_text_fts",
+            "ix_messages_text_fts" in plan and "Seq Scan" not in plan,
+            plan,
         )
 
         # ------------------------------------------------------------- оплаты
