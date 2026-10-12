@@ -3,7 +3,7 @@
 Источник: `CRM-zamechaniya.pdf` (BUG-01…10, L1…L6, «Решить»). Разбор каждого пункта по коду и по
 прод-данным сделан 11.10.2026; здесь — **что именно делаем и как**. Код важнее Miro: Miro местами устарел.
 
-## Решения (ADR-черновик, переносится в `05-decisions.md`)
+## Решения (ADR-черновик; перенесено в `05-decisions.md` — актуальная редакция там)
 
 **D-34. Одно определение «ждёт ответа дольше порога».** «Ждёт» = `awaiting_reply_since` не пуст и старше порога
 (`awaiting_banner_minutes`, учёт рабочих часов как сейчас). Баннер в списке чатов, плитка «ждут ответа сейчас ·
@@ -82,3 +82,13 @@ N дольше 30 мин» в статистике и фильтр «Ждут >3
   Наборы `verify_*` пишут в общую dev-базу — запускать только под замком:
   `L=/private/tmp/claude-501/-Users-mac-tg-crm/verify.lock; until mkdir $L 2>/dev/null; do sleep 5; done; trap 'rmdir $L' EXIT; …`.
 - Не коммитить и не менять `deploy/`, `docs/` (заметки для документации — в отчёте), чужие области.
+
+## Итог реализации (12.10.2026)
+
+Ветка `dev/2026-10-11-crm-remarks` (коммиты `625128f`, `a8af83f`). Сделаны все пункты таблицы выше, кроме строки «Не входит»; правила перенесены в `03-business-rules.md` (§1 вход и пароль, §3 очередь и аккаунт без связи, §4 проверка данных, §5 периоды и суммы, §7–§9), решения уточнены в `05-decisions.md` (D-34…D-39), схема — в `02-data-model.md`.
+
+- Миграция одна, расширяющая: `b7d2e5f1a094` (три колонки сброса пароля и индекс). Контракт API расширен только необязательными полями (`last_message_*`, `account.status`, `account.status_reason`), поэтому старая сборка фронтенда живёт на новом бэкенде, откат кода безопасен (D-28).
+- Сверх таблицы по итогам ревью: токен сброса во фрагменте `#` и проверка по `POST`, перепроверка сессии у WebSocket, пароль до 72 байт, nginx заменяет `X-Forwarded-For`, FTS-выражение с `coalesce` под индекс, `notification.new` только после коммита, 422 на период в выгрузке клиентов до начала потока, суммы оплат клиента в поиске режутся по видимости (D-26).
+- Сознательно не входит: импорт истории в статистике, автооткрытие чата, транслитерация, вход через Google, «вернуть цену по прайсу» (D-32). Вопросы владельцу, которые выявила работа, — `05-decisions.md`, «Открыто», №14–19.
+- Тесты. Бэкенд, модульные (`backend/tests/unit/`): `test_reply_queue`, `test_name_match`, `test_search_review`, `test_chat_delivery_status`, `test_notifications_unread`, `test_password_reset`, `test_ws_session_check`, `test_client_validation`, `test_staff_phone`, `test_staff_no_account_filter`, `test_deal_period`, `test_clients_export_period`, `test_money_limits`, `test_client_name`. Сквозные (`backend/tests/`, подключены в `deploy/ci-verify.sh`, `16-ci-cd.md` §1): `verify_chat_status`, `verify_queue`, `verify_search`, `verify_payments_remarks`, `verify_profile_remarks`, `verify_auth_reset`. Фронтенд — `*.test.ts` рядом с кодом (`replyQueue`, `ChatsLayout`, `ChatPage`, `Composer`, `NotificationsSheet`, `ResetPasswordPage`, `StaffPage.reset`, `SearchPage`, `PaymentsLayout`, `ItemsEditor`, `StatsPage`, `shared/lib/period`, `shared/lib/validation`).
+- Эксплуатация: сброс пароля руководителю на сервере — `16-ci-cd.md` §8.
