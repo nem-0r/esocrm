@@ -1,4 +1,4 @@
-import { AlertTriangle, ChevronRight, Search } from 'lucide-react'
+import { AlertTriangle, ChevronRight, Search, X } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 
@@ -13,10 +13,23 @@ import {
   Input,
   ListSkeleton,
   Segmented,
+  toast,
+  toastError,
 } from '@/shared/ui'
+import { ApiError } from '@/shared/api/client'
 import { SectionActions } from '@/app/layout/SectionActions'
 import { ChatListItem } from '@/features/chats/components/ChatListItem'
 import { useConversations, useCounters, useNextConversation, type ChatFilter } from '@/features/chats/queries'
+import {
+  QUEUE_DONE,
+  clearTaken,
+  loadFilter,
+  loadTaken,
+  overFilterLabel,
+  pushTaken,
+  saveFilter,
+  saveTaken,
+} from '@/features/chats/replyQueue'
 
 export function ChatsLayout({
   selectedId,
@@ -27,7 +40,13 @@ export function ChatsLayout({
 }) {
   const me = useMe()
   const navigate = useNavigate()
-  const [filter, setFilter] = useState<ChatFilter>('all')
+  // Фильтр помним в сессии: из пустого списка в открытый чат раздел пересобирается
+  // (другой маршрут), и без этого выбранный фильтр сбрасывался бы после первого клика.
+  const [filter, setFilterState] = useState<ChatFilter>(() => loadFilter())
+  const setFilter = (next: ChatFilter) => {
+    setFilterState(next)
+    saveFilter(next)
+  }
   const [search, setSearch] = useState('')
   const [debounced, setDebounced] = useState('')
 
@@ -45,13 +64,37 @@ export function ChatsLayout({
     [list.data],
   )
 
+  // Сколько строк в этом списке всего — по счётчикам сервера, а не по длине загруженной
+  // страницы: число на баннере и в чипе должно совпадать с тем, что можно долистать.
+  const listTotal =
+    debounced || !counters
+      ? null
+      : filter === 'awaiting_over'
+        ? counters.over_threshold
+        : filter === 'awaiting'
+          ? counters.awaiting
+          : filter === 'awaiting_payment'
+            ? counters.awaiting_payment
+            : counters.total
 
+  // «Взять первого»: уже взятые в этой сессии чаты уходят серверу в `skip`, поэтому
+  // повторное нажатие ведёт к следующему, а не к тому же самому чату.
   async function takeFirst() {
+    const taken = loadTaken(me.id)
     try {
-      const conversation = await takeNext.mutateAsync()
+      const conversation = await takeNext.mutateAsync(taken)
+      saveTaken(me.id, pushTaken(taken, conversation.id))
       navigate(`/chats/${conversation.id}`)
-    } catch {
-      // Пустая очередь — сервер отвечает 404, состояние ниже это показывает
+    } catch (error) {
+      if (error instanceof ApiError && error.code === QUEUE_DONE) {
+        // Все ждущие уже взяты: говорим об этом и начинаем круг заново
+        clearTaken(me.id)
+        toast('Больше нет чатов в очереди. Нажмите ещё раз — начнём с самого давнего.')
+      } else if (error instanceof ApiError && error.isNotFound) {
+        toast(error.message)
+      } else {
+        toastError(error instanceof Error ? error.message : 'Не удалось взять чат из очереди')
+      }
     }
   }
 
@@ -119,12 +162,31 @@ export function ChatsLayout({
               },
             ]}
           />
+
+          {/* Фильтр «Ждут >N мин» включается баннером ниже; отдельного таба у него нет,
+              поэтому, пока он активен, виден выбранным чипом, который снимается крестиком. */}
+          {filter === 'awaiting_over' && (
+            <button
+              type="button"
+              onClick={() => setFilter('all')}
+              aria-label={`Снять фильтр «${overFilterLabel(counters?.over_threshold_minutes)}»`}
+              className="mt-2 inline-flex items-center gap-1.5 rounded bg-accent-soft px-3 py-1.5 text-sm text-accent-text transition-colors hover:bg-accent-soft/70"
+            >
+              {overFilterLabel(counters?.over_threshold_minutes)}
+              {(counters?.over_threshold ?? 0) > 0 && (
+                <span className="tnum text-micro font-semibold text-danger">
+                  {counters!.over_threshold}
+                </span>
+              )}
+              <X className="size-3.5" aria-hidden />
+            </button>
+          )}
         </header>
 
         {/* Баннер про долгое ожидание — это главная дисциплина продукта */}
-        {(counters?.over_threshold ?? 0) > 0 && filter !== 'awaiting' && (
+        {(counters?.over_threshold ?? 0) > 0 && filter !== 'awaiting_over' && (
           <button
-            onClick={() => setFilter('awaiting')}
+            onClick={() => setFilter('awaiting_over')}
             className="flex shrink-0 items-center gap-2 border-b border-danger/30 bg-danger-soft px-4 py-2.5 text-left text-sm text-danger transition-colors hover:bg-danger/20"
           >
             <AlertTriangle className="size-4 shrink-0" aria-hidden />
@@ -145,13 +207,21 @@ export function ChatsLayout({
             <ErrorState error={list.error} onRetry={() => void list.refetch()} />
           ) : conversations.length === 0 ? (
             <EmptyState
-              title={debounced ? `По запросу «${debounced}» ничего не найдено` : 'Чатов пока нет'}
+              title={
+                debounced
+                  ? `По запросу «${debounced}» ничего не найдено`
+                  : filter === 'awaiting_over'
+                    ? 'Долгих ожиданий нет'
+                    : 'Чатов пока нет'
+              }
               hint={
                 debounced
                   ? 'Проверьте написание или очистите поиск.'
-                  : filter === 'awaiting'
-                    ? 'Все клиенты получили ответ.'
-                    : 'Как только клиент напишет, диалог появится здесь.'
+                  : filter === 'awaiting_over'
+                    ? `Никто не ждёт ответа дольше ${counters?.over_threshold_minutes ?? ''} мин.`
+                    : filter === 'awaiting'
+                      ? 'Все клиенты получили ответ.'
+                      : 'Как только клиент напишет, диалог появится здесь.'
               }
             />
           ) : (
@@ -165,6 +235,11 @@ export function ChatsLayout({
               ))}
               {list.hasNextPage && (
                 <div className="p-3">
+                  {listTotal !== null && listTotal > conversations.length && (
+                    <p className="mb-2 text-center text-micro text-ink-faint">
+                      Показано {conversations.length} из {listTotal}
+                    </p>
+                  )}
                   <Button
                     variant="secondary"
                     fullWidth

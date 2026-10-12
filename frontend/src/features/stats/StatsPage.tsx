@@ -1,5 +1,5 @@
 import { ChevronDown } from 'lucide-react'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
   Bar,
   BarChart,
@@ -11,9 +11,12 @@ import {
 } from 'recharts'
 
 import type { Granularity } from '@/entities/types'
+import { SectionActions } from '@/app/layout/SectionActions'
 import { useAuth } from '@/shared/hooks/useAuth'
+import { useOrgToday } from '@/shared/hooks/useOrgToday'
 import { cn } from '@/shared/lib/cn'
-import { dateFull, dateShort, daysAgo, isoDate, money, plural } from '@/shared/lib/format'
+import { dateShort, money, plural } from '@/shared/lib/format'
+import { presetRange, rangeLabel } from '@/shared/lib/period'
 import {
   Button,
   Card,
@@ -53,14 +56,7 @@ const AXIS_COLOR = '#6B7385'
 
 type Preset = 'week' | 'month' | 'quarter' | 'custom'
 type Range = { from: string; to: string }
-
-function presetRange(preset: Preset): Range {
-  const to = isoDate(new Date())
-  if (preset === 'week') return { from: daysAgo(6), to }
-  if (preset === 'quarter') return { from: daysAgo(89), to }
-  const now = new Date()
-  return { from: isoDate(new Date(now.getFullYear(), now.getMonth(), 1)), to }
-}
+// Пресеты периода — общие с «Оплатами» (shared/lib/period.ts): «Месяц» везде календарный (D-39).
 
 /**
  * Гранулярность графика («Дни/Недели/Месяцы»). Свой переключатель, а не общий
@@ -117,8 +113,16 @@ function GranularityPicker({
 
 export function StatsPage() {
   const { isAdmin } = useAuth()
+  const today = useOrgToday()
   const [preset, setPreset] = useState<Preset>('month')
-  const [range, setRange] = useState(() => presetRange('month'))
+  const [range, setRange] = useState(() => presetRange('month', today))
+  // «Сегодня» уточняется, когда приходит часовой пояс организации, и меняется в полночь:
+  // период-пресет пересчитывается, а введённый вручную («Свой») не трогаем.
+  useEffect(() => {
+    if (preset === 'custom') return
+    const next = presetRange(preset, today)
+    setRange((current) => (current.from === next.from && current.to === next.to ? current : next))
+  }, [preset, today])
   const [granularity, setGranularity] = useState<Granularity>('day')
   const [periodOpen, setPeriodOpen] = useState(false)
   const [explainOpen, setExplainOpen] = useState(false)
@@ -158,7 +162,7 @@ export function StatsPage() {
       setPeriodOpen(true)
       return
     }
-    setRange(presetRange(next))
+    setRange(presetRange(next, today))
   }
 
   function applyPeriod() {
@@ -205,10 +209,11 @@ export function StatsPage() {
     <div className="flex min-h-0 flex-1 flex-col">
       <header className="shrink-0 border-b border-line px-4 py-3 desk:px-6">
         <div className="mx-auto flex w-full max-w-4xl flex-col gap-2">
-          <h1 className="text-lg font-semibold text-ink">Статистика</h1>
-          <span className="text-xs text-ink-faint">
-            {dateFull(`${range.from}T00:00:00`)} — {dateFull(`${range.to}T00:00:00`)}
-          </span>
+          <div className="flex items-center justify-between gap-3">
+            <h1 className="text-lg font-semibold text-ink">Статистика</h1>
+            <SectionActions />
+          </div>
+          <span className="text-xs text-ink-faint">{rangeLabel(range)}</span>
           <Segmented
             value={preset}
             onChange={choose}

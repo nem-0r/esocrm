@@ -4,7 +4,7 @@
 
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import delete, distinct, func, or_, select, update
+from sqlalchemy import ColumnElement, delete, distinct, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -12,6 +12,7 @@ from app.core import crypto, redis_bus
 from app.core.errors import Conflict, Invalid, NotFound
 from app.models import (
     AccountManager,
+    ActorKind,
     AuthSession,
     Conversation,
     Deal,
@@ -20,9 +21,11 @@ from app.models import (
     Message,
     TelegramAccount,
     User,
+    UserRole,
 )
 from app.schemas.common import CursorPage, decode_cursor, encode_cursor
 from app.schemas.user import (
+    PasswordResetOut,
     ResendInviteOut,
     StaffAccountOut,
     UserCreateIn,
@@ -31,7 +34,7 @@ from app.schemas.user import (
     UserUpdateIn,
     WorkScheduleOut,
 )
-from app.services import audit, schedule, settings_service
+from app.services import audit, password_reset, schedule, settings_service
 from app.services.auth_service import normalize_email
 from app.services.worktime import current_month_bounds as _month_bounds
 
@@ -159,6 +162,22 @@ async def _build_rows(
     ]
 
 
+def no_account_clauses() -> tuple[ColumnElement[bool], ...]:
+    """Фильтр «Без аккаунта»: активные менеджеры, у которых нет ни одного живого аккаунта.
+
+    Руководителю аккаунт не нужен (он видит все), отключённому сотруднику — тем
+    более. Удалённый аккаунт не считается: он удаляется мягко, связь с менеджером
+    остаётся, а в карточке сотрудника такой аккаунт уже не показан.
+    """
+    has_account = (
+        select(AccountManager.user_id)
+        .join(TelegramAccount, TelegramAccount.id == AccountManager.account_id)
+        .where(AccountManager.user_id == User.id, TelegramAccount.deleted_at.is_(None))
+        .exists()
+    )
+    return (User.role == UserRole.MANAGER, User.is_active.is_(True), ~has_account)
+
+
 async def list_users(
     db: AsyncSession,
     *,
@@ -173,10 +192,7 @@ async def list_users(
         pattern = f"%{q.strip()}%"
         stmt = stmt.where(or_(User.full_name.ilike(pattern), User.email.ilike(pattern)))
     if no_account:
-        has_account = (
-            select(AccountManager.user_id).where(AccountManager.user_id == User.id).exists()
-        )
-        stmt = stmt.where(~has_account)
+        stmt = stmt.where(*no_account_clauses())
     stmt = stmt.order_by(User.id)
 
     matched = list((await db.execute(stmt)).scalars().all())
@@ -261,7 +277,9 @@ async def update_user(db: AsyncSession, admin: User, user_id: int, data: UserUpd
         before["full_name"], user.full_name = user.full_name, data.full_name
         after["full_name"] = user.full_name
 
-    if data.phone is not None and data.phone != user.phone:
+    # Телефон можно очистить: «передали пустой» (None после проверки) — это не то же,
+    # что «не передали». Раньше пустое значение молча игнорировалось.
+    if "phone" in data.model_fields_set and data.phone != user.phone:
         before["phone"], user.phone = user.phone, data.phone
         after["phone"] = user.phone
 
@@ -339,6 +357,9 @@ async def update_user(db: AsyncSession, admin: User, user_id: int, data: UserUpd
             .where(AuthSession.user_id == user.id, AuthSession.revoked_at.is_(None))
             .values(revoked_at=datetime.now(UTC))
         )
+        # Выданная ссылка сброса пароля отключённому не нужна и не должна ожить
+        # после повторного включения.
+        password_reset.clear_token(user)
         await audit.log_event(
             db, action="user.deactivated", entity_type="user", entity_id=user.id, actor=admin,
         )
@@ -357,6 +378,9 @@ async def resend_invite(db: AsyncSession, admin: User, user_id: int) -> ResendIn
     user.invite_token_hash = crypto.token_hash(raw_token)
     user.invite_expires_at = now + timedelta(days=INVITE_TTL_DAYS)
     user.invite_sent_at = now
+    # Два действующих способа задать пароль одновременно не нужны: новое
+    # приглашение гасит ссылку сброса, если она была выдана раньше.
+    password_reset.clear_token(user)
 
     await audit.log_event(
         db, action="user.invited", entity_type="user", entity_id=user.id,
@@ -364,3 +388,33 @@ async def resend_invite(db: AsyncSession, admin: User, user_id: int) -> ResendIn
     )
     await db.commit()
     return ResendInviteOut(invite_url=f"/invite/{raw_token}")
+
+
+async def issue_password_reset_for(
+    db: AsyncSession, user: User, *, actor: User | None
+) -> PasswordResetOut:
+    """Выдать одноразовую ссылку на новый пароль (D-38).
+
+    Токен нигде не сохраняется открытым: в базе его хеш, в журнале — только
+    «кто, кому, до какого часа». Новая выдача гасит прежнюю ссылку. `actor=None` —
+    команда на сервере (`python -m app.cli reset-password`).
+    """
+    password_reset.check_can_issue(user, actor_id=actor.id if actor else None)
+
+    now = datetime.now(UTC)
+    raw_token = password_reset.issue_token(user, now)
+    expires_at = user.password_reset_expires_at
+    assert expires_at is not None  # issue_token только что его записал
+
+    await audit.log_event(
+        db, action="user.password_reset_issued", entity_type="user", entity_id=user.id,
+        actor=actor, actor_kind=ActorKind.USER if actor else ActorKind.SYSTEM,
+        after={"expires_at": expires_at.isoformat(), "via": "admin" if actor else "cli"},
+    )
+    await db.commit()
+    return PasswordResetOut(link=password_reset.reset_path(raw_token), expires_at=expires_at)
+
+
+async def issue_password_reset(db: AsyncSession, admin: User, user_id: int) -> PasswordResetOut:
+    user = await _get_or_404(db, user_id)
+    return await issue_password_reset_for(db, user, actor=admin)

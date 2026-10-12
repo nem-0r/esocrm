@@ -58,8 +58,10 @@ function filterKey(filters: DealFilters): (string | number | null)[] {
   ]
 }
 
-export function useDeals(filters: DealFilters) {
+/** `enabled: false` — период введён неверно: запрос не уходит, пустой список не рисуется. */
+export function useDeals(filters: DealFilters, enabled = true) {
   return useInfiniteQuery({
+    enabled,
     queryKey: ['deals', 'list', ...filterKey(filters)],
     initialPageParam: null as string | null,
     queryFn: ({ pageParam, signal }) =>
@@ -72,8 +74,9 @@ export function useDeals(filters: DealFilters) {
   })
 }
 
-export function useDealsSummary(filters: DealFilters) {
+export function useDealsSummary(filters: DealFilters, enabled = true) {
   return useQuery({
+    enabled,
     queryKey: ['deals', 'summary', ...filterKey(filters)],
     queryFn: ({ signal }) => api.get<DealsSummary>('/deals/summary', toQuery(filters), signal),
   })

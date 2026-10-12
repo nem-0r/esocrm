@@ -25,6 +25,7 @@ from app.models import (
     TelegramAccount,
     User,
 )
+from app.models.client import client_display_name
 from app.services import deal_service
 from app.services.export_format import BOM, CsvBuffer, csv_safe, dt, rub
 
@@ -147,7 +148,16 @@ async def export_csv_rows(db: AsyncSession, user: User, **filters: Any) -> Async
                 f"DEAL-{row[0]}",
                 dt(row.event_at),
                 STATUS_LABEL.get(row.status, str(row.status)),
-                csv_safe(row.display_name or str(row.telegram_id)),
+                # Как на экране: имя от менеджера → имя из Telegram → @username → id (BUG-10).
+                csv_safe(
+                    client_display_name(
+                        row.display_name,
+                        row.tg_first_name,
+                        row.tg_last_name,
+                        row.tg_username,
+                        row.telegram_id,
+                    )
+                ),
                 row.client_id,
                 row.telegram_id,
                 csv_safe(f"@{row.tg_username}" if row.tg_username else ""),

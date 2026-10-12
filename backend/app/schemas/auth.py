@@ -1,9 +1,12 @@
 """Схемы аутентификации: вход, выход, приглашения, смена пароля."""
 
+from datetime import datetime
+
 from pydantic import field_validator
 
 from app.schemas.common import ApiModel
 from app.schemas.user import MeOut, validate_email_format, validate_password_strength
+from app.schemas.validators import optional_phone
 
 
 class LoginIn(ApiModel):
@@ -36,6 +39,28 @@ class AcceptInviteIn(ApiModel):
         return validate_password_strength(value)
 
 
+class ResetPasswordIn(ApiModel):
+    """Новый пароль по одноразовой ссылке от руководителя (D-38).
+
+    Политика пароля та же, что у приглашений и смены пароля в профиле.
+    """
+
+    token: str
+    password: str
+
+    @field_validator("password")
+    @classmethod
+    def _password(cls, value: str) -> str:
+        return validate_password_strength(value)
+
+
+class ResetPasswordPreviewOut(ApiModel):
+    """Что видит открывший ссылку: только имя для приветствия и срок. Больше ничего."""
+
+    full_name: str
+    expires_at: datetime
+
+
 class MeUpdateIn(ApiModel):
     accepting_leads: bool | None = None
     full_name: str | None = None
@@ -49,6 +74,11 @@ class MeUpdateIn(ApiModel):
         if value is not None and not value.strip():
             raise ValueError("Укажите имя")
         return value.strip() if value is not None else value
+
+    @field_validator("phone")
+    @classmethod
+    def _phone(cls, value: str | None) -> str | None:
+        return optional_phone(value)
 
     @field_validator("new_password")
     @classmethod

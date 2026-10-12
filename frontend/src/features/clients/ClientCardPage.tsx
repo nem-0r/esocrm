@@ -1,9 +1,17 @@
 import { Download, FileText, MessageSquare, Plus, Trash2 } from 'lucide-react'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 
 import type { BirthTimeApprox, ClientCard } from '@/entities/types'
 import { dateFull, dateShort, fileSize, money, plural } from '@/shared/lib/format'
+import {
+  BIRTH_DATE_MIN,
+  CITY_MAX_LENGTH,
+  NAME_MAX_LENGTH,
+  PHONE_HINT,
+  PHONE_MAX_LENGTH,
+  todayIso,
+} from '@/shared/lib/validation'
 import { useMe } from '@/shared/hooks/useAuth'
 import {
   Avatar,
@@ -26,6 +34,12 @@ import { OverviewTab } from '@/features/clients/components/OverviewTab'
 import { DealSheet } from '@/features/deals/DealSheet'
 import { BIRTH_TIME_APPROX, DEAL_STATUS, errorText } from '@/features/clients/clientText'
 import {
+  buildClientPatch,
+  validateClientForm,
+  type ClientFormValues,
+} from '@/features/clients/clientForm'
+import { fieldErrors } from '@/features/profile/lib'
+import {
   useClient,
   useClientDeals,
   useClientMaterials,
@@ -33,7 +47,6 @@ import {
   useCreateNote,
   useDeleteNote,
   useUpdateClient,
-  type ClientPatch,
 } from '@/features/clients/queries'
 import { daysAgo } from '@/shared/lib/format'
 
@@ -399,34 +412,46 @@ function EditSheet({
   open: boolean
   onOpenChange: (open: boolean) => void
   clientId: number
-  initial: Record<string, string>
+  initial: ClientFormValues
 }) {
   const update = useUpdateClient(clientId)
   const [form, setForm] = useState(initial)
   const [error, setError] = useState<string | null>(null)
+  // Ошибки по полям: и наши проверки до запроса, и 422 сервера — под своим полем.
+  const [fields, setFields] = useState<Record<string, string>>({})
 
-  function set(key: string, value: string) {
+  // При каждом открытии — свежие значения карточки: иначе после отмены или
+  // сохранения в полях оставалось бы то, что человек набирал в прошлый раз.
+  useEffect(() => {
+    if (!open) return
+    setForm(initial)
+    setFields({})
+    setError(null)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open])
+
+  function set(key: keyof ClientFormValues, value: string) {
     setForm((prev) => ({ ...prev, [key]: value }))
+    setFields((prev) => (prev[key] ? { ...prev, [key]: '' } : prev))
   }
 
   async function save() {
     setError(null)
-    const patch: ClientPatch = {
-      display_name: form.display_name.trim() || null,
-      phone: form.phone.trim() || null,
-      birth_date: form.birth_date || null,
-      birth_time: form.birth_time || null,
-      birth_time_approx:
-        form.birth_time || form.birth_time_approx === 'none'
-          ? null
-          : (form.birth_time_approx as BirthTimeApprox),
-      birth_city: form.birth_city.trim() || null,
+    setFields({})
+    const problems = validateClientForm(form, initial)
+    if (Object.keys(problems).length > 0) {
+      setFields(problems)
+      return
     }
     try {
-      await update.mutateAsync(patch)
+      await update.mutateAsync(buildClientPatch(form, initial))
       onOpenChange(false)
     } catch (cause) {
-      setError(errorText(cause))
+      // Сервер называет поле, на котором не сошлось (телефон, дата…): показываем
+      // у него. Ошибка без поля или про поле, которого в форме нет, — общей строкой.
+      const byField = fieldErrors(cause)
+      if (Object.keys(byField).some((key) => key in form)) setFields(byField)
+      else setError(errorText(cause))
     }
   }
 
@@ -447,29 +472,48 @@ function EditSheet({
             Менеджер вписывает имя руками, и оно заменяет подпись сверху для всех. */}
         <Field
           label="Имя"
+          error={fields.display_name}
           hint="Заменит @username или id в шапке карточки — увидят все сотрудники"
         >
           <Input
             value={form.display_name}
             onChange={(event) => set('display_name', event.target.value)}
+            maxLength={NAME_MAX_LENGTH}
+            invalid={Boolean(fields.display_name)}
             placeholder="Как обращаться к клиенту"
           />
         </Field>
-        <Field label="Телефон" hint="Цифры, плюс, пробелы и дефисы">
-          <Input value={form.phone} onChange={(event) => set('phone', event.target.value)} />
+        <Field label="Телефон" error={fields.phone} hint={PHONE_HINT}>
+          <Input
+            type="tel"
+            inputMode="tel"
+            value={form.phone}
+            onChange={(event) => set('phone', event.target.value)}
+            maxLength={PHONE_MAX_LENGTH}
+            invalid={Boolean(fields.phone)}
+            placeholder="+7 900 000-00-00"
+          />
         </Field>
-        <Field label="Дата рождения">
+        <Field label="Дата рождения" error={fields.birth_date}>
           <Input
             type="date"
             value={form.birth_date}
             onChange={(event) => set('birth_date', event.target.value)}
+            min={BIRTH_DATE_MIN}
+            max={todayIso()}
+            invalid={Boolean(fields.birth_date)}
           />
         </Field>
-        <Field label="Время рождения" hint="Нужно для точного расчёта карты">
+        <Field
+          label="Время рождения"
+          error={fields.birth_time}
+          hint="Нужно для точного расчёта карты"
+        >
           <Input
             type="time"
             value={form.birth_time}
             onChange={(event) => set('birth_time', event.target.value)}
+            invalid={Boolean(fields.birth_time)}
           />
         </Field>
         {/* Часть суток спрашиваем только пока точного времени нет: оно точнее,
@@ -486,10 +530,12 @@ function EditSheet({
             />
           </Field>
         )}
-        <Field label="Город рождения">
+        <Field label="Город рождения" error={fields.birth_city}>
           <Input
             value={form.birth_city}
             onChange={(event) => set('birth_city', event.target.value)}
+            maxLength={CITY_MAX_LENGTH}
+            invalid={Boolean(fields.birth_city)}
           />
         </Field>
         {error && <span className="text-xs text-danger">{error}</span>}

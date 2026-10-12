@@ -54,6 +54,13 @@ class User(Base, PKMixin, TimestampMixin):
     invite_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
+    # Сброс пароля руководителем (D-38): одноразовая ссылка на 24 часа. Хранится
+    # хеш токена, как у приглашений, но в своих колонках: приглашение для того,
+    # кто ещё не заходил, сброс — только для принявшего.
+    password_reset_token_hash: Mapped[str | None] = mapped_column(String(255))
+    password_reset_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    password_reset_issued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
     created_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
@@ -73,6 +80,7 @@ class User(Base, PKMixin, TimestampMixin):
         Index("ix_users_role_active", "role", "is_active"),
         Index("ix_users_last_seen_at", "last_seen_at"),
         Index("ix_users_invite_token_hash", "invite_token_hash"),
+        Index("ix_users_password_reset_token_hash", "password_reset_token_hash"),
     )
 
     @property

@@ -87,7 +87,7 @@ export function ClientsLayout({
             className="mt-3"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Имя, телефон или id клиента"
+            placeholder="Имя, @username, телефон или id клиента"
             leading={<Search className="size-4" aria-hidden />}
           />
 

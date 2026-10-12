@@ -8,10 +8,17 @@
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Notification, NotificationKind, User
+from app.models import (
+    AccountManager,
+    Notification,
+    NotificationKind,
+    TelegramAccount,
+    User,
+    UserRole,
+)
 from app.realtime.events import emit
 from app.schemas.common import CursorPage, decode_cursor, encode_cursor
 from app.services.money import format_rubles
@@ -79,6 +86,20 @@ def to_out(notification: Notification) -> dict[str, Any]:
 NOTIFICATIONS_WINDOW_DAYS = 31
 
 
+def window_start(now: datetime | None = None) -> datetime:
+    """С какого момента уведомления ещё показываются: одно окно и для списка, и для бейджа."""
+    return (now or datetime.now(UTC)) - timedelta(days=NOTIFICATIONS_WINDOW_DAYS)
+
+
+def _visible_to(user: User) -> tuple[Any, ...]:
+    """Условия «уведомления этого человека в окне показа».
+
+    Список и счётчик обязаны брать их отсюда: иначе бейдж считает то, чего в
+    списке уже нет, и непрочитанное «висит» без возможности его найти.
+    """
+    return (Notification.user_id == user.id, Notification.created_at >= window_start())
+
+
 async def list_for(
     db: AsyncSession,
     user: User,
@@ -90,11 +111,7 @@ async def list_for(
     limit = max(1, min(limit, 100))
     # ТЗ п. 1.3: показываем только за последний месяц. Уведомление годовой
     # давности не несёт смысла, а список из-за него растёт бесконечно.
-    since = datetime.now(UTC) - timedelta(days=NOTIFICATIONS_WINDOW_DAYS)
-    stmt = select(Notification).where(
-        Notification.user_id == user.id,
-        Notification.created_at >= since,
-    )
+    stmt = select(Notification).where(*_visible_to(user))
     if only_unread:
         stmt = stmt.where(Notification.read_at.is_(None))
     if (last_id := decode_cursor(cursor)) is not None:
@@ -111,12 +128,13 @@ async def list_for(
 
 
 async def unread_count(db: AsyncSession, user: User) -> int:
-    rows = await db.execute(
-        select(Notification.id).where(
-            Notification.user_id == user.id, Notification.read_at.is_(None)
-        )
+    """Непрочитанные в том же окне, что и список (иначе бейдж врёт)."""
+    stmt = (
+        select(func.count())
+        .select_from(Notification)
+        .where(*_visible_to(user), Notification.read_at.is_(None))
     )
-    return len(rows.scalars().all())
+    return int((await db.execute(stmt)).scalar_one())
 
 
 async def mark_read(db: AsyncSession, user: User, ids: list[int] | None) -> int:
@@ -159,3 +177,47 @@ async def notify(
     await db.flush()
     for row in rows:
         await emit("notification.new", {"notification": to_out(row)}, [row.user_id])
+
+
+# --- аккаунт потерял связь (D-37) ---------------------------------------------
+
+
+def account_error_payload(account_id: int, title: str, reason: str | None) -> dict[str, Any]:
+    """Данные уведомления `account_error`: из них `render` собирает текст."""
+    return {
+        "account_id": account_id,
+        "account_title": title,
+        "reason": reason,
+        "kind": NotificationKind.ACCOUNT_ERROR.value,
+    }
+
+
+async def notify_account_error(
+    db: AsyncSession, account: TelegramAccount, reason: str | None
+) -> None:
+    """Аккаунт потерял связь: сообщить всем руководителям и менеджерам аккаунта.
+
+    Вызывается ровно один раз на переход в `error` (решает `account_link.entered_error`),
+    в той же транзакции, что и смена статуса. Транзакцию не закрывает.
+    """
+    admins = select(User.id).where(
+        User.role == UserRole.ADMIN, User.is_active.is_(True), User.deleted_at.is_(None)
+    )
+    managers = (
+        select(User.id)
+        .join(AccountManager, AccountManager.user_id == User.id)
+        .where(
+            AccountManager.account_id == account.id,
+            User.is_active.is_(True),
+            User.deleted_at.is_(None),
+        )
+    )
+    user_ids = list((await db.execute(admins.union(managers))).scalars().all())
+    await notify(
+        db,
+        user_ids=user_ids,
+        kind=NotificationKind.ACCOUNT_ERROR,
+        entity_type="account",
+        entity_id=account.id,
+        payload=account_error_payload(account.id, account.title, reason),
+    )

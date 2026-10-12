@@ -1,6 +1,16 @@
 import { describe, expect, it } from 'vitest'
 
-import { money, parseMoney, plural, waitingLabel, durationLabel, initials } from './format'
+import {
+  MAX_AMOUNT_KOPECKS,
+  money,
+  moneyIssueText,
+  parseMoney,
+  parseMoneyDetailed,
+  plural,
+  waitingLabel,
+  durationLabel,
+  initials,
+} from './format'
 
 /**
  * Intl разделяет разряды неразрывным пробелом — так «4 900 ₽» не переносится
@@ -60,8 +70,75 @@ describe('деньги', () => {
 
   it('отсекает заведомо опечаточные суммы', () => {
     expect(parseMoney('99999999999999999999')).toBeNull()
-    expect(parseMoney('10000000000')).toBe(1_000_000_000_000)
-    expect(parseMoney('10000000001')).toBeNull()
+    expect(parseMoney('100000000')).toBe(10_000_000_000)
+    expect(parseMoney('100000000,01')).toBeNull()
+    expect(parseMoney('10000000000')).toBeNull()
+  })
+})
+
+describe('предел суммы', () => {
+  it('равен серверному: 100 млн ₽ — backend/app/services/money.py, MAX_AMOUNT', () => {
+    // Если меняете число здесь — меняйте и MAX_AMOUNT на сервере, и наоборот:
+    // тот же номер закреплён в backend/tests/unit/test_money_limits.py.
+    expect(MAX_AMOUNT_KOPECKS).toBe(10_000_000_000)
+  })
+
+  it('сумма ровно на пределе проходит, на копейку больше — нет', () => {
+    expect(parseMoneyDetailed('100 000 000')).toEqual({ ok: true, kopecks: MAX_AMOUNT_KOPECKS })
+    expect(parseMoneyDetailed('100 000 000,01')).toEqual({ ok: false, reason: 'too_large' })
+  })
+})
+
+describe('причины отказа parseMoneyDetailed', () => {
+  it.each([
+    ['', 'empty'],
+    ['   ', 'empty'],
+    ['₽', 'empty'],
+    ['абв', 'not_number'],
+    ['-100', 'not_number'],
+    ['1e5', 'not_number'],
+    ['1.2.3', 'not_number'],
+    [',', 'not_number'],
+    ['10.555', 'too_precise'],
+    ['100,123', 'too_precise'],
+    ['0', 'zero'],
+    ['0,00', 'zero'],
+    ['0.000', 'zero'],
+    ['100000000,01', 'too_large'],
+    ['99999999999999999999', 'too_large'],
+    ['9'.repeat(400), 'too_large'],
+  ] as const)('«%s» → %s', (input, reason) => {
+    expect(parseMoneyDetailed(input)).toEqual({ ok: false, reason })
+  })
+
+  it('«4500.000000» — те же 4500 (так отдаёт сумму Робокасса)', () => {
+    expect(parseMoneyDetailed('4500.000000')).toEqual({ ok: true, kopecks: 450000 })
+  })
+
+  it('копейки считаются без ошибок плавающей точки', () => {
+    // 1,15 · 100 в числах с плавающей точкой даёт 114,99999999999999.
+    expect(parseMoneyDetailed('1,15')).toEqual({ ok: true, kopecks: 115 })
+    expect(parseMoneyDetailed('4500,5')).toEqual({ ok: true, kopecks: 450050 })
+    expect(parseMoneyDetailed('0,07')).toEqual({ ok: true, kopecks: 7 })
+  })
+
+  it('у каждой причины свой текст, и ни один не врёт про другую', () => {
+    expect(moneyIssueText('empty')).toBe('Введите сумму')
+    expect(moneyIssueText('too_precise')).toBe('Не больше двух знаков после запятой')
+    expect(spaces(moneyIssueText('too_large'))).toBe('Сумма не больше 100 000 000 ₽')
+    expect(moneyIssueText('zero')).toBe('Стоимость должна быть больше нуля')
+    expect(moneyIssueText('not_number')).toMatch(/цифрами/)
+    const texts = (['empty', 'not_number', 'too_precise', 'too_large', 'zero'] as const).map(
+      moneyIssueText,
+    )
+    expect(new Set(texts).size).toBe(5)
+  })
+
+  it('parseMoney и parseMoneyDetailed не расходятся', () => {
+    for (const input of ['4900', '4 900,50', '0', 'абв', '10.555', '']) {
+      const detailed = parseMoneyDetailed(input)
+      expect(parseMoney(input)).toBe(detailed.ok ? detailed.kopecks : null)
+    }
   })
 })
 

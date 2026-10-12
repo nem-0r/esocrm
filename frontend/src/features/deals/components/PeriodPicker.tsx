@@ -1,26 +1,17 @@
-/** Период списка оплат: пресеты и свой диапазон. */
+/**
+ * Период списка оплат: пресеты, свой диапазон и подпись с выбранными датами.
+ * Сами пресеты считает `shared/lib/period` — те же, что в «Статистике» (D-39).
+ */
 
 import { Field, Input, Segmented } from '@/shared/ui'
-import { daysAgo, isoDate } from '@/shared/lib/format'
-
-export type PeriodPreset = 'week' | 'month' | 'quarter' | 'year' | 'custom'
-
-export interface DateRange {
-  from: string
-  to: string
-}
-
-const PRESET_DAYS: Record<Exclude<PeriodPreset, 'custom'>, number> = {
-  week: 6,
-  month: 29,
-  quarter: 89,
-  year: 364,
-}
-
-export function presetRange(preset: PeriodPreset, current?: DateRange): DateRange {
-  if (preset === 'custom') return current ?? presetRange('month')
-  return { from: daysAgo(PRESET_DAYS[preset]), to: isoDate(new Date()) }
-}
+import {
+  MAX_PERIOD_DATE,
+  MIN_PERIOD_DATE,
+  rangeError,
+  rangeLabel,
+  type DateRange,
+  type PeriodPreset,
+} from '@/shared/lib/period'
 
 export function PeriodPicker({
   preset,
@@ -33,6 +24,10 @@ export function PeriodPicker({
   onPresetChange: (preset: PeriodPreset) => void
   onRangeChange: (range: DateRange) => void
 }) {
+  // min/max на поле работают только в календаре — вручную можно ввести что угодно,
+  // поэтому период проверяется ещё и здесь, а в родителе по нему отключаются запросы.
+  const error = rangeError(range.from, range.to)
+
   return (
     <div className="flex flex-col gap-2">
       <Segmented
@@ -53,7 +48,9 @@ export function PeriodPicker({
             <Input
               type="date"
               value={range.from}
-              max={range.to}
+              min={MIN_PERIOD_DATE}
+              max={range.to || MAX_PERIOD_DATE}
+              invalid={error !== null}
               onChange={(e) => onRangeChange({ ...range, from: e.target.value })}
             />
           </Field>
@@ -61,11 +58,24 @@ export function PeriodPicker({
             <Input
               type="date"
               value={range.to}
-              min={range.from}
+              min={range.from || MIN_PERIOD_DATE}
+              max={MAX_PERIOD_DATE}
+              invalid={error !== null}
               onChange={(e) => onRangeChange({ ...range, to: e.target.value })}
             />
           </Field>
         </div>
+      )}
+
+      {/* Подпись есть в любом режиме: видно, какие даты стоят за словом «Месяц». */}
+      {error ? (
+        <span role="alert" className="text-xs text-danger">
+          {error}
+        </span>
+      ) : (
+        <span aria-live="polite" className="text-xs text-ink-faint">
+          {rangeLabel(range)}
+        </span>
       )}
     </div>
   )

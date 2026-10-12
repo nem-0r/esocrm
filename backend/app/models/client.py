@@ -48,6 +48,27 @@ def zodiac_for(birth: date | None) -> str | None:
     return ZODIAC_BOUNDS[birth.month - 2][2]
 
 
+def client_display_name(
+    display_name: str | None,
+    first_name: str | None,
+    last_name: str | None,
+    username: str | None,
+    telegram_id: int,
+) -> str:
+    """Как звать клиента: имя от менеджера → «имя фамилия» из Telegram → @username → публичный id.
+
+    Единственное место этой лестницы. Её зовут модель (`Client.name`), список клиентов и
+    обе выгрузки (оплаты, клиенты), которые читают сырые строки запроса без объектов
+    модели, — иначе выгрузка показывает id там, где экран показывает имя (BUG-10).
+    """
+    if display_name:
+        return display_name
+    parts = [p for p in (first_name, last_name) if p]
+    if parts:
+        return " ".join(parts)
+    return f"@{username}" if username else str(telegram_id)
+
+
 class Client(Base, PKMixin, TimestampMixin):
     """Клиент существует в одном экземпляре и опознаётся по telegram_id.
 
@@ -117,12 +138,13 @@ class Client(Base, PKMixin, TimestampMixin):
         остаётся публичный id. Менеджер вписывает имя руками, и с этого момента
         его видят все (ТЗ п. 5.3).
         """
-        if self.display_name:
-            return self.display_name
-        parts = [p for p in (self.tg_first_name, self.tg_last_name) if p]
-        if parts:
-            return " ".join(parts)
-        return f"@{self.tg_username}" if self.tg_username else str(self.telegram_id)
+        return client_display_name(
+            self.display_name,
+            self.tg_first_name,
+            self.tg_last_name,
+            self.tg_username,
+            self.telegram_id,
+        )
 
     @property
     def data_complete(self) -> bool:

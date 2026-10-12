@@ -2,6 +2,7 @@ import { Ban, Check, Search } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 
 import type { Conversation, Message } from '@/entities/types'
+import { hasNoLink } from '@/features/chats/accountLink'
 import { FUNNEL_LABEL } from '@/features/profile/lib'
 import { useConversations, useForwardMessages } from '@/features/chats/queries'
 import { ApiError } from '@/shared/api/client'
@@ -171,15 +172,18 @@ export function ForwardSheet({
             rows.map((row) => {
               const chosen = target?.id === row.id
               const blocked = row.is_blocked_by_client
+              // Аккаунт без связи: сервер откажет (D-37), поэтому и выбрать такой чат нельзя.
+              const offline = hasNoLink(row.account.status)
+              const unavailable = blocked || offline
               return (
                 <button
                   key={row.id}
                   type="button"
-                  disabled={blocked}
+                  disabled={unavailable}
                   onClick={() => setTarget(row)}
                   className={cn(
                     'flex items-center gap-3 rounded-md px-3 py-2 text-left transition-colors',
-                    blocked
+                    unavailable
                       ? 'cursor-not-allowed opacity-60'
                       : chosen
                         ? 'bg-accent-soft'
@@ -198,6 +202,12 @@ export function ForwardSheet({
                       <span className="flex items-center gap-1 text-micro text-warning">
                         <Ban className="size-3 shrink-0" aria-hidden />
                         Клиент заблокировал номер — переслать сюда нельзя
+                      </span>
+                    )}
+                    {!blocked && offline && (
+                      <span className="flex items-center gap-1 text-micro text-warning">
+                        <Ban className="size-3 shrink-0" aria-hidden />
+                        Аккаунт отключён — переслать сюда нельзя
                       </span>
                     )}
                   </span>

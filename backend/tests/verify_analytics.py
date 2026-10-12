@@ -1275,12 +1275,11 @@ async def main() -> int:  # noqa: PLR0915
         over = (
             await db.execute(
                 text(
-                    # Просмотренные диалоги в баннер не идут: ТЗ п. 2.1 —
-                    # напоминание срабатывает один раз.
+                    # D-34: просмотренные диалоги из баннера не уходят — одно число
+                    # с плиткой статистики и фильтром «Ждут >30 мин».
                     "select count(*) from conversations "
                     "where awaiting_reply_since is not null "
-                    "and awaiting_reply_since < now() - interval '30 minutes' "
-                    "and (awaiting_seen_at is null or awaiting_seen_at < awaiting_reply_since)"
+                    "and awaiting_reply_since < now() - interval '30 minutes'"
                 )
             )
         ).scalar_one()

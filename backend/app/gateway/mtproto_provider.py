@@ -124,6 +124,21 @@ class SessionLost(RuntimeError):
     """Сессия больше не действует: разлогинили, забанили или отозвали."""
 
 
+def session_lost_reason(exc: BaseException) -> str:
+    """Почему сессия умерла — по-русски, для менеджера и руководителя.
+
+    Текст Telethon («The key is not registered in the system…») попадает на
+    экран: под неотправленным сообщением, в баннере чата и в уведомлении.
+    """
+    if isinstance(exc, SessionRevokedError):
+        return "Сеанс завершён в Telegram — нужен повторный вход"
+    if isinstance(exc, UserDeactivatedBanError):
+        return "Telegram заблокировал или удалил этот аккаунт"
+    if isinstance(exc, AuthKeyUnregisteredError):
+        return "Сессия недействительна — нужен повторный вход"
+    return str(exc) or "Сессия недействительна — нужен повторный вход"
+
+
 class ClientBlocked(RuntimeError):
     """Собеседник заблокировал этот номер — сообщение доставить нельзя."""
 
@@ -634,7 +649,7 @@ class MTProtoProvider:
                 recover=self._recoverer(client, account, chat_id, entity),
             )
         except BaseException as exc:
-            raise self._translate(exc) from exc
+            raise await self._translated(account, exc) from exc
         if not ids:
             return SentMessage(tg_message_id=None, extra_ids=[])
         return SentMessage(tg_message_id=ids[-1], extra_ids=ids[:-1])
@@ -665,7 +680,7 @@ class MTProtoProvider:
         except (ChatForwardsRestrictedError, MessageIdInvalidError, MessageIdsEmptyError) as exc:
             raise ForwardImpossible(str(exc)) from exc
         except BaseException as exc:
-            raise self._translate(exc) from exc
+            raise await self._translated(account, exc) from exc
 
     async def download_media(
         self, account: TelegramAccount, chat_id: int, tg_message_id: int, path: str
@@ -695,12 +710,22 @@ class MTProtoProvider:
         if isinstance(
             exc, (AuthKeyUnregisteredError, SessionRevokedError, UserDeactivatedBanError)
         ):
-            return SessionLost(str(exc))
+            return SessionLost(session_lost_reason(exc))
         if isinstance(exc, UserIsBlockedError):
             return ClientBlocked("Клиент заблокировал этот номер")
         if isinstance(exc, RPCError) and (reason := permanent_reason(exc)):
             return PermanentFailure(reason)
         return exc
+
+    async def _translated(self, account: TelegramAccount, exc: BaseException) -> BaseException:
+        """`_translate` плюс запись состояния: сессию могли отозвать, пока аккаунт
+        работал, и узнаём мы об этом из отказа Telegram на отправке. Без отчёта
+        аккаунт остался бы «подключён», а руководитель не получил бы ни баннера в
+        чате, ни уведомления, пока шлюз не перезапустят (D-37)."""
+        translated = self._translate(exc)
+        if isinstance(translated, SessionLost):
+            await self._report(account.id, "error", str(translated))
+        return translated
 
     def _recoverer(
         self, client: TelegramClient, account: TelegramAccount, chat_id: int, entity: Any
@@ -757,7 +782,7 @@ class MTProtoProvider:
         except FloodWaitError as exc:
             raise RetryAfter(int(exc.seconds)) from exc
         except (AuthKeyUnregisteredError, SessionRevokedError, UserDeactivatedBanError) as exc:
-            raise SessionLost(str(exc)) from exc
+            raise await self._translated(account, exc) from exc
 
     async def fetch_birthday(
         self, account: TelegramAccount, tg_user_id: int
@@ -898,8 +923,9 @@ class MTProtoProvider:
         try:
             return await self._connected(account)
         except (AuthKeyUnregisteredError, SessionRevokedError, UserDeactivatedBanError) as exc:
-            await self._report(account.id, "error", str(exc))
-            raise SessionLost(str(exc)) from exc
+            reason = session_lost_reason(exc)
+            await self._report(account.id, "error", reason)
+            raise SessionLost(reason) from exc
 
     async def _report(self, account_id: int, status: str, reason: str | None) -> None:
         if self._status_sink is not None:

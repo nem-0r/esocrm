@@ -21,8 +21,10 @@ import type {
   UploadResult,
 } from '@/entities/types'
 import { api } from '@/shared/api/client'
+import { skipParam } from '@/features/chats/replyQueue'
 
-export type ChatFilter = 'all' | 'awaiting' | 'awaiting_payment'
+/** `awaiting_over` — ждут ответа дольше порога из настроек (то же число, что в баннере). */
+export type ChatFilter = 'all' | 'awaiting' | 'awaiting_over' | 'awaiting_payment'
 
 export function useCounters() {
   return useQuery({
@@ -163,10 +165,14 @@ export function useTransfer(conversationId: number) {
   })
 }
 
-/** «Взять первого в очереди»: сервер сам решает, какой чат открыть. */
+/**
+ * «Взять первого в очереди»: сервер сам решает, какой чат открыть. `skip` — чаты,
+ * которые уже брали в этой сессии: они не повторяются, пока в очереди есть другие.
+ */
 export function useNextConversation() {
   return useMutation({
-    mutationFn: () => api.get<Conversation>('/conversations/next'),
+    mutationFn: (skip: number[] = []) =>
+      api.get<Conversation>('/conversations/next', { skip: skipParam(skip) }),
   })
 }
 

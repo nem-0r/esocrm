@@ -1,9 +1,7 @@
 import {
   AlertTriangle,
   Bell,
-  ChevronDown,
   ChevronRight,
-  ChevronUp,
   KeyRound,
   Landmark,
   LogOut,
@@ -16,7 +14,7 @@ import {
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
 
-import { dateFull, dateTimeFull, durationLabel, money, plural } from '@/shared/lib/format'
+import { dateFull, durationLabel, money } from '@/shared/lib/format'
 import { useAuth, useMe } from '@/shared/hooks/useAuth'
 import {
   Avatar,
@@ -29,27 +27,34 @@ import {
   InlineError,
   ListSkeleton,
   SectionTitle,
-  Sheet,
   StatTile,
   Switch,
 } from '@/shared/ui'
 import { NavRow, ProfileScreen } from '@/features/profile/components/ProfileScreen'
 import { EditProfileSheet } from '@/features/profile/components/EditProfileSheet'
+import { NotificationsSheet } from '@/features/profile/components/NotificationsSheet'
 import { PasswordSheet } from '@/features/profile/components/PasswordSheet'
 import { ROLE_LABEL, STATUS_LABEL, STATUS_TONE, errorMessage } from '@/features/profile/lib'
 import {
   useAccounts,
   useAccountsSummary,
-  useMarkNotificationsRead,
-  useNotifications,
   useSettings,
+  useUnreadCount,
   useUpdateMe,
 } from '@/features/profile/queries'
+import {
+  acceptingLeadsHint,
+  accountAttentionBanner,
+  accountsWithoutLink,
+} from '@/features/profile/rules'
 
 export function ProfilePage() {
   const me = useMe()
   const { logout, isAdmin } = useAuth()
   const updateMe = useUpdateMe()
+  // Подпись под переключателем зависит от того, на каких аккаунтах человек
+  // работает один, — те же данные, что и в блоке «Мои аккаунты».
+  const accounts = useAccounts()
   const [passwordOpen, setPasswordOpen] = useState(false)
   const [editOpen, setEditOpen] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -83,7 +88,11 @@ export function ProfilePage() {
             <Switch
               checked={me.accepting_leads}
               label={me.accepting_leads ? 'Приём заявок включён' : 'Приём заявок выключен'}
-              hint="Пока выключен, новые диалоги вам не назначаются"
+              hint={acceptingLeadsHint(
+                me.accepting_leads,
+                accounts.data ?? null,
+                me.id,
+              )}
               onChange={(value) => {
                 setError(null)
                 updateMe.mutate(
@@ -123,7 +132,6 @@ function ManagerBlocks() {
   const me = useMe()
   const accounts = useAccounts()
   const rows = accounts.data ?? []
-  const broken = rows.filter((account) => account.status === 'error')
 
   return (
     <>
@@ -149,21 +157,11 @@ function ManagerBlocks() {
       </div>
 
       {/* ТЗ Б.5: сколько моих аккаунтов требуют внимания — видно и менеджеру,
-          не только руководителю. Нажатие ведёт в список с включённым фильтром. */}
-      {me.accounts_attention > 0 && (
-        <Link
-          to="/profile/accounts?attention=1"
-          className="flex items-center gap-2 rounded-lg bg-warning-soft px-4 py-3 text-sm text-warning transition-colors hover:bg-warning/20"
-        >
-          <AlertTriangle className="size-4 shrink-0" aria-hidden />
-          <span className="flex-1">
-            {me.accounts_attention}{' '}
-            {plural(me.accounts_attention, 'аккаунт требует', 'аккаунта требуют', 'аккаунтов требуют')}{' '}
-            внимания
-          </span>
-          <ChevronRight className="size-4 shrink-0" aria-hidden />
-        </Link>
-      )}
+          не только руководителю. Менеджеру это просто сообщение: раздела
+          «Аккаунты» у него нет, переподключает руководитель. */}
+      <AccountAttentionBanner
+        count={accounts.data ? accountsWithoutLink(accounts.data) : me.accounts_attention}
+      />
 
       {/* ТЗ Б.3: график работы. Показываем режим организации из настроек —
           персональных смен в системе нет, и заводить их без описания было бы
@@ -172,11 +170,6 @@ function ManagerBlocks() {
 
       <Card>
         <SectionTitle>Мои аккаунты</SectionTitle>
-        {broken.length > 0 && (
-          <InlineError
-            message={`Нет связи с аккаунтом «${broken[0].title}». Обратитесь к руководителю — нужен повторный вход.`}
-          />
-        )}
         {accounts.isLoading ? (
           <ListSkeleton rows={2} />
         ) : accounts.error ? (
@@ -227,6 +220,10 @@ function DirectorBlocks() {
         <StatTile value={summary.data?.conversations_total ?? '—'} label="диалогов всего" />
       </div>
 
+      {/* Те же аккаунты, что и в плитке «требуют внимания»: нажатие открывает
+          их список с уже включённым фильтром. */}
+      <AccountAttentionBanner count={summary.data?.attention ?? 0} />
+
       <div className="flex flex-col gap-2">
         <NavRow
           to="/profile/accounts"
@@ -263,37 +260,41 @@ function DirectorBlocks() {
   )
 }
 
-// Свёрнутый список показывает три верхних уведомления: остальные прячутся
-// под кнопку. ТЗ п. 1.3 — список должен раскрываться и сворачиваться.
-const NOTIFICATIONS_COLLAPSED = 3
+/** Плашка «аккаунт требует внимания»: руководителю ссылка, менеджеру — сообщение. */
+function AccountAttentionBanner({ count }: { count: number }) {
+  const { isAdmin } = useAuth()
+  if (count <= 0) return null
+  const { text, href } = accountAttentionBanner(count, isAdmin)
+  const body = (
+    <>
+      <AlertTriangle className="size-4 shrink-0" aria-hidden />
+      <span className="flex-1">{text}</span>
+      {href && <ChevronRight className="size-4 shrink-0" aria-hidden />}
+    </>
+  )
+  const look = 'flex items-center gap-2 rounded-lg bg-warning-soft px-4 py-3 text-sm text-warning'
+  return href ? (
+    <Link to={href} className={`${look} transition-colors hover:bg-warning/20`}>
+      {body}
+    </Link>
+  ) : (
+    <div className={look}>{body}</div>
+  )
+}
 
 function NotificationsBlock() {
   // ТЗ Б.4: список уведомлений открывается отдельным окном, которое закрывается
   // крестиком или свайпом вниз. В профиле остаётся строка со счётчиком
   // непрочитанных — иначе длинный список выдавливает всё остальное вниз.
+  // То же окно открывает колокольчик в шапке остальных разделов.
   const [open, setOpen] = useState(false)
-  return <NotificationsEntry open={open} onOpenChange={setOpen} />
-}
-
-function NotificationsEntry({
-  open,
-  onOpenChange,
-}: {
-  open: boolean
-  onOpenChange: (open: boolean) => void
-}) {
-  const notifications = useNotifications(30)
-  const markRead = useMarkNotificationsRead()
-  const [expanded, setExpanded] = useState(false)
-  const rows = notifications.data ?? []
-  const unread = rows.filter((row) => row.read_at === null).length
-  const visible = expanded ? rows : rows.slice(0, NOTIFICATIONS_COLLAPSED)
-  const hidden = rows.length - visible.length
+  const unread = useUnreadCount().data?.count ?? 0
 
   return (
     <>
       <button
-        onClick={() => onOpenChange(true)}
+        onClick={() => setOpen(true)}
+        aria-haspopup="dialog"
         className="flex w-full items-center gap-3 rounded-lg bg-surface px-4 py-3 text-left transition-colors hover:bg-surface-raised"
       >
         <Bell className="size-5 shrink-0 text-ink-muted" aria-hidden />
@@ -307,80 +308,7 @@ function NotificationsEntry({
         <ChevronRight className="size-4 shrink-0 text-ink-faint" aria-hidden />
       </button>
 
-      <Sheet
-        open={open}
-        onOpenChange={onOpenChange}
-        title="Уведомления"
-        description="За последний месяц"
-        className="desk:w-[460px]"
-      >
-      <div className="flex flex-col gap-2">
-        <SectionTitle
-        action={
-          unread > 0 ? (
-            <button
-              onClick={() => markRead.mutate(undefined)}
-              className="-my-1 min-h-9 px-1 py-1 text-xs text-accent-text transition-colors hover:text-accent"
-            >
-              Отметить все прочитанными
-            </button>
-          ) : undefined
-        }
-      >
-        Уведомления
-      </SectionTitle>
-
-      {notifications.isLoading ? (
-        <ListSkeleton rows={3} />
-      ) : notifications.error ? (
-        <ErrorState error={notifications.error} onRetry={() => void notifications.refetch()} />
-      ) : rows.length === 0 ? (
-        <EmptyState
-          title="Уведомлений нет"
-          hint="Здесь появятся оплаты и изменения по аккаунтам."
-          icon={<Bell className="size-7" aria-hidden />}
-        />
-      ) : (
-        <ul className="flex flex-col gap-1">
-          {visible.map((row) => (
-            <li
-              key={row.id}
-              className={`flex items-start gap-2 rounded-md px-3 py-2.5 ${
-                row.read_at === null ? 'bg-accent-soft' : 'bg-surface-raised'
-              }`}
-            >
-              {row.read_at === null && <Dot tone="accent" />}
-              <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                <span className="text-sm text-ink">{row.title}</span>
-                <span className="truncate text-xs text-ink-muted">{row.text}</span>
-                <span className="text-micro text-ink-faint">{dateTimeFull(row.created_at)}</span>
-              </div>
-            </li>
-          ))}
-        </ul>
-      )}
-
-      {rows.length > NOTIFICATIONS_COLLAPSED && (
-        <button
-          onClick={() => setExpanded((value) => !value)}
-          className="flex min-h-9 items-center justify-center gap-1.5 rounded-md text-xs text-accent-text transition-colors hover:bg-surface-raised"
-        >
-          {expanded ? (
-            <>
-              <ChevronUp className="size-4" aria-hidden />
-              Свернуть
-            </>
-          ) : (
-            <>
-              <ChevronDown className="size-4" aria-hidden />
-              Развернуть все · ещё {hidden}
-            </>
-          )}
-        </button>
-      )}
-
-      </div>
-      </Sheet>
+      <NotificationsSheet open={open} onOpenChange={setOpen} />
     </>
   )
 }

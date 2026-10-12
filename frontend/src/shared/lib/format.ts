@@ -69,23 +69,63 @@ export function moneyPlain(kopecks: number): string {
  * валюты («₽», «руб», «р.»); всё остальное — не сумма.
  */
 export function parseMoney(input: string): number | null {
+  const parsed = parseMoneyDetailed(input)
+  return parsed.ok ? parsed.kopecks : null
+}
+
+/**
+ * Предел суммы одной позиции, копейки: 100 млн ₽. Тот же, что на сервере —
+ * `MAX_AMOUNT` в backend/app/services/money.py: сумма, которую сервер всё равно
+ * отклонит, не должна выглядеть в форме допустимой (и наоборот).
+ */
+export const MAX_AMOUNT_KOPECKS = 10_000_000_000
+
+/** Почему ввод не стал суммой — у каждой причины свой текст под полем. */
+export type MoneyIssue = 'empty' | 'not_number' | 'too_precise' | 'too_large' | 'zero'
+
+export type MoneyParse = { ok: true; kopecks: number } | { ok: false; reason: MoneyIssue }
+
+/**
+ * То же, что `parseMoney`, но с причиной отказа. Копейки считаются по цифрам
+ * строки, а не умножением на 100: в числах с плавающей точкой 1,15 · 100 даёт
+ * 114,99999999999999 и копейка пропадала бы.
+ */
+export function parseMoneyDetailed(input: string): MoneyParse {
   const stripped = input
     .replace(/(?:₽|руб(?:\.|лей|ля|ль)?|р\.?)\s*$/i, '')
     .replace(/[\s\u00a0\u202f]/g, '')
-  if (!/^\d+(?:[.,]\d+)?$/.test(stripped)) return null
+  if (stripped === '') return { ok: false, reason: 'empty' }
+  if (!/^\d+(?:[.,]\d+)?$/.test(stripped)) return { ok: false, reason: 'not_number' }
   // «4500.000000» (так отдаёт сумму Робокасса) — те же 4500; а «100,123» — уже
   // не рубли и копейки, а неведомая доля копейки, это опечатка.
-  const fraction = stripped.split(/[.,]/)[1] ?? ''
-  if (fraction.length > 2 && /[1-9]/.test(fraction.slice(2))) return null
-  const value = Number(stripped.replace(',', '.'))
-  if (!Number.isFinite(value) || value <= 0) return null
-  const kopecks = Math.round(value * 100)
-  // Больше, чем вмещает копеечное поле сервера, — заведомо опечатка.
-  return kopecks <= MAX_KOPECKS ? kopecks : null
+  const [whole, fraction = ''] = stripped.split(/[.,]/)
+  if (fraction.length > 2 && /[1-9]/.test(fraction.slice(2))) {
+    return { ok: false, reason: 'too_precise' }
+  }
+  const kopecks = Number(whole) * 100 + Number(fraction.padEnd(2, '0').slice(0, 2))
+  if (kopecks === 0) return { ok: false, reason: 'zero' }
+  // Больше, чем примет сервер, — заведомо опечатка. Бесконечность (сотни цифр) тоже сюда.
+  if (!Number.isFinite(kopecks) || kopecks > MAX_AMOUNT_KOPECKS) {
+    return { ok: false, reason: 'too_large' }
+  }
+  return { ok: true, kopecks }
 }
 
-/** Предел суммы в копейках — 10 млрд ₽: сервер хранит целым, а такая сумма в чате уже опечатка. */
-const MAX_KOPECKS = 1_000_000_000_000
+/** Текст под полем суммы: у каждой причины свой, чтобы не писать «больше нуля» про лишние знаки. */
+export function moneyIssueText(issue: MoneyIssue): string {
+  switch (issue) {
+    case 'empty':
+      return 'Введите сумму'
+    case 'not_number':
+      return 'Введите сумму цифрами, например 4500 или 4500,50'
+    case 'too_precise':
+      return 'Не больше двух знаков после запятой'
+    case 'too_large':
+      return `Сумма не больше ${money(MAX_AMOUNT_KOPECKS)}`
+    case 'zero':
+      return 'Стоимость должна быть больше нуля'
+  }
+}
 
 export function plural(n: number, one: string, few: string, many: string): string {
   const mod10 = n % 10

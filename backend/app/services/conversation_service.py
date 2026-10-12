@@ -11,21 +11,15 @@
 import base64
 import binascii
 import contextlib
-from datetime import UTC, datetime, timedelta
+from collections.abc import Sequence
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from sqlalchemy import (
-    ARRAY,
-    Integer,
     Select,
-    String,
-    Time,
     and_,
-    case,
-    cast,
     exists,
     func,
-    literal,
     or_,
     select,
     true,
@@ -64,15 +58,19 @@ from app.schemas.conversation import (
     Counters,
     UserBrief,
 )
-from app.services import settings_service, worktime
+from app.services import name_match, reply_queue, worktime
 from app.services.audit import log_event
 
 PREVIEW_LIMIT = 120
 DEFAULT_LIMIT = 30
 MAX_LIMIT = 100
-DEFAULT_BANNER_MINUTES = 30
+DEFAULT_BANNER_MINUTES = reply_queue.DEFAULT_BANNER_MINUTES
+QUEUE_DONE = "Больше нет чатов в очереди"
 
-ListFilter = Literal["all", "awaiting", "awaiting_payment"]
+# `awaiting_over` — ждут ответа дольше порога из настроек: те же диалоги, что в
+# баннере над списком и в плитке статистики (D-34). Оба «ждущих» фильтра идут
+# от самого давнего ожидания к свежему.
+ListFilter = Literal["all", "awaiting", "awaiting_over", "awaiting_payment"]
 
 # Чем подписать строку списка, если в последнем сообщении нет текста.
 KIND_PREVIEW: dict[str, str] = {
@@ -160,6 +158,10 @@ def _row_stmt() -> Select[Any]:
             Message.direction,
             Message.kind,
             first_attachment_kind.label("attachment_kind"),
+            # Для значка статуса в превью (D-36): тем же подзапросом, без N+1.
+            Message.id.label("last_id"),
+            Message.status.label("last_status"),
+            Message.is_internal.label("last_is_internal"),
         )
         .where(Message.conversation_id == Conversation.id, Message.deleted_at.is_(None))
         .order_by(Message.created_at.desc(), Message.id.desc())
@@ -174,6 +176,9 @@ def _row_stmt() -> Select[Any]:
             last.c.direction,
             last.c.kind,
             last.c.attachment_kind,
+            last.c.last_id,
+            last.c.last_status,
+            last.c.last_is_internal,
         )
         .join(Client, Client.id == Conversation.client_id)
         .join(TelegramAccount, TelegramAccount.id == Conversation.account_id)
@@ -193,23 +198,19 @@ def _awaiting_deal_exists() -> ColumnElement[bool]:
 
 
 def _search_condition(q: str) -> ColumnElement[bool]:
-    """Поиск по имени, телефону, id клиента и тексту переписки."""
-    like = f"%{q}%"
+    """Поиск по клиенту (то же правило слов, что в «Клиентах» и глобальном поиске,
+    D-35) и по тексту переписки (запрос целиком, как набран)."""
     conds: list[ColumnElement[bool]] = [
-        Client.display_name.ilike(like),
-        Client.tg_first_name.ilike(like),
-        Client.tg_last_name.ilike(like),
-        Client.tg_username.ilike(like),
-        Client.phone.ilike(like),
         exists(
             select(Message.id).where(
                 Message.conversation_id == Conversation.id,
-                Message.text.ilike(like),
+                Message.text.ilike(name_match.like_contains(q)),
             )
         ),
     ]
-    if q.isdigit():
-        conds.append(Client.id == int(q))
+    by_client = name_match.client_match_orm(q)
+    if by_client is not None:
+        conds.append(by_client)
     return or_(*conds)
 
 
@@ -252,7 +253,7 @@ def _preview(
 def _row_data(
     row: Any, deal_amount: int | None, now: datetime, hours: worktime.WorkHours | None = None
 ) -> dict[str, Any]:
-    conv, responsible, text, direction, kind, attachment_kind = row
+    conv, responsible, text, direction, kind, attachment_kind, last_id, last_status, internal = row
     awaiting = conv.awaiting_reply_since
     # Плашку не показываем, если менеджер уже открывал чат после начала ожидания.
     seen = conv.awaiting_seen_at is not None and (
@@ -264,6 +265,13 @@ def _row_data(
         "account": AccountBrief.model_validate(conv.account),
         "last_message_at": conv.last_message_at,
         "last_message_preview": _preview(text, direction, kind, attachment_kind),
+        "last_message_id": last_id,
+        "last_message_direction": direction,
+        # Статус доставки есть только у исходящего клиенту: у входящего и у
+        # служебной заметки (в Telegram не уходит) значка в превью нет.
+        "last_message_status": (
+            last_status if direction == Direction.OUT and not internal else None
+        ),
         "unread_count": conv.unread_count,
         "awaiting_reply_since": awaiting,
         # Менеджер уже открывал чат после начала ожидания: диалог по-прежнему
@@ -310,16 +318,25 @@ async def list_conversations(
         stmt = stmt.where(Conversation.account_id == account_id)
     if filter_ == "awaiting":
         stmt = stmt.where(Conversation.awaiting_reply_since.isnot(None))
+    elif filter_ == "awaiting_over":
+        stmt = stmt.where(reply_queue.over_threshold(await reply_queue.load_threshold(db)))
     elif filter_ == "awaiting_payment":
         stmt = stmt.where(_awaiting_deal_exists())
     if q and q.strip():
         stmt = stmt.where(_search_condition(q.strip()))
     parsed = decode_cursor(cursor)
-    if parsed:
-        stmt = stmt.where(keyset_condition(Conversation.last_message_at, Conversation.id, parsed))
-    stmt = stmt.order_by(
-        Conversation.last_message_at.desc().nulls_last(), Conversation.id.desc()
-    ).limit(limit + 1)
+    # «Ждущие» списки — самые давно ждущие сверху (BUG-04); остальные — по свежести.
+    by_waiting = filter_ in ("awaiting", "awaiting_over")
+    sort_col = Conversation.awaiting_reply_since if by_waiting else Conversation.last_message_at
+    if parsed and by_waiting:
+        stmt = stmt.where(reply_queue.keyset_after(sort_col, Conversation.id, parsed))
+    elif parsed:
+        stmt = stmt.where(keyset_condition(sort_col, Conversation.id, parsed))
+    if by_waiting:
+        stmt = stmt.order_by(sort_col.asc(), Conversation.id.asc())
+    else:
+        stmt = stmt.order_by(sort_col.desc().nulls_last(), Conversation.id.desc())
+    stmt = stmt.limit(limit + 1)
 
     rows = (await db.execute(stmt)).unique().all()
     has_more = len(rows) > limit
@@ -328,47 +345,28 @@ async def list_conversations(
     now = datetime.now(UTC)
     hours = await worktime.load(db)
     items = [ConversationRow(**_row_data(row, deals.get(row[0].id), now, hours)) for row in rows]
+    last = rows[-1][0] if rows else None
     next_cursor = (
-        encode_cursor(rows[-1][0].last_message_at, rows[-1][0].id) if has_more and rows else None
+        encode_cursor(last.awaiting_reply_since if by_waiting else last.last_message_at, last.id)
+        if has_more and last is not None
+        else None
     )
     return CursorPage[ConversationRow](items=items, next_cursor=next_cursor)
 
 
 async def counters(db: AsyncSession, user: User) -> Counters:
-    """Счётчики над списком. `over_threshold` — те, кто ждёт дольше порога из настроек."""
-    minutes = int(await settings_service.get_value(db, "awaiting_banner_minutes") or 0)
-    minutes = minutes or DEFAULT_BANNER_MINUTES
-    hours = await worktime.load(db)
-    now = datetime.now(UTC)
-    cutoff = now - timedelta(minutes=minutes)
-    if hours.enabled:
-        # Порог считаем в рабочих секундах: ночью ожидание не растёт, и плашка
-        # не встречает менеджера утром сообщением «клиент ждёт 11 часов».
-        params = hours.sql_params()
-        waited = func.astra_working_seconds(
-            Conversation.awaiting_reply_since,
-            now,
-            cast(literal(params["wh_days"]), ARRAY(Integer)),
-            cast(literal(params["wh_start"]), Time),
-            cast(literal(params["wh_end"]), Time),
-            cast(literal(params["wh_tz"]), String),
-        )
-        over_condition = waited > minutes * 60
-    else:
-        over_condition = Conversation.awaiting_reply_since < cutoff
+    """Счётчики над списком. `over_threshold` — те, кто ждёт дольше порога из настроек.
+
+    «Дольше порога» и область видимости — из `reply_queue`, как у плитки
+    статистики и фильтра списка: во всех трёх одно и то же число (D-34).
+    """
+    threshold = await reply_queue.load_threshold(db)
     stmt = _scoped(
         select(
             func.count(),
             func.count().filter(Conversation.awaiting_reply_since.isnot(None)),
             func.count().filter(_awaiting_deal_exists()),
-            # Баннер тоже гаснет для просмотренных: ТЗ п. 2.1 — срабатывает один раз.
-            func.count().filter(
-                over_condition,
-                or_(
-                    Conversation.awaiting_seen_at.is_(None),
-                    Conversation.awaiting_seen_at < Conversation.awaiting_reply_since,
-                ),
-            ),
+            func.count().filter(reply_queue.over_threshold(threshold)),
         ).select_from(Conversation),
         user,
         await visible_account_ids(db, user),
@@ -379,27 +377,67 @@ async def counters(db: AsyncSession, user: User) -> Counters:
         awaiting=awaiting,
         awaiting_payment=awaiting_payment,
         over_threshold=over_threshold,
-        over_threshold_minutes=minutes,
+        over_threshold_minutes=threshold.minutes,
     )
 
 
-async def next_in_queue(db: AsyncSession, user: User) -> ConversationRow:
+async def next_in_queue(
+    db: AsyncSession, user: User, skip: Sequence[int] = ()
+) -> ConversationRow:
     """«Взять первого в очереди»: сначала тот, кто ждёт дольше всех.
 
-    Если никто не ждёт ответа — самый свежий по последнему сообщению.
+    Очередь — диалоги, ждущие ответа: сперва ещё не открытые (по давности
+    ожидания), затем уже открытые, но оставшиеся без ответа. `skip` — чаты,
+    которые сотрудник уже брал в этой сессии: они не повторяются, пока в очереди
+    есть другие, — иначе повторное нажатие открывало бы тот же чат, пока на него
+    не ответят. Когда ждущих нет вовсе — самый свежий по последнему сообщению.
+    Когда все ждущие уже взяты — 404 `queue_done`: фронтенд сообщает об этом и
+    начинает круг заново.
     """
-    stmt = (
-        _scoped(_row_stmt(), user, await visible_account_ids(db, user))
-        .order_by(
-            case((Conversation.awaiting_reply_since.is_(None), 1), else_=0),
-            Conversation.awaiting_reply_since.asc(),
-            Conversation.last_message_at.desc().nulls_last(),
-            Conversation.id.desc(),
+    scoped = _scoped(_row_stmt(), user, await visible_account_ids(db, user))
+    skipped = list(skip)
+    waiting = Conversation.awaiting_reply_since.isnot(None)
+
+    stmt = scoped.where(waiting)
+    if skipped:
+        stmt = stmt.where(Conversation.id.notin_(skipped))
+    stmt = stmt.order_by(
+        *reply_queue.next_order(
+            Conversation.awaiting_reply_since,
+            Conversation.awaiting_seen_at,
+            Conversation.last_message_at,
+            Conversation.id,
         )
-        .limit(1)
-    )
+    ).limit(1)
     row = (await db.execute(stmt)).unique().first()
+
     if row is None:
+        anyone_waits = await db.scalar(
+            _scoped(
+                select(func.count()).select_from(Conversation).where(waiting),
+                user,
+                await visible_account_ids(db, user),
+            )
+        )
+        if anyone_waits:
+            raise NotFound(QUEUE_DONE, code="queue_done")
+        recent = scoped
+        if skipped:
+            recent = recent.where(Conversation.id.notin_(skipped))
+        row = (
+            (
+                await db.execute(
+                    recent.order_by(
+                        Conversation.last_message_at.desc().nulls_last(), Conversation.id.desc()
+                    ).limit(1)
+                )
+            )
+            .unique()
+            .first()
+        )
+    if row is None:
+        if skipped:
+            raise NotFound(QUEUE_DONE, code="queue_done")
         raise NotFound("Нет чатов в работе")
     deals = await _awaiting_deal_amounts(db, [row[0].id])
     return ConversationRow(**_row_data(row, deals.get(row[0].id), datetime.now(UTC)))
@@ -484,10 +522,11 @@ async def mark_read(db: AsyncSession, user: User, conversation_id: int) -> Conve
     conv = await load_visible(db, user, conversation_id)
     before = conv.unread_count
     conv.unread_count = 0
-    # ТЗ п. 2.1: менеджер открыл чат — плашка ожидания своё отработала.
-    # Само ожидание остаётся: клиент по-прежнему без ответа, и в счётчике
-    # «ждут ответа» диалог тоже остаётся. Гаснет именно напоминание.
-    if conv.awaiting_reply_since is not None:
+    # ТЗ п. 2.1: менеджер открыл чат — значок «ждёт N мин» на строке своё
+    # отработал. Само ожидание остаётся: клиент по-прежнему без ответа, диалог
+    # остаётся и в «ждут ответа», и в баннере (D-34). Руководитель же открывает
+    # чаты, чтобы посмотреть: его просмотр не должен гасить напоминание менеджеру.
+    if conv.awaiting_reply_since is not None and user.role != UserRole.ADMIN:
         conv.awaiting_seen_at = datetime.now(UTC)
     await log_event(
         db,

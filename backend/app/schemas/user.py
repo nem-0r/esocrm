@@ -13,6 +13,7 @@ from pydantic import Field, field_validator, model_validator
 
 from app.models import FunnelStage, UserRole
 from app.schemas.common import ApiModel
+from app.schemas.validators import optional_phone
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 TIME_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
@@ -154,6 +155,11 @@ class UserCreateIn(ApiModel):
             raise ValueError("Укажите имя сотрудника")
         return value
 
+    @field_validator("phone")
+    @classmethod
+    def _phone(cls, value: str | None) -> str | None:
+        return optional_phone(value)
+
 
 class UserCreateOut(UserOut):
     invite_url: str = Field(
@@ -180,6 +186,11 @@ class UserUpdateIn(ApiModel):
             raise ValueError("Укажите имя сотрудника")
         return value
 
+    @field_validator("phone")
+    @classmethod
+    def _phone(cls, value: str | None) -> str | None:
+        return optional_phone(value)
+
     @field_validator("email")
     @classmethod
     def _email(cls, value: str | None) -> str | None:
@@ -188,3 +199,15 @@ class UserUpdateIn(ApiModel):
 
 class ResendInviteOut(ApiModel):
     invite_url: str = Field(description="Новая ссылка-приглашение взамен истёкшей.")
+
+
+class PasswordResetOut(ApiModel):
+    """Ссылка для нового пароля (D-38). Показывается руководителю один раз."""
+
+    link: str = Field(
+        description=(
+            "Относительная ссылка `/reset/{token}`, как `invite_url` у приглашений: полный "
+            "адрес собирает интерфейс по адресу сайта. Токена нет нигде, кроме этого ответа."
+        )
+    )
+    expires_at: datetime = Field(description="Когда ссылка перестанет работать (через 24 часа).")

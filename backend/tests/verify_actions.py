@@ -614,8 +614,13 @@ async def run() -> int:
             any(x["id"] == cl_id for x in by_id["clients"]),
             str(by_id["clients"])[:100],
         )
+        # L4 (D-35): сам поиск историю не пишет — только явное действие человека.
+        await c.delete(f"{BASE}/search/history")
+        await c.get(f"{BASE}/search", params={"q": "разбор"})
+        check("поиск сам историю не пишет", (await c.get(f"{BASE}/search/history")).json() == [])
+        await c.post(f"{BASE}/search/history", json={"q": "разбор"})
         hist = (await c.get(f"{BASE}/search/history")).json()
-        check("запросы попадают в историю", len(hist) > 0)
+        check("запрос попадает в историю по явному действию", len(hist) > 0)
         check(
             "история очищается",
             (await c.delete(f"{BASE}/search/history")).status_code in (200, 204),

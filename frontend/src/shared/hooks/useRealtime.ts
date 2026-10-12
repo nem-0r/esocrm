@@ -73,6 +73,10 @@ export function useRealtimeSync() {
           break
         case 'account.status':
           queryClient.invalidateQueries({ queryKey: ['accounts'] })
+          // Связь аккаунта видна в чате (баннер и выключенное поле ввода, D-37):
+          // карточка открытого чата и строки списка должны узнать об обрыве сразу.
+          queryClient.invalidateQueries({ queryKey: ['conversation'] })
+          queryClient.invalidateQueries({ queryKey: ['conversations'] })
           break
         case 'presence.updated':
           queryClient.invalidateQueries({ queryKey: ['staff'] })

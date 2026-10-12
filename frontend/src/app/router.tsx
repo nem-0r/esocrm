@@ -4,6 +4,7 @@ import { Suspense, lazy, type ReactNode } from 'react'
 import { AppShell } from '@/app/layout/AppShell'
 import { AcceptInvitePage } from '@/features/auth/AcceptInvitePage'
 import { LoginPage } from '@/features/auth/LoginPage'
+import { ResetPasswordPage } from '@/features/auth/ResetPasswordPage'
 import { ChatPage } from '@/features/chats/ChatPage'
 import { ChatsPage } from '@/features/chats/ChatsPage'
 import { ClientCardPage } from '@/features/clients/ClientCardPage'
@@ -74,6 +75,8 @@ export function AppRoutes() {
     <Routes>
       <Route path="/login" element={<LoginPage />} />
       <Route path="/invite/:token" element={<AcceptInvitePage />} />
+      {/* D-38: новый пароль по одноразовой ссылке руководителя; публичная, как приглашение. */}
+      <Route path="/reset/:token" element={<ResetPasswordPage />} />
       {/* Редиректы Робокассы: клиент не сотрудник CRM, страницы без авторизации
           и без обращений к бэкенду (docs/11-payments-architecture.md, §5). */}
       <Route path="/pay/success" element={<PaySuccessPage />} />

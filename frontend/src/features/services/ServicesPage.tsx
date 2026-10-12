@@ -11,7 +11,7 @@ import {
   useServiceSuggestions,
   useUpdateService,
 } from '@/features/services/queries'
-import { dateShort, money, parseMoney, plural } from '@/shared/lib/format'
+import { dateShort, money, moneyIssueText, parseMoneyDetailed, plural } from '@/shared/lib/format'
 import {
   Badge,
   Button,
@@ -284,8 +284,10 @@ function ServiceSheet({ draft, onClose }: { draft: Draft | null; onClose: () => 
   }
   if (!open && loadedKey !== null) setLoadedKey(null)
 
-  const parsedPrice = price.trim() ? parseMoney(price) : null
-  const priceInvalid = price.trim().length > 0 && parsedPrice === null
+  const priceParse = price.trim() ? parseMoneyDetailed(price) : null
+  const parsedPrice = priceParse?.ok ? priceParse.kopecks : null
+  const priceInvalid = priceParse !== null && !priceParse.ok
+  const priceProblem = priceParse && !priceParse.ok ? moneyIssueText(priceParse.reason) : undefined
   const canSubmit = name.trim().length > 0 && !priceInvalid
 
   async function submit() {
@@ -330,7 +332,7 @@ function ServiceSheet({ draft, onClose }: { draft: Draft | null; onClose: () => 
         <Field
           label="Цена, ₽"
           hint="Можно оставить пустой — тогда сумму менеджер впишет сам"
-          error={priceInvalid ? 'Введите сумму больше нуля' : undefined}
+          error={priceProblem}
         >
           <Input
             inputMode="decimal"

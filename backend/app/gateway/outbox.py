@@ -200,7 +200,7 @@ async def _handle_exception(
     conversation: Conversation,
     exc: BaseException,
 ) -> None:
-    from app.gateway.mtproto_provider import ClientBlocked, RetryAfter
+    from app.gateway.mtproto_provider import ClientBlocked, RetryAfter, SessionLost
 
     if isinstance(exc, RetryAfter):
         # Telegram назвал срок. Повтор раньше срока продлевает запрет,
@@ -240,6 +240,14 @@ async def _handle_exception(
 
         detail = await conversation_service.build_detail(db, conversation.id)
         await conversation_service.emit_updated(db, detail)
+        return
+    if isinstance(exc, SessionLost):
+        # Сессию отозвали или аккаунт отключён: через 5 и 30 секунд она не
+        # оживёт, а менеджер всё это время видел бы «отправляется». Сообщение
+        # сразу получает ошибку; повторить его можно кнопкой после того, как
+        # руководитель переподключит аккаунт (docs/12). Сам статус аккаунта
+        # шлюз записывает отдельно (handlers.write_status).
+        await _fail(db, pairs, str(exc), final=True)
         return
     if isinstance(exc, (PermanentFailure, SendImpossible)):
         await _fail(db, pairs, str(exc), final=True)

@@ -1,8 +1,9 @@
 import { AlertTriangle, Copy, CreditCard, Forward, IdCard, Paperclip, Plus, UserCheck, X } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState, type DragEvent } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 
 import { realtime } from '@/shared/api/ws'
+import { useMe } from '@/shared/hooks/useAuth'
 import { dateFull, dayDivider, dayKey, money, plural, waitingLabel } from '@/shared/lib/format'
 import { BackButton, Badge, Button, EmptyState, ErrorState, ListSkeleton, toast, toastError } from '@/shared/ui'
 import { ChatsLayout } from '@/features/chats/ChatsLayout'
@@ -11,6 +12,7 @@ import { ForwardSheet } from '@/features/chats/components/ForwardSheet'
 import { MessageBubble, canForward } from '@/features/chats/components/MessageBubble'
 import { TransferSheet } from '@/features/chats/components/TransferSheet'
 import { decidePaste } from '@/features/chats/components/composer/clipboard'
+import { OFFLINE_PLACEHOLDER, hasNoLink, offlineBannerText } from '@/features/chats/accountLink'
 import { copyText, formatForCopy } from '@/features/chats/components/message/copy'
 import { DealSheet } from '@/features/deals/DealSheet'
 import { FUNNEL_LABEL } from '@/features/profile/lib'
@@ -42,6 +44,8 @@ export function ChatPage() {
 }
 
 function ChatPane({ conversationId }: { conversationId: number }) {
+  const me = useMe()
+  const navigate = useNavigate()
   const conversation = useConversation(conversationId)
   const messages = useMessages(conversationId)
   const markRead = useMarkRead()
@@ -137,6 +141,9 @@ function ChatPane({ conversationId }: { conversationId: number }) {
 
   const chat = conversation.data
   const paidCount = chat.client_paid_count ?? 0
+  // Аккаунт без связи (D-37): сервер отклонит любую отправку, поэтому поле ввода
+  // выключено, а над ним — причина. Менеджер узнаёт об этом сразу, а не через 35 с.
+  const offline = hasNoLink(chat.account.status)
 
   function toggle(id: number) {
     setSelected((prev) => (prev.includes(id) ? prev.filter((value) => value !== id) : [...prev, id]))
@@ -168,6 +175,8 @@ function ChatPane({ conversationId }: { conversationId: number }) {
   }
 
   function onDragEnter(event: DragEvent<HTMLDivElement>) {
+    // Куда бросать, если поле выключено: подсказка «Отпустите, чтобы прикрепить» соврала бы.
+    if (offline) return
     if (!Array.from(event.dataTransfer.types).includes('Files')) return
     event.preventDefault()
     dragDepth.current += 1
@@ -361,7 +370,12 @@ function ChatPane({ conversationId }: { conversationId: number }) {
                   )}
                   <MessageBubble
                     message={message}
-                    onRetry={() => retryMessage.mutate(message.id)}
+                    onRetry={() =>
+                      retryMessage.mutate(message.id, {
+                        // Без связи сервер откажет сразу (409): молчать нельзя.
+                        onError: (error) => toastError(error.message),
+                      })
+                    }
                     retrying={retryMessage.isPending && retryMessage.variables === message.id}
                     onEdit={(text) => editMessage.mutateAsync({ messageId: message.id, text })}
                     savingEdit={
@@ -386,7 +400,39 @@ function ChatPane({ conversationId }: { conversationId: number }) {
       {/* Ключ по чату: черновик, вложения и запись голосового принадлежат
           своему чату — переключились на другого клиента, и незаконченное
           сообщение не уедет не тому человеку. */}
-      <Composer key={conversationId} ref={composer} conversationId={conversationId} />
+      {offline && (
+        <div
+          role="status"
+          className="flex shrink-0 items-center gap-2 border-t border-danger/40 bg-danger-soft px-3 py-2 text-sm text-danger"
+        >
+          <AlertTriangle className="size-4 shrink-0" aria-hidden />
+          <div className="flex min-w-0 flex-1 flex-col">
+            <span>{offlineBannerText(chat.account.title, me.is_admin)}</span>
+            {me.is_admin && chat.account.status_reason && (
+              <span className="text-micro text-ink-muted">
+                Причина: {chat.account.status_reason}
+              </span>
+            )}
+          </div>
+          {me.is_admin && (
+            <Button
+              size="sm"
+              variant="secondary"
+              className="shrink-0"
+              onClick={() => navigate('/profile/accounts')}
+            >
+              Переподключить
+            </Button>
+          )}
+        </div>
+      )}
+
+      <Composer
+        key={conversationId}
+        ref={composer}
+        conversationId={conversationId}
+        disabledReason={offline ? OFFLINE_PLACEHOLDER : null}
+      />
 
       <ForwardSheet
         open={forwardIds !== null}

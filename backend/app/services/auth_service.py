@@ -13,13 +13,13 @@ from datetime import UTC, datetime, timedelta
 
 import bcrypt
 from fastapi import Request
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import crypto, redis_bus
 from app.core.config import settings
 from app.core.deps import visible_account_ids
-from app.core.errors import Forbidden, Invalid, Unauthorized
+from app.core.errors import AppError, Forbidden, Invalid, NotFound, Unauthorized
 from app.models import (
     AccountManager,
     AccountStatus,
@@ -28,8 +28,9 @@ from app.models import (
     TelegramAccount,
     User,
 )
+from app.schemas.auth import ResetPasswordPreviewOut
 from app.schemas.user import MeOut
-from app.services import audit
+from app.services import audit, password_reset
 
 
 def normalize_email(email: str) -> str:
@@ -103,7 +104,10 @@ async def _authenticate(db: AsyncSession, request: Request, email: str, password
     if await _is_locked_out(db, normalized):
         _record_attempt(db, normalized, request, succeeded=False, reason="locked_out")
         await db.commit()
-        raise Forbidden("Слишком много неудачных попыток. Попробуйте через 30 минут")
+        raise Forbidden(
+            "Слишком много неудачных попыток. Попробуйте через 30 минут "
+            "или попросите руководителя выдать ссылку для нового пароля"
+        )
 
     user = await db.scalar(
         select(User).where(User.email == normalized, User.deleted_at.is_(None))
@@ -202,6 +206,117 @@ async def accept_invite(
     return user, raw_token
 
 
+# ------------------------------------------------------------ сброс пароля (D-38)
+
+RESET_LINK_INVALID = "Ссылка недействительна или истекла. Попросите руководителя выдать новую"
+
+
+async def _check_reset_throttle(db: AsyncSession, key: str) -> None:
+    """Слишком много неверных ссылок с одного адреса — публичная ручка закрывается
+    на окно. Счётчик в базе (`login_attempts`), как у входа: Redis не нужен,
+    его потеря ничего не отключает."""
+    since = datetime.now(UTC) - timedelta(minutes=password_reset.THROTTLE_WINDOW_MINUTES)
+    failures = await db.scalar(
+        select(func.count())
+        .select_from(LoginAttempt)
+        .where(
+            LoginAttempt.email == key,
+            LoginAttempt.succeeded.is_(False),
+            LoginAttempt.created_at >= since,
+        )
+    )
+    if (failures or 0) >= password_reset.THROTTLE_LIMIT:
+        raise AppError(
+            429,
+            "rate_limited",
+            "Слишком много неверных попыток. Попробуйте через "
+            f"{password_reset.THROTTLE_WINDOW_MINUTES} минут",
+        )
+
+
+async def _user_by_reset_token(
+    db: AsyncSession, request: Request, token: str, *, lock: bool = False
+) -> User:
+    """Сотрудник, которому выдана эта ссылка. Любая причина отказа — неизвестный токен,
+    истёкший, погашенный, отключённый сотрудник — даёт один и тот же нейтральный
+    ответ: по нему нельзя узнать, существует ли такая ссылка."""
+    ip = _client_ip(request)
+    key = password_reset.throttle_key(ip)
+    await _check_reset_throttle(db, key)
+
+    now = datetime.now(UTC)
+    user: User | None = None
+    if token.strip():
+        stmt = select(User).where(
+            User.password_reset_token_hash == crypto.token_hash(token),
+            User.deleted_at.is_(None),
+        )
+        if lock:
+            # Две вкладки с одной ссылкой: вторая дождётся первой, перечитает строку
+            # уже без токена и получит отказ. Одноразовость держится на этой блокировке.
+            stmt = stmt.with_for_update()
+        user = await db.scalar(stmt)
+
+    if user is None or not user.is_active or not password_reset.token_matches(user, token, now):
+        db.add(
+            LoginAttempt(email=key, ip_address=ip, succeeded=False, reason="reset_bad_token")
+        )
+        await db.commit()
+        raise NotFound(RESET_LINK_INVALID, code="reset_link_invalid")
+    return user
+
+
+async def reset_password_preview(
+    db: AsyncSession, request: Request, token: str
+) -> ResetPasswordPreviewOut:
+    """Страница нового пароля спрашивает, жива ли ссылка, и показывает имя в приветствии."""
+    user = await _user_by_reset_token(db, request, token)
+    assert user.password_reset_expires_at is not None  # token_matches без срока не пускает
+    return ResetPasswordPreviewOut(
+        full_name=user.full_name, expires_at=user.password_reset_expires_at
+    )
+
+
+async def complete_password_reset(
+    db: AsyncSession, request: Request, token: str, password: str
+) -> tuple[User, str]:
+    """Задать новый пароль по ссылке и сразу войти.
+
+    Ссылка гасится в той же транзакции, что и смена пароля. Все прежние сессии
+    сотрудника отзываются, блокировка входа снимается (человек, которого заперли
+    пятью неверными паролями, этой ссылкой возвращается в работу). `accepted_at`
+    не трогаем: «с какого момента работает» — это дата первого входа.
+    """
+    user = await _user_by_reset_token(db, request, token, lock=True)
+    now = datetime.now(UTC)
+
+    user.password_hash = await hash_password(password)
+    password_reset.clear_token(user)
+
+    await db.execute(
+        update(AuthSession)
+        .where(AuthSession.user_id == user.id, AuthSession.revoked_at.is_(None))
+        .values(revoked_at=now)
+    )
+    await db.execute(
+        delete(LoginAttempt).where(
+            LoginAttempt.email == user.email, LoginAttempt.succeeded.is_(False)
+        )
+    )
+
+    await audit.log_event(
+        db, action="user.password_reset_done", entity_type="user", entity_id=user.id,
+        actor=user, ip=_client_ip(request),
+    )
+    raw_token, _session = _new_session(db, user, request)
+    await audit.log_event(
+        db, action="user.logged_in", entity_type="user", entity_id=user.id,
+        actor=user, ip=_client_ip(request),
+    )
+    await db.commit()
+    return user, raw_token
+
+
 async def update_me(
     db: AsyncSession,
     request: Request,
@@ -213,6 +328,7 @@ async def update_me(
     phone: str | None,
     current_password: str | None,
     new_password: str | None,
+    phone_provided: bool = False,
 ) -> User:
     before: dict[str, object] = {}
     after: dict[str, object] = {}
@@ -226,7 +342,9 @@ async def update_me(
         before["full_name"], user.full_name = user.full_name, full_name
         after["full_name"] = user.full_name
 
-    if phone is not None and phone != user.phone:
+    # «Передали пустой» (после проверки это None) очищает телефон; «не передали»
+    # его не трогает. Раньше пустое значение молча игнорировалось.
+    if (phone_provided or phone is not None) and phone != user.phone:
         before["phone"], user.phone = user.phone, phone
         after["phone"] = user.phone
 
@@ -240,6 +358,9 @@ async def update_me(
             raise Invalid("Неверный текущий пароль")
         user.password_hash = await hash_password(new_password)
         password_changed = True
+        # Человек вспомнил пароль сам: выданная ему ссылка сброса больше не нужна
+        # и не должна остаться рабочей.
+        password_reset.clear_token(user)
 
     if not before and not after and not password_changed:
         return user

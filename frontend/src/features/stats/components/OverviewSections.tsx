@@ -97,11 +97,9 @@ export function SpeedTiles({ data }: { data: StatsOverview }) {
         />
         <StatTile
           value={data.awaiting_reply_now}
-          label={
-            data.awaiting_reply_over_threshold
-              ? `ждут ответа сейчас · ${data.awaiting_reply_over_threshold} дольше ${data.late_threshold_minutes} мин`
-              : 'ждут ответа сейчас'
-          }
+          // Те же определение и область, что у баннера в «Чатах» (D-34): число после
+          // точки — ровно то, что написано на баннере, порог — из настроек.
+          label={`ждут ответа сейчас · ${data.awaiting_reply_over_threshold} дольше ${data.late_threshold_minutes} мин`}
           tone={data.awaiting_reply_over_threshold > 0 ? 'warning' : 'neutral'}
         />
       </div>

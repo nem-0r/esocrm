@@ -2,7 +2,9 @@
 
 from decimal import Decimal, InvalidOperation
 
-MAX_AMOUNT = 100_000_000_00  # сто миллионов рублей
+# Сто миллионов рублей. Тот же предел в форме оплаты: frontend/src/shared/lib/format.ts
+# (MAX_AMOUNT_KOPECKS). Менять только вместе — иначе форма пропустит то, что сервер отклонит.
+MAX_AMOUNT = 100_000_000_00
 
 
 class MoneyError(ValueError):
@@ -13,7 +15,8 @@ def validate_amount(amount: int) -> int:
     if amount <= 0:
         raise MoneyError("Сумма должна быть больше нуля")
     if amount > MAX_AMOUNT:
-        raise MoneyError("Сумма слишком большая")
+        # Предел называем в тексте: «слишком большая» не говорит, сколько можно.
+        raise MoneyError(f"Сумма не больше {format_rubles(MAX_AMOUNT)}")
     return amount
 
 

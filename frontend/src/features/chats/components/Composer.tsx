@@ -61,10 +61,14 @@ export interface ComposerHandle {
  * Голосовое записывается прямо здесь: микрофон → запись → в список вложений
  * с плеером → «Отправить». Клиенту оно придёт настоящим голосовым Telegram.
  */
-export const Composer = forwardRef<ComposerHandle, { conversationId: number }>(function Composer(
-  { conversationId },
-  ref,
-) {
+export const Composer = forwardRef<
+  ComposerHandle,
+  {
+    conversationId: number
+    /** Почему писать нельзя (аккаунт без связи, D-37). Есть причина — всё поле выключено. */
+    disabledReason?: string | null
+  }
+>(function Composer({ conversationId, disabledReason }, ref) {
   const send = useSendMessage(conversationId)
   const { data: templates } = useTemplates()
   const queue = useAttachmentQueue()
@@ -85,13 +89,18 @@ export const Composer = forwardRef<ComposerHandle, { conversationId: number }>(f
   // Голосовое, которое нужно отправить, как только оно загрузится на сервер.
   const [autoSend, setAutoSend] = useState(false)
 
+  // Выключено целиком: поле, вложения, заметка, голосовое и «Отправить». Работающая
+  // кнопка, которую сервер всё равно отклонит, была бы кнопкой-обманкой.
+  const blocked = Boolean(disabledReason)
   const recording = recorder.state === 'recording' || recorder.state === 'requesting'
   const hasContent = text.trim().length > 0 || queue.items.length > 0
-  const canSend = hasContent && !send.isPending && !queue.uploading && !queue.failed && !recording
-  const canRecord = isRecordingSupported()
+  const canSend =
+    hasContent && !blocked && !send.isPending && !queue.uploading && !queue.failed && !recording
+  const canRecord = isRecordingSupported() && !blocked
 
   function addFiles(files: File[]) {
-    if (!files.length) return
+    // Файлы бросают и на всё окно чата, и вставляют из буфера — туда же закрыто.
+    if (blocked || !files.length) return
     setError(queue.add(files))
   }
 
@@ -99,7 +108,9 @@ export const Composer = forwardRef<ComposerHandle, { conversationId: number }>(f
 
   async function submit() {
     if (!canSend) {
-      if (queue.failed) setError('Один из файлов не загрузился — повторите загрузку или уберите его')
+      if (queue.failed && !blocked) {
+        setError('Один из файлов не загрузился — повторите загрузку или уберите его')
+      }
       return
     }
     setError(null)
@@ -181,7 +192,12 @@ export const Composer = forwardRef<ComposerHandle, { conversationId: number }>(f
           />
         ) : (
           <>
-            <IconButton label="Прикрепить файл" onClick={() => fileInput.current?.click()}>
+            <IconButton
+              label="Прикрепить файл"
+              onClick={() => fileInput.current?.click()}
+              disabled={blocked}
+              className="disabled:cursor-not-allowed disabled:opacity-45"
+            >
               <Paperclip className="size-5" aria-hidden />
             </IconButton>
 
@@ -197,6 +213,8 @@ export const Composer = forwardRef<ComposerHandle, { conversationId: number }>(f
               label={internal ? 'Обычное сообщение' : 'Служебная заметка'}
               active={internal}
               onClick={() => setInternal((v) => !v)}
+              disabled={blocked}
+              className="disabled:cursor-not-allowed disabled:opacity-45"
             >
               <Lock className="size-5" aria-hidden />
             </IconButton>
@@ -209,10 +227,14 @@ export const Composer = forwardRef<ComposerHandle, { conversationId: number }>(f
               onChange={(e) => setText(e.target.value)}
               onKeyDown={onKeyDown}
               onPaste={onPaste}
-              placeholder={internal ? 'Заметка для команды…' : 'Написать сообщение…'}
+              disabled={blocked}
+              placeholder={
+                disabledReason ?? (internal ? 'Заметка для команды…' : 'Написать сообщение…')
+              }
               className={cn(
                 'max-h-40 min-h-10 flex-1 py-2.5',
                 internal && 'border-warning/50 bg-warning-soft/40',
+                blocked && 'cursor-not-allowed opacity-60',
               )}
             />
           </>

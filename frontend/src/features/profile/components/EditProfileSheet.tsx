@@ -7,6 +7,7 @@
 import { useEffect, useState, type FormEvent } from 'react'
 
 import type { Me } from '@/entities/types'
+import { NAME_MAX_LENGTH, PHONE_HINT, PHONE_MAX_LENGTH, normalizePhone, phoneError, textError } from '@/shared/lib/validation'
 import { Button, Field, InlineError, Input, Sheet } from '@/shared/ui'
 import { errorMessage, fieldErrors } from '@/features/profile/lib'
 import { useUpdateMe } from '@/features/profile/queries'
@@ -44,10 +45,23 @@ export function EditProfileSheet({
       setFields({ full_name: 'Укажите имя' })
       return
     }
+    // Те же правила, что на сервере: ошибка видна под полем, не уходя в сеть.
+    const problems: Record<string, string> = {}
+    const nameProblem = textError(fullName, NAME_MAX_LENGTH, 'Имя')
+    if (nameProblem) problems.full_name = nameProblem
+    const phoneProblem = phoneError(phone)
+    if (phoneProblem) problems.phone = phoneProblem
+    if (Object.keys(problems).length > 0) {
+      setFields(problems)
+      return
+    }
+    // Телефон отправляем, только если его меняли: ранее сохранённое значение в
+    // старом формате не должно мешать поменять имя.
+    const phoneChanged = normalizePhone(phone) !== (me.phone ?? '')
     try {
       await update.mutateAsync({
         full_name: fullName.trim(),
-        phone: phone.trim() || null,
+        ...(phoneChanged ? { phone: normalizePhone(phone) || null } : {}),
       })
       onOpenChange(false)
     } catch (cause) {
@@ -72,13 +86,22 @@ export function EditProfileSheet({
     >
       <form id="edit-profile-form" onSubmit={submit} className="flex flex-col gap-4">
         <Field label="Имя" error={fields.full_name}>
-          <Input value={fullName} onChange={(e) => setFullName(e.target.value)} required />
+          <Input
+            value={fullName}
+            onChange={(e) => setFullName(e.target.value)}
+            maxLength={NAME_MAX_LENGTH}
+            invalid={Boolean(fields.full_name)}
+            required
+          />
         </Field>
-        <Field label="Телефон" error={fields.phone} hint="Необязательно">
+        <Field label="Телефон" error={fields.phone} hint={`Необязательно. ${PHONE_HINT}`}>
           <Input
             type="tel"
+            inputMode="tel"
             value={phone}
             onChange={(e) => setPhone(e.target.value)}
+            maxLength={PHONE_MAX_LENGTH}
+            invalid={Boolean(fields.phone)}
             placeholder="+7 900 000-00-00"
           />
         </Field>

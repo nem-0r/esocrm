@@ -6,7 +6,14 @@ from fastapi import APIRouter, Query
 
 from app.core.deps import AdminUser, Db
 from app.schemas.common import CursorPage
-from app.schemas.user import ResendInviteOut, UserCreateIn, UserCreateOut, UserOut, UserUpdateIn
+from app.schemas.user import (
+    PasswordResetOut,
+    ResendInviteOut,
+    UserCreateIn,
+    UserCreateOut,
+    UserOut,
+    UserUpdateIn,
+)
 from app.services import user_service
 
 router = APIRouter()
@@ -45,3 +52,9 @@ async def update_user(user_id: int, payload: UserUpdateIn, db: Db, admin: AdminU
 @router.post("/{user_id}/resend-invite", response_model=ResendInviteOut)
 async def resend_invite(user_id: int, db: Db, admin: AdminUser) -> ResendInviteOut:
     return await user_service.resend_invite(db, admin, user_id)
+
+
+@router.post("/{user_id}/reset-password", response_model=PasswordResetOut)
+async def reset_password(user_id: int, db: Db, admin: AdminUser) -> PasswordResetOut:
+    """Выдать сотруднику одноразовую ссылку на новый пароль (D-38). Только руководитель."""
+    return await user_service.issue_password_reset(db, admin, user_id)

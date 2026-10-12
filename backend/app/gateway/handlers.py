@@ -23,7 +23,7 @@ from app.core.db import SessionLocal
 from app.models import AccountStatus, ActorKind, Client, TelegramAccount
 from app.models.client import zodiac_for
 from app.realtime.events import emit_to_account
-from app.services import inbound_service, settings_service
+from app.services import account_link, inbound_service, notification_service, settings_service
 from app.services.audit import log_event
 
 log = logging.getLogger("astra.gateway.commands")
@@ -32,8 +32,8 @@ log = logging.getLogger("astra.gateway.commands")
 HISTORY_BATCH_COMMIT = 200
 
 
-async def _account(db, account_id: int) -> TelegramAccount:
-    account = await db.get(TelegramAccount, account_id)
+async def _account(db, account_id: int, *, lock: bool = False) -> TelegramAccount:
+    account = await db.get(TelegramAccount, account_id, with_for_update=True if lock else None)
     if account is None or account.deleted_at is not None:
         raise ValueError("Аккаунт не найден")
     return account
@@ -130,12 +130,31 @@ async def write_deleted(account_id: int, chat_id: int | None, tg_ids: list[int])
             log.exception("Не отметил удаление сообщений в аккаунте %s", account_id)
 
 
+async def _notify_lost_link(db, account: TelegramAccount, reason: str | None) -> None:
+    """Уведомление «аккаунт потерял связь» — один раз на переход в `error` (D-37).
+
+    Пишется той же транзакцией, что и смена статуса, но под точкой сохранения:
+    запись о том, что аккаунт отвалился, важнее оповещения, и сбой оповещения
+    не должен её отменять.
+    """
+    try:
+        async with db.begin_nested():
+            await notification_service.notify_account_error(db, account, reason)
+    except Exception:
+        log.exception("Не создал уведомление об обрыве связи аккаунта %s", account.id)
+
+
 async def write_status(account_id: int, status: str, reason: str | None) -> None:
     """Сессия отвалилась — состояние аккаунта должно измениться в интерфейсе сразу,
     а не тогда, когда менеджер не сможет отправить сообщение."""
     async with SessionLocal() as db:
         try:
-            account = await _account(db, account_id)
+            # Строка аккаунта — под замком: о том, что сессия отвалилась, шлюз
+            # сообщает из нескольких мест сразу (запуск сессии, каждая отправка),
+            # и без замка оба отчёта увидели бы «было connected» и создали бы
+            # по уведомлению. Второй дождётся первого и увидит уже `error`.
+            account = await _account(db, account_id, lock=True)
+            previous = account.status
             account.status = AccountStatus(status)
             account.status_reason = reason
             await log_event(
@@ -146,6 +165,8 @@ async def write_status(account_id: int, status: str, reason: str | None) -> None
                 actor_kind=ActorKind.GATEWAY,
                 after={"status": status, "reason": reason},
             )
+            if account_link.entered_error(previous, account.status):
+                await _notify_lost_link(db, account, reason)
             await db.commit()
             await emit_to_account(
                 db,

@@ -21,13 +21,14 @@
 """
 
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.services import settings_service, worktime
+from app.models import User
+from app.services import reply_queue, settings_service, worktime
 
 # Строк в разрезе по услугам: остальное складывается в «Остальные» — таблица
 # на 200 позиций не читается, а деньги в сумме не теряются.
@@ -182,27 +183,13 @@ async def response_stats(
 async def awaiting_now(db: AsyncSession, scope: Any) -> tuple[int, int]:
     """Сколько диалогов ждут ответа прямо сейчас и сколько из них дольше порога.
 
-    Это состояние очереди, а не скорость менеджеров: у руководителя считаются
-    все диалоги, как в счётчике «ждут ответа» над списком чатов.
+    Это состояние очереди, а не скорость менеджеров, поэтому считается тем же
+    определением и по той же области видимости, что и баннер над списком чатов
+    и фильтр «Ждут >N мин» (D-34, `reply_queue`): руководитель — все диалоги,
+    менеджер — свои и ничейные на его аккаунтах. Просмотренные не исключаются.
     """
-    late = int(await settings_service.get_value(db, "awaiting_banner_minutes") or 30)
-    now = datetime.now(UTC)
-    hours = await worktime.load(db)
-    if hours.enabled:
-        over = (
-            "astra_working_seconds(c.awaiting_reply_since, :now, :wh_days, :wh_start, "
-            ":wh_end, :wh_tz) > :late"
-        )
-        extra: dict[str, Any] = {**hours.sql_params(), "now": now, "late": late * 60}
-    else:
-        over = "c.awaiting_reply_since < :cutoff"
-        extra = {"cutoff": now - timedelta(minutes=late)}
-    sql = (
-        "select count(*) as total, count(*) filter (where " + over + ") as over "
-        "from conversations c where c.awaiting_reply_since is not null" + _accounts(scope)
-    )
-    row = (await db.execute(text(sql), {**_params(scope, now, now), **extra})).one()
-    return int(row.total), int(row.over)
+    viewer = await db.get(User, scope.user_id) if scope.user_id is not None else None
+    return await reply_queue.count_waiting(db, viewer)
 
 
 # ------------------------------------------------------------ продажи

@@ -1,7 +1,9 @@
 import { Bell, Search } from 'lucide-react'
+import { useState } from 'react'
 import { Link } from 'react-router-dom'
 
 import { cn } from '@/shared/lib/cn'
+import { NotificationsSheet } from '@/features/profile/components/NotificationsSheet'
 import { useUnreadCount } from '@/features/profile/queries'
 
 /**
@@ -13,6 +15,7 @@ import { useUnreadCount } from '@/features/profile/queries'
 export function SectionActions({ className }: { className?: string }) {
   const unread = useUnreadCount()
   const count = unread.data?.count ?? 0
+  const [open, setOpen] = useState(false)
 
   return (
     <div className={cn('flex shrink-0 items-center gap-1', className)}>
@@ -25,9 +28,13 @@ export function SectionActions({ className }: { className?: string }) {
         <Search className="size-5" aria-hidden />
       </Link>
 
-      <Link
-        to="/profile"
+      {/* Колокольчик открывает список уведомлений прямо здесь, на любой
+          странице, — а не уводит в профиль. */}
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
         aria-label={count > 0 ? `Уведомления, непрочитанных: ${count}` : 'Уведомления'}
+        aria-haspopup="dialog"
         title="Уведомления"
         className="relative flex size-9 items-center justify-center rounded text-ink-muted transition-colors hover:bg-surface-raised hover:text-ink"
       >
@@ -37,7 +44,9 @@ export function SectionActions({ className }: { className?: string }) {
             {count > 9 ? '9+' : count}
           </span>
         )}
-      </Link>
+      </button>
+
+      <NotificationsSheet open={open} onOpenChange={setOpen} />
     </div>
   )
 }

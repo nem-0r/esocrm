@@ -118,7 +118,8 @@ async def run() -> int:
                 f"файлов у менеджера: {len(mgr_files)}",
             )
 
-        print("\n2.1 — плашка ожидания гаснет после просмотра и срабатывает один раз")
+        print("\n2.1 (D-34) — просмотр руководителем не гасит плашку ожидания и баннер")
+        # Сквозная проверка просмотра менеджером и «одного числа везде» — verify_queue.
         aw = (
             await admin.get(f"{BASE}/conversations", params={"filter": "awaiting", "limit": 50})
         ).json()["items"]
@@ -130,17 +131,17 @@ async def run() -> int:
             after = (await admin.get(f"{BASE}/conversations/counters")).json()
             one = (await admin.get(f"{BASE}/conversations/{cid}")).json()
             check(
-                "плашка в строке гаснет",
-                one["awaiting_minutes"] is None,
+                "плашка в строке остаётся: руководитель её не гасит",
+                one["awaiting_minutes"] is not None and one["awaiting_seen"] is False,
                 str(one["awaiting_minutes"]),
             )
             check(
-                "баннер перестаёт считать этот диалог",
-                after["over_threshold"] == before["over_threshold"] - 1,
+                "баннер считает этот диалог по-прежнему",
+                after["over_threshold"] == before["over_threshold"],
                 f"{before['over_threshold']} → {after['over_threshold']}",
             )
             check(
-                "но клиент остаётся в очереди ждущих",
+                "и клиент остаётся в очереди ждущих",
                 after["awaiting"] == before["awaiting"],
                 f"{before['awaiting']} → {after['awaiting']}",
             )

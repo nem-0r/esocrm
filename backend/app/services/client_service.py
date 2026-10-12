@@ -13,12 +13,11 @@
 import base64
 import csv
 import io
-import re
 from collections.abc import AsyncIterator
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import String, and_, case, cast, exists, func, or_, select
+from sqlalchemy import and_, case, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import conversation_scope_orm, visible_account_ids
@@ -34,7 +33,7 @@ from app.models import (
     TelegramAccount,
     User,
 )
-from app.models.client import zodiac_for
+from app.models.client import client_display_name, zodiac_for
 from app.schemas.client import (
     ClientAccountBrief,
     ClientCard,
@@ -48,11 +47,12 @@ from app.schemas.client import (
     NoteRow,
 )
 from app.schemas.common import CursorPage, decode_cursor, encode_cursor
+from app.schemas.validators import check_birth_date, normalize_phone
+from app.services import name_match
 from app.services.audit import log_event
 from app.services.export_format import csv_safe
 from app.services.worktime import day_bounds, local_zone
 
-PHONE_RE = re.compile(r"^[0-9+\-\s]+$")
 MAX_LIMIT = 200
 
 
@@ -67,25 +67,19 @@ def _display_name(
     telegram_id: int,
     username: str | None = None,
 ) -> str:
-    """Повторяет лестницу `Client.name`: имя менеджера, имя из Telegram,
-    @username, публичный id. Держать в двух местах пришлось потому, что список
-    строится сырым запросом, без объектов модели."""
-    if display_name:
-        return display_name
-    parts = [p for p in (first, last) if p]
-    if parts:
-        return " ".join(parts)
-    return f"@{username}" if username else str(telegram_id)
+    """Имя клиента по сырой строке запроса (список и выгрузка строятся без объектов
+    модели). Лестница — одна на всех: `models.client.client_display_name`."""
+    return client_display_name(display_name, first, last, username, telegram_id)
 
 
 def _validate_phone(phone: str) -> str:
-    phone = phone.strip()
-    if not phone or not PHONE_RE.fullmatch(phone):
-        raise Invalid("Проверьте формат телефона")
-    digits = re.sub(r"\D", "", phone)
-    if not (7 <= len(digits) <= 15):
-        raise Invalid("Проверьте формат телефона")
-    return phone
+    """Те же правила, что у схемы `ClientUpdate`: сервис проверяет ещё раз, потому что
+    вызвать его можно и не через HTTP. Имя поля в ответе — чтобы интерфейс показал
+    ошибку под телефоном, а не общей строкой."""
+    try:
+        return normalize_phone(phone)
+    except ValueError as exc:
+        raise Invalid(str(exc), field="phone") from exc
 
 
 async def _ensure_visible(db: AsyncSession, user: User, client_id: int) -> Client:
@@ -218,17 +212,10 @@ async def list_clients(
         .where(Client.deleted_at.is_(None))
     )
 
-    if q:
-        pattern = f"%{q.strip()}%"
-        inner = inner.where(
-            or_(
-                Client.display_name.ilike(pattern),
-                Client.tg_first_name.ilike(pattern),
-                Client.tg_last_name.ilike(pattern),
-                Client.phone.ilike(pattern),
-                cast(Client.id, String).ilike(pattern),
-            )
-        )
+    # Поиск — то же правило, что в глобальном поиске и списке чатов (D-35).
+    found = name_match.client_match_orm(q) if q else None
+    if found is not None:
+        inner = inner.where(found)
 
     if account_ids is not None:
         inner = inner.where(
@@ -397,6 +384,14 @@ async def update_client(
     fields = patch.model_fields_set
 
     new_phone = _validate_phone(patch.phone) if "phone" in fields and patch.phone else None
+    if "birth_date" in fields and patch.birth_date is not None:
+        # Вторая, точная проверка: по календарю организации, без запаса на пояса.
+        # Схема пропускает «завтра по UTC», чтобы не резать менеджера на UTC+12.
+        today = datetime.now(UTC).astimezone(await local_zone(db)).date()
+        try:
+            check_birth_date(patch.birth_date, today=today, slack_days=0)
+        except ValueError as exc:
+            raise Invalid(str(exc), field="birth_date") from exc
 
     before: dict[str, Any] = {}
     after: dict[str, Any] = {}
@@ -684,7 +679,8 @@ async def export_csv_rows(
         writer.writerow(
             [
                 client_id,
-                csv_safe(_display_name(display_name, first, last, telegram_id)),
+                # С @username: клиент без имени в Telegram записывается им, а не числом (BUG-10).
+                csv_safe(_display_name(display_name, first, last, telegram_id, tg_username)),
                 csv_safe(phone or ""),
                 csv_safe(f"@{tg_username}" if tg_username else ""),
                 telegram_id,

@@ -8,7 +8,14 @@ from fastapi import APIRouter, Cookie, Request, Response
 
 from app.core.config import settings
 from app.core.deps import SESSION_COOKIE, CurrentUser, Db
-from app.schemas.auth import AcceptInviteIn, LoginIn, LoginOut, MeUpdateIn
+from app.schemas.auth import (
+    AcceptInviteIn,
+    LoginIn,
+    LoginOut,
+    MeUpdateIn,
+    ResetPasswordIn,
+    ResetPasswordPreviewOut,
+)
 from app.schemas.common import Ok
 from app.schemas.user import MeOut
 from app.services import auth_service
@@ -82,6 +89,7 @@ async def update_me(
         accepting_leads=payload.accepting_leads,
         full_name=payload.full_name,
         phone=payload.phone,
+        phone_provided="phone" in payload.model_fields_set,
         current_password=payload.current_password,
         new_password=payload.new_password,
     )
@@ -94,6 +102,29 @@ async def accept_invite(
 ) -> LoginOut:
     user, token = await auth_service.accept_invite(db, request, payload.token, payload.password)
     _set_session_cookie(response, token)
+    me_payload = await auth_service.build_me(db, user)
+    return LoginOut(**me_payload.model_dump(), token=token)
+
+
+@router.get("/reset-password/{token}", response_model=ResetPasswordPreviewOut)
+async def reset_password_preview(
+    token: str, request: Request, response: Response, db: Db
+) -> ResetPasswordPreviewOut:
+    """Публичная: жива ли ссылка сброса пароля (D-38) и как зовут сотрудника."""
+    response.headers["Cache-Control"] = "no-store"
+    return await auth_service.reset_password_preview(db, request, token)
+
+
+@router.post("/reset-password", response_model=LoginOut)
+async def reset_password(
+    payload: ResetPasswordIn, request: Request, response: Response, db: Db
+) -> LoginOut:
+    """Публичная: новый пароль по одноразовой ссылке. Прежние сессии отозваны, вход сразу."""
+    user, token = await auth_service.complete_password_reset(
+        db, request, payload.token, payload.password
+    )
+    _set_session_cookie(response, token)
+    response.headers["Cache-Control"] = "no-store"
     me_payload = await auth_service.build_me(db, user)
     return LoginOut(**me_payload.model_dump(), token=token)
 

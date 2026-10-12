@@ -1,9 +1,19 @@
-import { Check, Info, Plus, Tag, Trash2 } from 'lucide-react'
+import { Check, Info, Plus, Tag, Trash2, Undo2 } from 'lucide-react'
 import { useMemo, useState, type KeyboardEvent } from 'react'
 import { Link } from 'react-router-dom'
 
 import type { Service } from '@/entities/types'
-import { amountInput, newItemDraft, normalizeServiceName, type ItemDraft } from '@/features/deals/lib'
+import {
+  activeItems,
+  amountFieldError,
+  amountInput,
+  canRemoveItem,
+  newItemDraft,
+  normalizeServiceName,
+  removeItem,
+  restoreItem,
+  type ItemDraft,
+} from '@/features/deals/lib'
 import { useServices } from '@/features/services/queries'
 import { useAuth } from '@/shared/hooks/useAuth'
 import { cn } from '@/shared/lib/cn'
@@ -30,6 +40,11 @@ export function ItemsEditor({
   const catalog = useMemo(() => services.data ?? [], [services.data])
   const { isAdmin } = useAuth()
   const catalogEmpty = !services.isLoading && !services.isError && catalog.length === 0
+  // Поля, из которых уже уходили: пустую сумму ругаем, только когда человек её миновал,
+  // а не в тот момент, когда он только открыл окно.
+  const [visited, setVisited] = useState<ReadonlySet<string>>(new Set())
+  // «Убрать» есть, пока активных строк больше одной, — пустой состав сервер не примет.
+  const removable = canRemoveItem(items)
 
   function patch(index: number, update: Partial<ItemDraft>) {
     onChange(items.map((item, i) => (i === index ? { ...item, ...update } : item)))
@@ -37,7 +52,9 @@ export function ItemsEditor({
 
   return (
     <section className="flex flex-col gap-2">
-      <span className="text-label uppercase tracking-wide text-ink-faint">Услуги · {items.length}</span>
+      <span className="text-label uppercase tracking-wide text-ink-faint">
+        Услуги · {activeItems(items).length}
+      </span>
       {/* Пустой справочник — не поломка, но и списка не будет: говорим, почему и кто
           может это исправить, а не оставляем гадать. */}
       {catalogEmpty && (
@@ -57,6 +74,36 @@ export function ItemsEditor({
         </span>
       )}
       {items.map((item, index) => {
+        // Убранная услуга остаётся на месте, приглушённая и зачёркнутая: случайный клик не
+        // стоит потерянных названия и цены, а вернуть строку — одно нажатие.
+        if (item.removed) {
+          return (
+            <div
+              key={item.key}
+              className="flex items-center gap-2 rounded-md bg-surface-raised/60 px-3 py-2 opacity-70"
+            >
+              <span className="min-w-0 flex-1 truncate text-sm text-ink-muted line-through">
+                {item.name.trim() || 'Без названия'}
+              </span>
+              {parseMoney(item.amount) !== null && (
+                <span className="tnum shrink-0 text-sm text-ink-faint line-through">
+                  {money(parseMoney(item.amount))}
+                </span>
+              )}
+              <Button
+                variant="ghost"
+                size="sm"
+                aria-label={`Вернуть услугу «${item.name.trim() || 'без названия'}»`}
+                onClick={() => onChange(restoreItem(items, item.key))}
+              >
+                <Undo2 className="size-4" aria-hidden />
+                Вернуть
+              </Button>
+            </div>
+          )
+        }
+        const amountProblem =
+          item.amount.trim() !== '' || visited.has(item.key) ? amountFieldError(item.amount) : null
         const linked = catalog.find((service) => service.id === item.serviceId) ?? null
         // Позиция ссылается на услугу, которой нет среди продающихся: значит
         // её сняли с продажи или удалили уже ПОСЛЕ того, как её выбрали в
@@ -90,11 +137,11 @@ export function ItemsEditor({
                   patch(index, { name, serviceId: exact ? exact.id : null })
                 }}
               />
-              {items.length > 1 && (
+              {removable && (
                 <button
                   type="button"
                   aria-label="Убрать услугу"
-                  onClick={() => onChange(items.filter((_, i) => i !== index))}
+                  onClick={() => onChange(removeItem(items, item.key))}
                   className="flex size-10 shrink-0 items-center justify-center rounded text-ink-faint transition-colors hover:bg-surface hover:text-danger"
                 >
                   <Trash2 className="size-4" aria-hidden />
@@ -106,13 +153,21 @@ export function ItemsEditor({
               inputMode="decimal"
               value={item.amount}
               placeholder="Стоимость, ₽"
+              invalid={amountProblem !== null}
+              aria-invalid={amountProblem !== null}
               onChange={(event) => patch(index, { amount: event.target.value })}
+              onBlur={() => setVisited((current) => new Set(current).add(item.key))}
               trailing={
                 <span className="tnum text-micro text-ink-faint">
                   {amount ? money(amount) : ''}
                 </span>
               }
             />
+            {amountProblem && (
+              <span role="alert" className="text-xs text-danger">
+                {amountProblem}
+              </span>
+            )}
             {linked && linked.price !== null && amount !== null && amount !== linked.price && (
               <span className="text-micro text-ink-faint">По прайсу {money(linked.price)}</span>
             )}

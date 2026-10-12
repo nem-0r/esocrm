@@ -4,6 +4,7 @@ import type { Conversation } from '@/entities/types'
 import { cn } from '@/shared/lib/cn'
 import { listTime, money, waitingLabel } from '@/shared/lib/format'
 import { Avatar, Badge } from '@/shared/ui'
+import { MessageStatusIcon } from '@/features/chats/components/MessageStatusIcon'
 
 export function ChatListItem({
   conversation,
@@ -29,7 +30,13 @@ export function ChatListItem({
           <span className="min-w-0 flex-1 truncate text-sm font-semibold text-ink">
             {conversation.client.name}
           </span>
-          <span className="tnum shrink-0 text-micro text-ink-faint">
+          {/* Как в Telegram: статус последнего ИСХОДЯЩЕГО — перед временем (D-36).
+              У входящего и у служебной заметки значка нет. */}
+          <span className="tnum flex shrink-0 items-center gap-1 text-micro text-ink-faint">
+            <MessageStatusIcon
+              status={conversation.last_message_status}
+              direction={conversation.last_message_direction}
+            />
             {listTime(conversation.last_message_at)}
           </span>
         </div>

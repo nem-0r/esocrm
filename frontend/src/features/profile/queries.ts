@@ -6,7 +6,7 @@
  * ключ ['accounts'] покрывает и список, и сводку — они всегда меняются вместе.
  */
 
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
 import type {
   Account,
@@ -329,13 +329,44 @@ export function useResendInvite() {
   })
 }
 
+/** Одноразовая ссылка на новый пароль (D-38): `link` — относительный путь `/reset/{токен}`. */
+export interface PasswordResetLink {
+  link: string
+  expires_at: string
+}
+
+/**
+ * Выдать сотруднику ссылку для нового пароля. Список сотрудников не меняется
+ * (сброс ничего в строке не правит), поэтому кэш не трогаем.
+ */
+export function useResetStaffPassword() {
+  return useMutation({
+    mutationFn: (userId: number) =>
+      api.post<PasswordResetLink>(`/users/${userId}/reset-password`),
+  })
+}
+
 /* -------------------------------------------------------------- уведомления */
 
-export function useNotifications(limit = 10) {
-  return useQuery({
-    queryKey: ['notifications', limit],
-    queryFn: async ({ signal }) =>
-      unwrap(await api.get<List<AppNotification>>('/notifications', { limit }, signal)),
+export const NOTIFICATIONS_PAGE_SIZE = 30
+
+/**
+ * Лента для окна «Уведомления»: страницами и только пока окно открыто.
+ * Окно показа (31 день) задаёт сервер — тот же, что и у счётчика непрочитанных,
+ * поэтому бейдж и список сходятся.
+ */
+export function useNotificationsFeed(enabled: boolean) {
+  return useInfiniteQuery({
+    queryKey: ['notifications', 'feed'],
+    enabled,
+    initialPageParam: null as string | null,
+    queryFn: ({ pageParam, signal }) =>
+      api.get<CursorPage<AppNotification>>(
+        '/notifications',
+        { limit: NOTIFICATIONS_PAGE_SIZE, cursor: pageParam ?? undefined },
+        signal,
+      ),
+    getNextPageParam: (last) => last.next_cursor,
   })
 }
 

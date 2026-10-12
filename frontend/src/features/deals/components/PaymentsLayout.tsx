@@ -11,7 +11,9 @@ import { useSearchParams } from 'react-router-dom'
 import type { DealStatus } from '@/entities/types'
 import { ApiError } from '@/shared/api/client'
 import { cn } from '@/shared/lib/cn'
+import { presetRange, rangeError, type DateRange, type PeriodPreset } from '@/shared/lib/period'
 import { useMe } from '@/shared/hooks/useAuth'
+import { useOrgToday } from '@/shared/hooks/useOrgToday'
 import {
   Button,
   EmptyState,
@@ -25,12 +27,7 @@ import { SectionActions } from '@/app/layout/SectionActions'
 import { DealListItem } from '@/features/deals/components/DealListItem'
 import { DealsSummaryTiles } from '@/features/deals/components/DealsSummaryTiles'
 import { RequisiteBreakdown } from '@/features/deals/components/RequisiteBreakdown'
-import {
-  PeriodPicker,
-  presetRange,
-  type DateRange,
-  type PeriodPreset,
-} from '@/features/deals/components/PeriodPicker'
+import { PeriodPicker } from '@/features/deals/components/PeriodPicker'
 import { exportDeals, useDeals, useDealsSummary, type DealFilters } from '@/features/deals/queries'
 
 type StatusFilter = DealStatus | 'all'
@@ -53,8 +50,17 @@ export function PaymentsLayout({
   // Доска: «в разделе оплат отражаются все оплаты за выбранный период
   // (по умолчанию — последний год)». Месяц здесь врал: плитка «ждут оплаты»
   // считает текущее состояние и показывала 5, а список за месяц — 3 строки.
+  const today = useOrgToday()
   const [preset, setPreset] = useState<PeriodPreset>('year')
-  const [range, setRange] = useState<DateRange>(() => presetRange('year'))
+  // Введённый вручную период хранится отдельно; пресеты считаются от «сегодня» по поясу
+  // организации каждый раз, поэтому не устаревают, если страницу оставили открытой на ночь.
+  const [customRange, setCustomRange] = useState<DateRange>(() => presetRange('year', today))
+  const range = useMemo<DateRange>(
+    () => (preset === 'custom' ? customRange : presetRange(preset, today)),
+    [preset, customRange, today],
+  )
+  // Пустая дата, «с» позже «по», год вне 1900–2100: запросы не уходят, список не притворяется пустым.
+  const periodError = rangeError(range.from, range.to)
   const [status, setStatus] = useState<StatusFilter>(() => {
     const fromUrl = searchParams.get('status')
     return isStatusFilter(fromUrl) ? fromUrl : 'all'
@@ -85,16 +91,18 @@ export function PaymentsLayout({
   )
 
   const me = useMe()
-  const summary = useDealsSummary(periodFilters)
-  const list = useDeals(listFilters)
+  const summary = useDealsSummary(periodFilters, periodError === null)
+  const list = useDeals(listFilters, periodError === null)
   const deals = useMemo(() => list.data?.pages.flatMap((page) => page.items) ?? [], [list.data])
 
   function changePreset(next: PeriodPreset) {
+    // «Свой» начинается с тех дат, что стояли на экране, — их и правят.
+    if (next === 'custom') setCustomRange(range)
     setPreset(next)
-    setRange((current) => presetRange(next, current))
   }
 
   async function runExport() {
+    if (periodError) return
     setExportError(null)
     setExporting(true)
     try {
@@ -124,6 +132,8 @@ export function PaymentsLayout({
               size="sm"
               variant="secondary"
               loading={exporting}
+              disabled={periodError !== null}
+              title={periodError ?? undefined}
               onClick={() => void runExport()}
             >
               <Download className="size-4" aria-hidden />
@@ -135,7 +145,7 @@ export function PaymentsLayout({
             preset={preset}
             range={range}
             onPresetChange={changePreset}
-            onRangeChange={setRange}
+            onRangeChange={setCustomRange}
           />
 
           <Input
@@ -164,14 +174,16 @@ export function PaymentsLayout({
 
           {exportError && <InlineError message={exportError} onRetry={() => void runExport()} />}
 
-          <DealsSummaryTiles
-            summary={summary.data}
-            isLoading={summary.isLoading}
-            error={summary.error}
-            onRetry={() => void summary.refetch()}
-          />
+          {periodError === null && (
+            <DealsSummaryTiles
+              summary={summary.data}
+              isLoading={summary.isLoading}
+              error={summary.error}
+              onRetry={() => void summary.refetch()}
+            />
+          )}
 
-          {me.is_admin && <RequisiteBreakdown filters={periodFilters} />}
+          {me.is_admin && periodError === null && <RequisiteBreakdown filters={periodFilters} />}
 
           <Segmented
             value={status}
@@ -187,7 +199,12 @@ export function PaymentsLayout({
         </header>
 
         <div className="min-h-0 flex-1 overflow-y-auto">
-          {list.isLoading ? (
+          {periodError ? (
+            <EmptyState
+              title={periodError}
+              hint="Поправьте даты в блоке «Период» над списком — оплаты появятся сразу."
+            />
+          ) : list.isLoading ? (
             <ListSkeleton rows={8} />
           ) : list.error ? (
             <ErrorState error={list.error} onRetry={() => void list.refetch()} />

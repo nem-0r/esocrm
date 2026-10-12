@@ -1,7 +1,8 @@
-import { AlertCircle, Check, CheckCheck, Circle, CircleCheck, Clock, Lock, Trash2 } from 'lucide-react'
+import { Circle, CircleCheck, Lock, Trash2 } from 'lucide-react'
 import { useState } from 'react'
 
 import type { Message } from '@/entities/types'
+import { MessageStatusIcon } from '@/features/chats/components/MessageStatusIcon'
 import { AttachmentView, kindOf } from '@/features/chats/components/message/AttachmentView'
 import { ForwardedHeader, MetaCard, hasMetaCard } from '@/features/chats/components/message/MetaCards'
 import { MessageMenu, type MessageActions } from '@/features/chats/components/message/MessageMenu'
@@ -36,23 +37,6 @@ function canEditMessage(message: Message, myUserId: number): boolean {
 export function canForward(message: Message): boolean {
   if (message.is_internal) return false
   return Boolean(message.text || message.attachments.length)
-}
-
-/**
- * Статуса «доставлено» нет намеренно: MTProto его не отдаёт.
- * Часы — в очереди, одна галочка — отправлено, две — прочитано, крестик — ошибка.
- */
-function StatusIcon({ status }: { status: Message['status'] }) {
-  switch (status) {
-    case 'queued':
-      return <Clock className="size-3.5 text-ink-faint" aria-label="в очереди" />
-    case 'sent':
-      return <Check className="size-3.5 text-ink-faint" aria-label="отправлено" />
-    case 'read':
-      return <CheckCheck className="size-3.5 text-accent-text" aria-label="прочитано" />
-    case 'failed':
-      return <AlertCircle className="size-3.5 text-danger" aria-label="ошибка отправки" />
-  }
 }
 
 export interface Selection {
@@ -278,7 +262,7 @@ export function MessageBubble({
             )}
             {message.edited_at && <span>изменено</span>}
             <span className="tnum">{time(message.created_at)}</span>
-            {outgoing && <StatusIcon status={message.status} />}
+            {outgoing && <MessageStatusIcon status={message.status} />}
             {!selecting && (
               <MessageMenu
                 actions={actions}

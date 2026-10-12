@@ -6,10 +6,19 @@
 from datetime import date, datetime, time
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from app.models import BirthTimeApprox, FunnelStage
 from app.schemas.common import ApiModel
+from app.schemas.validators import (
+    CITY_MAX_LEN,
+    NAME_MAX_LEN,
+    SOURCE_MAX_LEN,
+    check_birth_date,
+    clean_text,
+    optional_phone,
+    parse_birth_date,
+)
 
 
 class ClientListRow(ApiModel):
@@ -88,6 +97,38 @@ class ClientUpdate(ApiModel):
     birth_city: str | None = None
     source: str | None = None
     marketing_consent: bool | None = None
+
+    # Проверки данных (L1, 11.10.2026). Пустое и «из одних пробелов» везде
+    # означает «очистить поле» — в базу пробельная строка не попадает.
+    @field_validator("display_name")
+    @classmethod
+    def _display_name(cls, value: str | None) -> str | None:
+        return clean_text(value, max_len=NAME_MAX_LEN, label="Имя")
+
+    @field_validator("phone")
+    @classmethod
+    def _phone(cls, value: str | None) -> str | None:
+        return optional_phone(value)
+
+    @field_validator("birth_date", mode="before")
+    @classmethod
+    def _parse_birth_date(cls, value: object) -> date | None:
+        return parse_birth_date(value)
+
+    @field_validator("birth_date")
+    @classmethod
+    def _birth_date_range(cls, value: date | None) -> date | None:
+        return check_birth_date(value) if value is not None else None
+
+    @field_validator("birth_city")
+    @classmethod
+    def _birth_city(cls, value: str | None) -> str | None:
+        return clean_text(value, max_len=CITY_MAX_LEN, label="Город рождения")
+
+    @field_validator("source")
+    @classmethod
+    def _source(cls, value: str | None) -> str | None:
+        return clean_text(value, max_len=SOURCE_MAX_LEN, label="Источник")
 
 
 class NoteAuthor(ApiModel):

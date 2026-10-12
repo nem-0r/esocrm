@@ -16,7 +16,7 @@ from app.schemas.conversation import (
     Counters,
     TransferIn,
 )
-from app.services import conversation_service
+from app.services import conversation_service, reply_queue
 
 router = APIRouter()
 
@@ -28,8 +28,14 @@ async def list_conversations(
     db: Db,
     user: CurrentUser,
     filter_: Annotated[
-        Literal["all", "awaiting", "awaiting_payment"],
-        Query(alias="filter", description="Все, ждут ответа или ожидают оплаты"),
+        Literal["all", "awaiting", "awaiting_over", "awaiting_payment"],
+        Query(
+            alias="filter",
+            description=(
+                "Все, ждут ответа, ждут дольше порога из настроек или ожидают оплаты. "
+                "«Ждут» идут от самого давнего ожидания к свежему"
+            ),
+        ),
     ] = "all",
     account_id: Annotated[int | None, Query(description="Только этот аккаунт")] = None,
     q: Annotated[
@@ -49,8 +55,21 @@ async def get_counters(db: Db, user: CurrentUser) -> Counters:
 
 
 @router.get("/next", summary="Взять первого в очереди")
-async def next_conversation(db: Db, user: CurrentUser) -> ConversationRow:
-    return await conversation_service.next_in_queue(db, user)
+async def next_conversation(
+    db: Db,
+    user: CurrentUser,
+    skip: Annotated[
+        str | None,
+        Query(
+            max_length=1100,
+            description=(
+                "Номера чатов через запятую (не больше 50), которые сотрудник уже брал "
+                "в этой сессии: они не повторяются, пока в очереди есть другие"
+            ),
+        ),
+    ] = None,
+) -> ConversationRow:
+    return await conversation_service.next_in_queue(db, user, reply_queue.parse_skip(skip))
 
 
 @router.get("/{conversation_id}", summary="Карточка чата")

@@ -20,10 +20,21 @@ import { DEAL_STATUS_LABEL, DEAL_STATUS_TONE } from '@/features/deals/lib'
 import {
   MIN_QUERY,
   useClearHistory,
+  useRememberSearch,
   useSearch,
   useSearchHistory,
   type SearchType,
 } from '@/features/search/queries'
+import {
+  canShowAll,
+  clientHint,
+  groupTotal,
+  isTruncated,
+  showAllLabel,
+  totalLabel,
+  FULL_LIMIT,
+  type SearchGroup,
+} from '@/features/search/lib'
 
 const FILTERS: { value: SearchType; label: string }[] = [
   { value: 'clients', label: 'Клиенты' },
@@ -32,6 +43,14 @@ const FILTERS: { value: SearchType; label: string }[] = [
   { value: 'files', label: 'Файлы' },
   { value: 'managers', label: 'Менеджеры' },
 ]
+
+const GROUP_TITLE: Record<SearchGroup, string> = {
+  clients: 'Клиенты',
+  deals: 'Оплаты',
+  chats: 'Чаты',
+  files: 'Файлы',
+  managers: 'Менеджеры',
+}
 
 export function SearchPage() {
   const me = useMe()
@@ -54,6 +73,18 @@ export function SearchPage() {
   // ТЗ Б.15: десять строк, а не пять.
   const recentChats = (recent.data?.pages[0]?.items ?? []).slice(0, 10)
   const clearHistory = useClearHistory()
+  const remember = useRememberSearch()
+
+  // История (L4) пишется только по явному действию: Enter или переход к результату.
+  // Набор по буквам, смена вкладки и клик по пункту самой истории её не трогают.
+  const commit = (value: string) => {
+    const clean = value.trim()
+    if (clean.length >= MIN_QUERY) remember.mutate(clean)
+  }
+  const openHistoryItem = (value: string) => {
+    setQuery(value)
+    setDebounced(value.trim())
+  }
 
   const ready = debounced.length >= MIN_QUERY
   const groups = results.data
@@ -65,6 +96,18 @@ export function SearchPage() {
       (groups.managers?.length ?? 0)
     : 0
 
+  // Заголовок группы, число найденного и кнопка «Показать все (N)».
+  const groupProps = (group: SearchGroup) => {
+    const total = groups ? groupTotal(groups, group) : 0
+    return {
+      title: GROUP_TITLE[group],
+      count: totalLabel(total),
+      onShowAll: groups && canShowAll(groups, group, types) ? () => setTypes([group]) : undefined,
+      showAllLabel: showAllLabel(total),
+      truncated: groups ? isTruncated(groups, group, types) : false,
+    }
+  }
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <header className="shrink-0 border-b border-line px-4 py-3">
@@ -75,6 +118,12 @@ export function SearchPage() {
             value={query}
             autoFocus
             onChange={(event) => setQuery(event.target.value)}
+            onKeyDown={(event) => {
+              // Enter во время ввода через IME подтверждает слово, а не запрос.
+              if (event.key !== 'Enter' || event.nativeEvent.isComposing) return
+              setDebounced(query.trim())
+              commit(query)
+            }}
             placeholder="Клиенты, оплаты, чаты, файлы, менеджеры"
             leading={<Search className="size-4" aria-hidden />}
             trailing={
@@ -119,8 +168,9 @@ export function SearchPage() {
           {!ready ? (
             <>
               <p className="text-xs text-ink-faint">
-                Нужно минимум два символа. Ищет по ID клиента и номеру сделки — например 84271
-                или DEAL-1042.
+                Нужно минимум два символа. Клиента ищут по имени и фамилии (в любом порядке),
+                @username, части телефона или ID — например «Ксения Сергеева», 958142 или 84271.
+                Оплату — ещё и по номеру: DEAL-1042.
               </p>
               {/* Доска, п.1: под строкой поиска — недавние диалоги И история.
                   Обычно человек ищет того, с кем только что переписывался. */}
@@ -170,13 +220,16 @@ export function SearchPage() {
                 {history.isLoading ? (
                   <ListSkeleton rows={3} />
                 ) : (history.data ?? []).length === 0 ? (
-                  <EmptyState title="История пуста" hint="Здесь появятся последние 10 запросов." />
+                  <EmptyState
+                    title="История пуста"
+                    hint="Запрос запоминается, когда вы нажали Enter или открыли результат. Хранятся последние 10."
+                  />
                 ) : (
                   <ul className="flex flex-col gap-1">
                     {(history.data ?? []).map((item) => (
                       <li key={item.id}>
                         <button
-                          onClick={() => setQuery(item.query)}
+                          onClick={() => openHistoryItem(item.query)}
                           className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm text-ink-muted transition-colors hover:bg-surface-raised hover:text-ink"
                         >
                           <Search className="size-4 shrink-0 text-ink-faint" aria-hidden />
@@ -195,19 +248,20 @@ export function SearchPage() {
           ) : total === 0 ? (
             <EmptyState
               title={`По запросу «${debounced}» ничего не найдено`}
-              hint="Проверьте написание или снимите фильтры."
+              hint="Проверьте написание или снимите фильтры. Имя ищется так, как оно записано в Telegram: «Ксения» и «Ksenia» — разные написания."
             />
           ) : (
             <>
               {groups!.clients.length > 0 && (
-                <Group title="Клиенты" count={groups!.clients.length}>
+                <Group {...groupProps('clients')}>
                   {groups!.clients.map((row) => (
                     <Row
                       key={row.id}
                       to={`/clients/${row.id}`}
+                      onOpen={() => commit(debounced)}
                       icon={<User className="size-4" aria-hidden />}
                       title={row.name}
-                      hint={`id ${row.id}${row.phone ? ` · ${row.phone}` : ''}`}
+                      hint={clientHint(row)}
                       right={row.paid_amount > 0 ? money(row.paid_amount) : undefined}
                     />
                   ))}
@@ -215,11 +269,12 @@ export function SearchPage() {
               )}
 
               {groups!.deals.length > 0 && (
-                <Group title="Оплаты" count={groups!.deals.length}>
+                <Group {...groupProps('deals')}>
                   {groups!.deals.map((row) => (
                     <Row
                       key={row.id}
                       to={`/payments/${row.id}`}
+                      onOpen={() => commit(debounced)}
                       icon={<CreditCard className="size-4" aria-hidden />}
                       title={row.title}
                       hint={`${row.number} · ${row.client_name}`}
@@ -235,14 +290,15 @@ export function SearchPage() {
               )}
 
               {groups!.chats.length > 0 && (
-                <Group title="Чаты" count={groups!.chats.length}>
+                <Group {...groupProps('chats')}>
                   {groups!.chats.map((row) => (
                     <Row
-                      key={row.message_id}
+                      key={`${row.conversation_id}:${row.message_id ?? 'chat'}`}
                       to={`/chats/${row.conversation_id}`}
+                      onOpen={() => commit(debounced)}
                       icon={<MessageSquare className="size-4" aria-hidden />}
                       title={row.client_name}
-                      hint={row.snippet}
+                      hint={row.snippet || row.account_title}
                       right={dateShort(row.created_at)}
                     />
                   ))}
@@ -250,11 +306,12 @@ export function SearchPage() {
               )}
 
               {(groups!.managers ?? []).length > 0 && (
-                <Group title="Менеджеры" count={groups!.managers.length}>
+                <Group {...groupProps('managers')}>
                   {groups!.managers.map((row) => (
                     <Row
                       key={row.id}
                       to={`/profile/staff?user=${row.id}`}
+                      onOpen={() => commit(debounced)}
                       icon={<User className="size-4" aria-hidden />}
                       title={row.full_name}
                       hint={row.email}
@@ -265,11 +322,12 @@ export function SearchPage() {
               )}
 
               {groups!.files.length > 0 && (
-                <Group title="Файлы" count={groups!.files.length}>
+                <Group {...groupProps('files')}>
                   {groups!.files.map((row) => (
                     <Row
                       key={row.id}
                       href={row.url}
+                      onOpen={() => commit(debounced)}
                       icon={<FileText className="size-4" aria-hidden />}
                       title={row.file_name}
                       hint={row.client_name}
@@ -289,10 +347,16 @@ export function SearchPage() {
 function Group({
   title,
   count,
+  onShowAll,
+  showAllLabel: showAllText,
+  truncated,
   children,
 }: {
   title: string
-  count: number
+  count: string
+  onShowAll?: () => void
+  showAllLabel: string
+  truncated: boolean
   children: React.ReactNode
 }) {
   return (
@@ -301,6 +365,19 @@ function Group({
         {title} · {count}
       </SectionTitle>
       <ul className="flex flex-col gap-1">{children}</ul>
+      {onShowAll && (
+        <button
+          onClick={onShowAll}
+          className="min-h-9 self-start rounded px-2 py-1.5 text-xs text-accent-text transition-colors hover:bg-surface-raised hover:text-accent"
+        >
+          {showAllText}
+        </button>
+      )}
+      {truncated && (
+        <p className="text-micro text-ink-faint">
+          Показаны первые {FULL_LIMIT}. Уточните запрос, чтобы найти нужное.
+        </p>
+      )}
     </section>
   )
 }
@@ -308,6 +385,7 @@ function Group({
 function Row({
   to,
   href,
+  onOpen,
   icon,
   title,
   hint,
@@ -316,6 +394,8 @@ function Row({
 }: {
   to?: string
   href?: string
+  /** Переход к результату — повод запомнить запрос в истории (L4). */
+  onOpen?: () => void
   icon: React.ReactNode
   title: string
   hint?: string
@@ -342,11 +422,11 @@ function Row({
   return (
     <li>
       {href ? (
-        <a href={href} target="_blank" rel="noreferrer" className={className}>
+        <a href={href} target="_blank" rel="noreferrer" onClick={onOpen} className={className}>
           {body}
         </a>
       ) : (
-        <Link to={to ?? '#'} className={className}>
+        <Link to={to ?? '#'} onClick={onOpen} className={className}>
           {body}
         </Link>
       )}

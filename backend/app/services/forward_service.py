@@ -42,7 +42,7 @@ from app.realtime.events import conversation_audience, emit
 from app.schemas.message import ForwardRequest, ForwardResult
 from app.services import conversation_service
 from app.services.audit import log_event
-from app.services.message_service import mark_replied, to_out
+from app.services.message_service import ensure_account_online, mark_replied, to_out
 
 # Что из «нетекстового» переносится в копию: карточка контакта или карты в CRM
 # остаётся карточкой. «Переслано от» и отметки удаления — свойства исходного
@@ -77,6 +77,8 @@ async def forward(
     source = await conversation_service.load_visible(db, user, request.source_conversation_id)
     if target.is_blocked_by_client:
         raise Invalid("Клиент заблокировал этот номер — сообщения ему не доходят")
+    # Пересылка тоже уходит через Telegram аккаунта-получателя: без связи — отказ сразу.
+    await ensure_account_online(db, target.account_id, user)
     # Две пересылки (или пересылка и обычная отправка) в один чат одновременно
     # раньше рвались взаимной блокировкой базы — теперь встают в очередь.
     await conversation_service.lock_for_write(db, target.id)

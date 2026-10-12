@@ -44,7 +44,9 @@ fi
 seed
 for suite in smoke_api verify_miro verify_analytics verify_tz verify_gateway verify_payments \
              verify_exports verify_media verify_sync verify_forward verify_services \
-             verify_robustness verify_governor verify_outbox verify_rollback_compat; do
+             verify_robustness verify_governor verify_outbox verify_chat_status verify_queue \
+             verify_search verify_payments_remarks verify_profile_remarks verify_auth_reset \
+             verify_rollback_compat; do
     run "$suite" python -m "tests.$suite"
 done
 

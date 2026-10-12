@@ -21,6 +21,7 @@ from app.schemas.deal import (
 )
 from app.services import deal_export, deal_service
 from app.services.export_format import content_disposition
+from app.services.period import check_period
 from app.services.worktime import local_zone
 
 router = APIRouter()
@@ -45,7 +46,13 @@ async def deal_filters(
         int | None, Query(description="ID аккаунта: показать оплаты только этого канала")
     ] = None,
 ) -> dict[str, Any]:
-    """Фильтры по дате, статусу и клиенту работают одновременно."""
+    """Фильтры по дате, статусу и клиенту работают одновременно.
+
+    Период проверяется здесь, в общей зависимости, — значит, и список, и плитки, и
+    сверка по реквизитам, и выгрузка отвечают одинаково. «С» позже «по» или год вне
+    1900–2100 — 422 с причиной, а не пустой список, который выглядит как «оплат нет».
+    """
+    check_period(date_from, date_to)
     return {
         "date_from": date_from,
         "date_to": date_to,

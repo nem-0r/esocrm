@@ -1,15 +1,17 @@
-import { Mail, Search, UserPlus, Users } from 'lucide-react'
+import { KeyRound, Mail, Search, UserPlus, Users } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 
 import type { StaffMember } from '@/entities/types'
-import { money } from '@/shared/lib/format'
+import { dateTimeFull, money } from '@/shared/lib/format'
+import { PHONE_HINT, PHONE_MAX_LENGTH, normalizePhone, phoneError } from '@/shared/lib/validation'
 import { useMe } from '@/shared/hooks/useAuth'
 import {
   Avatar,
   Badge,
   Button,
   Card,
+  ConfirmDialog,
   Dot,
   EmptyState,
   ErrorState,
@@ -31,6 +33,7 @@ import {
   ROLE_OPTIONS,
   WEEK_DAYS,
   errorMessage,
+  fieldErrors,
   presenceLabel,
   type WorkScheduleDraft,
 } from '@/features/profile/lib'
@@ -38,10 +41,12 @@ import {
   useAccounts,
   useInviteStaff,
   useResendInvite,
+  useResetStaffPassword,
   useStaff,
   useUpdateStaff,
   type StaffStatusFilter,
 } from '@/features/profile/queries'
+import { isWithoutAccount } from '@/features/profile/rules'
 
 type Filter = 'all' | StaffStatusFilter
 
@@ -157,7 +162,7 @@ export function StaffPage() {
                       <span className="flex items-center gap-1.5 text-micro text-ink-faint">
                         <Dot tone={member.online ? 'success' : 'neutral'} />
                         {presenceLabel(member.online, member.last_seen_at)}
-                        {member.accounts.length === 0 && ' · без аккаунта'}
+                        {isWithoutAccount(member) && ' · без аккаунта'}
                       </span>
                     </div>
                     <div className="flex shrink-0 flex-col items-end gap-0.5">
@@ -196,6 +201,7 @@ function InviteSheet({
   const [accountIds, setAccountIds] = useState<number[]>([])
   const [inviteUrl, setInviteUrl] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [fieldError, setFieldError] = useState<Record<string, string>>({})
 
   useEffect(() => {
     if (!open) {
@@ -203,22 +209,32 @@ function InviteSheet({
       setAccountIds([])
       setInviteUrl(null)
       setError(null)
+      setFieldError({})
     }
   }, [open])
 
   async function submit() {
     setError(null)
+    setFieldError({})
+    const phoneProblem = phoneError(form.phone)
+    if (phoneProblem) {
+      setFieldError({ phone: phoneProblem })
+      return
+    }
     try {
       const created = await invite.mutateAsync({
         full_name: form.full_name.trim(),
         email: form.email.trim(),
-        phone: form.phone.trim() || undefined,
+        phone: normalizePhone(form.phone) || undefined,
         role: (role ?? 'manager') as never,
         account_ids: accountIds,
       })
       setInviteUrl(created.invite_url)
     } catch (cause) {
-      setError(errorMessage(cause))
+      // Ошибка поля — под полем, остальное (почта занята и т. п.) — строкой внизу.
+      const byField = fieldErrors(cause)
+      if (Object.keys(byField).length > 0) setFieldError(byField)
+      else setError(errorMessage(cause))
     }
   }
 
@@ -271,10 +287,15 @@ function InviteSheet({
               onChange={(event) => setForm((p) => ({ ...p, email: event.target.value }))}
             />
           </Field>
-          <Field label="Телефон" hint="Необязательно">
+          <Field label="Телефон" error={fieldError.phone} hint={`Необязательно. ${PHONE_HINT}`}>
             <Input
+              type="tel"
+              inputMode="tel"
               value={form.phone}
               onChange={(event) => setForm((p) => ({ ...p, phone: event.target.value }))}
+              maxLength={PHONE_MAX_LENGTH}
+              invalid={Boolean(fieldError.phone)}
+              placeholder="+7 900 000-00-00"
             />
           </Field>
           <Field label="Роль">
@@ -313,7 +334,11 @@ function MemberSheet({ member, onClose }: { member: StaffMember | null; onClose:
   const me = useMe()
   const update = useUpdateStaff()
   const resend = useResendInvite()
+  const resetPassword = useResetStaffPassword()
   const accounts = useAccounts()
+  const [resetOpen, setResetOpen] = useState(false)
+  const [resetLink, setResetLink] = useState<{ link: string; expires_at: string } | null>(null)
+  const [fieldError, setFieldError] = useState<Record<string, string>>({})
   const [fullName, setFullName] = useState('')
   const [email, setEmail] = useState('')
   const [phone, setPhone] = useState('')
@@ -342,22 +367,46 @@ function MemberSheet({ member, onClose }: { member: StaffMember | null; onClose:
         end: member.schedule.end ?? EMPTY_SCHEDULE.end,
       })
       setInviteUrl(null)
+      setResetLink(null)
+      setResetOpen(false)
+      setFieldError({})
       setError(null)
     }
   }, [member])
 
   const isSelf = member?.id === me.id
 
+  async function issueReset() {
+    if (!member) return
+    setError(null)
+    try {
+      setResetLink(await resetPassword.mutateAsync(member.id))
+    } catch (cause) {
+      setError(errorMessage(cause))
+    } finally {
+      setResetOpen(false)
+    }
+  }
+
   async function save() {
     if (!member) return
     setError(null)
+    setFieldError({})
+    const phoneProblem = phoneError(phone)
+    if (phoneProblem) {
+      setFieldError({ phone: phoneProblem })
+      return
+    }
+    // Телефон уходит на сервер, только если его меняли: сохранённое раньше
+    // значение в старом формате не должно мешать поменять график или роль.
+    const phoneChanged = normalizePhone(phone) !== (member.phone ?? '')
     try {
       await update.mutateAsync({
         userId: member.id,
         patch: {
           full_name: fullName.trim(),
           email: email.trim(),
-          phone: phone.trim() || null,
+          ...(phoneChanged ? { phone: normalizePhone(phone) || null } : {}),
           role: (role ?? member.role) as never,
           is_active: active,
           account_ids: accountIds,
@@ -371,7 +420,9 @@ function MemberSheet({ member, onClose }: { member: StaffMember | null; onClose:
       })
       onClose()
     } catch (cause) {
-      setError(errorMessage(cause))
+      const byField = fieldErrors(cause)
+      if (Object.keys(byField).length > 0) setFieldError(byField)
+      else setError(errorMessage(cause))
     }
   }
 
@@ -442,8 +493,16 @@ function MemberSheet({ member, onClose }: { member: StaffMember | null; onClose:
             />
           </Field>
 
-          <Field label="Телефон" hint="Необязательно">
-            <Input value={phone} onChange={(event) => setPhone(event.target.value)} />
+          <Field label="Телефон" error={fieldError.phone} hint={`Необязательно. ${PHONE_HINT}`}>
+            <Input
+              type="tel"
+              inputMode="tel"
+              value={phone}
+              onChange={(event) => setPhone(event.target.value)}
+              maxLength={PHONE_MAX_LENGTH}
+              invalid={Boolean(fieldError.phone)}
+              placeholder="+7 900 000-00-00"
+            />
           </Field>
 
           <Field label="Роль">
@@ -582,6 +641,41 @@ function MemberSheet({ member, onClose }: { member: StaffMember | null; onClose:
               {inviteUrl && <InviteLink url={inviteUrl} />}
             </div>
           )}
+
+          {/* D-38: сотрудник забыл пароль. Писем нет, поэтому руководитель выдаёт
+              одноразовую ссылку и передаёт её лично. Себе и ещё не принявшему
+              приглашение — не показываем: сервер таким сброс не выдаёт (у первого
+              есть «Сменить пароль» в профиле, у второго — повторное приглашение). */}
+          {!isSelf && !member.invite_pending && member.is_active && (
+            <div className="flex flex-col gap-2">
+              <Button variant="secondary" size="sm" onClick={() => setResetOpen(true)}>
+                <KeyRound className="size-4" aria-hidden />
+                Сбросить пароль
+              </Button>
+              {resetLink && (
+                <InviteLink
+                  url={resetLink.link}
+                  label="Ссылка для нового пароля"
+                  note={`Передайте ссылку сотруднику лично, например в Telegram. Действует 24 часа (до ${dateTimeFull(resetLink.expires_at)}), работает один раз.`}
+                />
+              )}
+            </div>
+          )}
+
+          <ConfirmDialog
+            open={resetOpen}
+            onOpenChange={setResetOpen}
+            title={`Сбросить пароль: ${member.full_name}?`}
+            message="Сотрудник не сможет войти по старому паролю после того, как задаст новый, а на всех его устройствах вход будет завершён. Вы получите одноразовую ссылку — передайте её сотруднику лично."
+            confirmLabel="Выдать ссылку"
+            loading={resetPassword.isPending}
+            onConfirm={() => void issueReset()}
+          >
+            <p className="text-sm text-ink-muted">
+              Если ссылка уже выдавалась, прежняя перестанет работать. Пока сотрудник не задал
+              новый пароль, старый продолжает действовать.
+            </p>
+          </ConfirmDialog>
 
           {error && <InlineError message={error} />}
         </div>

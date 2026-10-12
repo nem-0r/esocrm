@@ -117,6 +117,11 @@ export function errorMessage(error: unknown, fallback = 'Не удалось в�
  */
 export function fieldErrors(error: unknown): Record<string, string> {
   if (!(error instanceof ApiError)) return {}
+  // Ошибка проверки данных (422) называет поле одной строкой — `details.field`,
+  // а текст лежит в самом сообщении. Без этого ошибка не показывалась нигде:
+  // подпись под полем не находилась, а общая строка считала её «полевой».
+  const field = error.details.field
+  if (typeof field === 'string' && field) return { [field]: error.message }
   const raw: unknown = error.details.fields ?? error.details
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return {}
   const result: Record<string, string> = {}

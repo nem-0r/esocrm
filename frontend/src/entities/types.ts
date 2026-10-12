@@ -187,12 +187,22 @@ export interface ClientCard extends ClientRow {
   }[]
 }
 
+/** Аккаунт в чате: связь нужна баннеру и полю ввода (D-37). Поля опциональны — старый сервер их не шлёт. */
+export interface ConversationAccount extends AccountRef {
+  status?: AccountStatus | null
+  status_reason?: string | null
+}
+
 export interface Conversation {
   id: number
   client: ClientRef
-  account: AccountRef
+  account: ConversationAccount
   last_message_at: string | null
   last_message_preview: string | null
+  /** Последнее сообщение для значка статуса в превью (D-36); статус только у исходящего. */
+  last_message_id?: number | null
+  last_message_direction?: Direction | null
+  last_message_status?: MessageStatus | null
   unread_count: number
   awaiting_reply_since: string | null
   awaiting_minutes: number | null
@@ -508,7 +518,14 @@ export interface ManagerStats {
 }
 
 export interface SearchResults {
-  clients: { id: number; name: string; phone: string | null; paid_amount: number }[]
+  clients: {
+    id: number
+    name: string
+    /** Старый сервер этого поля не присылает. */
+    tg_username?: string | null
+    phone: string | null
+    paid_amount: number
+  }[]
   deals: {
     id: number
     number: string
@@ -521,8 +538,9 @@ export interface SearchResults {
     conversation_id: number
     client_name: string
     account_title: string
-    snippet: string
-    message_id: number
+    /** Подсвеченный фрагмент сообщения или последнее сообщение; пусто у диалога без текста. */
+    snippet: string | null
+    message_id: number | null
     created_at: string
   }[]
   files: {
@@ -544,6 +562,11 @@ export interface SearchResults {
     online: boolean
     avatar_color: string
   }[]
+  /**
+   * Сколько всего найдено в каждой группе (больше 50 приходит как 51). Старый
+   * сервер поля не присылает — тогда считаем по тому, что пришло.
+   */
+  totals?: Partial<Record<'clients' | 'deals' | 'chats' | 'files' | 'managers', number>>
 }
 
 export interface AppNotification {

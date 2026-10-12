@@ -23,7 +23,9 @@ from app.models import (
     MessageStatus,
     Outbox,
     OutboxStatus,
+    TelegramAccount,
     User,
+    UserRole,
 )
 from app.models.enums import message_kind_for
 from app.realtime.events import conversation_audience, emit
@@ -37,7 +39,7 @@ from app.schemas.message import (
     MessageOut,
     attachment_url,
 )
-from app.services import conversation_service
+from app.services import account_link, conversation_service
 from app.services.audit import log_event
 
 DEFAULT_LIMIT = 40
@@ -215,6 +217,23 @@ async def mark_replied(
         conversation.responsible_since = now
 
 
+async def ensure_account_online(db: AsyncSession, account_id: int, user: User) -> None:
+    """Отказать сразу, если у аккаунта нет связи с Telegram (D-37).
+
+    Без этой проверки сообщение вставало в очередь, а шлюз по мёртвой сессии
+    проваливал его через ~35 секунд — менеджер успевал решить, что всё ушло.
+    Одним лёгким запросом по ключу; блокировок не берёт: если статус изменится
+    сразу после проверки, шлюз проведёт сообщение как неотправленное (SessionLost).
+    """
+    status = await db.scalar(
+        select(TelegramAccount.status).where(TelegramAccount.id == account_id)
+    )
+    if status is not None and not account_link.has_link(status):
+        raise account_link.no_link_error(
+            account_id, status, for_admin=user.role == UserRole.ADMIN
+        )
+
+
 async def send_outgoing(
     db: AsyncSession,
     *,
@@ -231,6 +250,9 @@ async def send_outgoing(
     должны попасть в базу вместе или не попасть вовсе.
     """
     now = datetime.now(UTC)
+    # Служебная заметка в Telegram не уходит, поэтому связь ей не нужна.
+    if not is_internal:
+        await ensure_account_online(db, conversation.account_id, author)
     # Уже занята вызывающим (post_message, пересылка) — повторный захват своей же
     # блокировки бесплатен; нужен для остальных путей (счета из сделок).
     await conversation_service.lock_for_write(db, conversation.id)
@@ -379,6 +401,8 @@ async def retry_message(
     outbox = await db.scalar(select(Outbox).where(Outbox.message_id == message.id))
     if outbox is None:
         raise Invalid("Сообщение не стоит в очереди отправки")
+    # Пока связи нет, повтор провалился бы сразу же снова: честнее сказать об этом.
+    await ensure_account_online(db, conversation.account_id, user)
 
     message.status = MessageStatus.QUEUED
     message.error_text = None

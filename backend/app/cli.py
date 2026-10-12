@@ -1,6 +1,6 @@
 """Команды, которые выполняет владелец сервера, а не пользователь интерфейса.
 
-Пока команда одна и она обязательная: создать первого руководителя. В чистой
+Команд две. Первая обязательная: создать первого руководителя. В чистой
 базе войти некому — все остальные учётные записи заводятся уже вошедшим
 руководителем, и без этой команды свежая установка остаётся запертой.
 
@@ -12,6 +12,16 @@
 Пароль спрашивается в диалоге и не остаётся ни в истории команд, ни в логах.
 Для автоматической установки его можно передать переменной окружения
 ADMIN_PASSWORD — тогда команда ничего не спрашивает.
+
+Вторая — для руководителя, который забыл пароль (D-38). Выдать ссылку ему
+некому, поэтому её выдаёт тот, у кого есть доступ к серверу:
+
+    docker compose -f docker-compose.prod.yml exec api \\
+        python -m app.cli reset-password --email you@company.ru
+
+Команда печатает одноразовую ссылку на новый пароль (24 часа, один раз); открыв
+её, человек задаёт пароль и входит, все его прежние сессии завершаются. Работает
+для любого активного сотрудника, принявшего приглашение, — не только руководителя.
 """
 
 import argparse
@@ -22,9 +32,12 @@ import sys
 
 from sqlalchemy import func, select
 
+from app.core.config import settings
 from app.core.db import SessionLocal
+from app.core.errors import AppError
 from app.models import User, UserRole
 from app.schemas.user import validate_email_format, validate_password_strength
+from app.services import user_service
 from app.services.auth_service import hash_password, normalize_email
 
 
@@ -80,6 +93,46 @@ async def create_admin(email: str, full_name: str, password: str | None, force: 
     return 0
 
 
+def _site_origin(explicit: str | None) -> str | None:
+    """Адрес сайта для полной ссылки: из `--site`, иначе первый боевой адрес из
+    CORS_ORIGINS (на проде там https://<домен>, localhost туда не пускают)."""
+    if explicit:
+        return explicit.rstrip("/")
+    origins = settings.cors_origin_list
+    real = [o for o in origins if "localhost" not in o and "127.0.0.1" not in o]
+    chosen = (real or origins or [None])[0]
+    return chosen.rstrip("/") if chosen else None
+
+
+async def reset_password(email: str, site: str | None) -> int:
+    email = normalize_email(validate_email_format(email))
+
+    async with SessionLocal() as db:
+        user = await db.scalar(select(User).where(User.email == email, User.deleted_at.is_(None)))
+        if user is None:
+            print(f"Учётной записи {email} нет.")
+            return 1
+        try:
+            # actor=None: выдаёт сервер, а не вошедший руководитель — поэтому можно
+            # и самому руководителю. В журнале это запись «системы» (via: cli).
+            issued = await user_service.issue_password_reset_for(db, user, actor=None)
+        except AppError as exc:
+            print(exc.message)
+            return 1
+
+    origin = _site_origin(site)
+    link = f"{origin}{issued.link}" if origin else issued.link
+    print(
+        f"Одноразовая ссылка для нового пароля — {user.full_name} <{email}>.\n"
+        "Действует 24 часа и срабатывает один раз; прежняя ссылка, если была, отключена.\n\n"
+        f"    {link}\n\n"
+        "Передайте её лично. После сохранения пароля все сессии сотрудника завершатся."
+    )
+    if not origin:
+        print("Адрес сайта не определён — добавьте его перед ссылкой или укажите --site.")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(prog="python -m app.cli", description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -93,7 +146,22 @@ def main() -> int:
         help="Создать, даже если руководители уже есть (восстановление доступа)",
     )
 
+    reset = commands.add_parser(
+        "reset-password", help="Выдать одноразовую ссылку на новый пароль (забыл пароль)"
+    )
+    reset.add_argument("--email", required=True)
+    reset.add_argument(
+        "--site",
+        help="Адрес сайта для полной ссылки (по умолчанию — из CORS_ORIGINS), например https://esocrm.com",
+    )
+
     args = parser.parse_args()
+    if args.command == "reset-password":
+        try:
+            return asyncio.run(reset_password(args.email, args.site))
+        except ValueError as exc:
+            print(str(exc))
+            return 2
     if args.command == "create-admin":
         try:
             return asyncio.run(

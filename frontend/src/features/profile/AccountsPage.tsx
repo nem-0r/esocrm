@@ -10,6 +10,7 @@ import {
 } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import { useEffect, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 
 import type { Account } from '@/entities/types'
 import { dateShort } from '@/shared/lib/format'
@@ -52,9 +53,15 @@ import {
   useSetAccountManagers,
   useStaff,
 } from '@/features/profile/queries'
+import { attentionFilterOn, withAttentionFilter } from '@/features/profile/rules'
 
 export function AccountsPage() {
-  const [onlyAttention, setOnlyAttention] = useState(false)
+  // Фильтр «требуют внимания» живёт в адресе (?attention=1): по ссылке из
+  // профиля он включён сразу, а переключатель его снимает и ставит обратно.
+  const [searchParams, setSearchParams] = useSearchParams()
+  const onlyAttention = attentionFilterOn(searchParams)
+  const setOnlyAttention = (on: boolean) =>
+    setSearchParams((prev) => withAttentionFilter(prev, on), { replace: true })
   const [connectOpen, setConnectOpen] = useState(false)
   const [managersFor, setManagersFor] = useState<Account | null>(null)
   const [reconnect, setReconnect] = useState<Account | null>(null)

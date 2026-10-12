@@ -10,7 +10,7 @@ from datetime import date, datetime, time
 
 from pydantic import BaseModel, Field
 
-from app.models.enums import FunnelStage
+from app.models.enums import AccountStatus, Direction, FunnelStage, MessageStatus
 from app.schemas.common import ApiModel
 
 
@@ -38,6 +38,11 @@ class AccountBrief(ApiModel):
     id: int
     title: str
     funnel_stage: FunnelStage
+    # Связь аккаунта нужна чату: при `error`/`disconnected`/`pending` отправка
+    # отклоняется (D-37), и экран должен сказать об этом заранее. Поля
+    # необязательные: старая сборка фронтенда их просто не читает.
+    status: AccountStatus | None = None
+    status_reason: str | None = None
 
 
 class UserBrief(ApiModel):
@@ -53,6 +58,12 @@ class ConversationRow(ApiModel):
     account: AccountBrief
     last_message_at: datetime | None = None
     last_message_preview: str | None = None
+    # Последнее сообщение для значка статуса в превью (D-36): id, направление и
+    # статус доставки. Статус есть только у исходящего клиенту — у входящего и у
+    # служебной заметки показывать нечего, там пусто.
+    last_message_id: int | None = None
+    last_message_direction: Direction | None = None
+    last_message_status: MessageStatus | None = None
     unread_count: int = 0
     awaiting_reply_since: datetime | None = None
     # Пусто, когда ответ уже дан: нечего отсчитывать.

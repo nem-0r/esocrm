@@ -135,6 +135,8 @@ function DealPane({ dealId }: { dealId: number }) {
   if (!card.data) return <EmptyState title="Оплата не найдена" />
 
   const deal = card.data
+  // Срок показываем по статусу: у оплаченной и отменённой дата остаётся в сделке, но «истекла» там ни к чему.
+  const expiry = expiryLabel(deal.expires_at, deal.status)
 
   const editNeedsRequisite = deal.payment_method === 'requisites'
   const editActiveRequisites = (requisites.data ?? []).filter((r) => r.is_active)
@@ -274,9 +276,7 @@ function DealPane({ dealId }: { dealId: number }) {
                 </button>
               </div>
             )}
-            {expiryLabel(deal.expires_at) && (
-              <p className="text-xs text-ink-faint">{expiryLabel(deal.expires_at)}</p>
-            )}
+            {expiry && <p className="text-xs text-ink-faint">{expiry}</p>}
             {deal.status === 'cancelled' && deal.cancel_reason && (
               <p className="text-xs text-danger">Причина отмены: {deal.cancel_reason}</p>
             )}
@@ -364,6 +364,7 @@ function DealPane({ dealId }: { dealId: number }) {
                           name: item.name,
                           amount: amountInput(item.amount),
                           serviceId: item.service_id ?? null,
+                          removed: false,
                         }))
                       : [newItemDraft()],
                   )
